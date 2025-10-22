@@ -2,8 +2,13 @@
 
 import os
 from typing import Optional, Dict, Any
-from pydantic import BaseSettings, Field
-from pydantic_settings import SettingsConfigDict
+from pathlib import Path
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Get the path to the agents directory where .env file is located
+AGENTS_DIR = Path(__file__).parent.parent
+ENV_FILE_PATH = AGENTS_DIR / ".env"
 
 
 class BlockchainConfig(BaseSettings):
@@ -48,7 +53,7 @@ class MarketplaceConfig(BaseSettings):
     """Main configuration class combining all settings."""
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE_PATH),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore"
@@ -69,6 +74,11 @@ class MarketplaceConfig(BaseSettings):
     # API configuration
     api_host: str = Field(default="0.0.0.0", description="API host")
     api_port: int = Field(default=8000, description="API port")
+    
+    # Pinata IPFS Storage
+    pinata_api_key: Optional[str] = Field(default=None, description="Pinata API key")
+    pinata_api_secret: Optional[str] = Field(default=None, description="Pinata API secret")
+    pinata_jwt: Optional[str] = Field(default=None, description="Pinata JWT token")
     
     @classmethod
     def from_env(cls) -> "MarketplaceConfig":

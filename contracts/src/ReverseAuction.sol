@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+
 /**
  * @title ReverseAuction
  * @dev A reverse auction contract for AI services where buyers preselect eligible providers
  * @author Agentic Marketplace
  */
-contract ReverseAuction {
+contract ReverseAuction is ReentrancyGuard {
+    using SafeERC20 for IERC20;
     
     // ============ STRUCTS ============
     
@@ -16,7 +21,7 @@ contract ReverseAuction {
     struct Auction {
         uint256 id;                     // Unique auction identifier
         address buyer;                  // Address of the service buyer
-        string serviceDescription;      // Description of the AI service needed
+        string serviceDescriptionCid;   // IPFS CID containing service description and requirements
         uint256 maxPrice;              // Maximum price buyer is willing to pay
         uint256 duration;              // Auction duration in seconds
         uint256 startTime;             // When the auction started
@@ -35,10 +40,12 @@ contract ReverseAuction {
         address provider;             // Address of the bidding provider
         uint256 amount;              // Bid amount
         uint256 timestamp;           // When the bid was placed
-        string proposal;             // Optional proposal/details from provider
     }
     
     // ============ STATE VARIABLES ============
+    
+    /// @dev USDC token contract
+    IERC20 public immutable USDC_TOKEN;
     
     /// @dev Counter for generating unique auction IDs
     uint256 private _auctionIdCounter;
@@ -61,7 +68,7 @@ contract ReverseAuction {
     event AuctionCreated(
         uint256 indexed auctionId,
         address indexed buyer,
-        string serviceDescription,
+        string serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
         address[] eligibleProviders
@@ -103,11 +110,18 @@ contract ReverseAuction {
     error BidTooHigh();
     error AuctionStillActive();
     error NotAuthorized();
+    error InvalidServiceCid();
     error ServiceAlreadyCompleted();
     
     // ============ CONSTRUCTOR ============
     
-    constructor() {
+    /**
+     * @dev Constructor sets the USDC token address
+     * @param usdcTokenAddress Address of the USDC token contract
+     */
+    constructor(address usdcTokenAddress) {
+        if (usdcTokenAddress == address(0)) revert InvalidMaxPrice(); // Reusing error for zero address
+        USDC_TOKEN = IERC20(usdcTokenAddress);
         _auctionIdCounter = 1; // Start auction IDs from 1
     }
     
@@ -115,32 +129,39 @@ contract ReverseAuction {
     
     /**
      * @dev Creates a new reverse auction for an AI service
-     * @param serviceDescription Description of the AI service needed
-     * @param maxPrice Maximum price buyer is willing to pay (also escrow amount)
+     * @param serviceDescriptionCid IPFS CID containing service description and requirements
+     * @param maxPrice Maximum price buyer is willing to pay (also escrow amount) in USDC
      * @param duration Auction duration in seconds
      * @param eligibleProviders Array of preselected service provider addresses
      * @return auctionId The ID of the created auction
      */
     function createAuction(
-        string calldata serviceDescription,
+        string calldata serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
         address[] calldata eligibleProviders
-    ) external payable returns (uint256 auctionId) {
+    ) external nonReentrant returns (uint256 auctionId) {
         // Validation
         if (duration == 0) revert InvalidAuctionDuration();
         if (maxPrice == 0) revert InvalidMaxPrice();
         if (eligibleProviders.length == 0) revert NoEligibleProviders();
-        if (msg.value != maxPrice) revert InsufficientEscrow();
+        if (bytes(serviceDescriptionCid).length == 0) revert InvalidServiceCid();
+        
+        // Check USDC allowance and balance
+        if (USDC_TOKEN.allowance(msg.sender, address(this)) < maxPrice) revert InsufficientEscrow();
+        if (USDC_TOKEN.balanceOf(msg.sender) < maxPrice) revert InsufficientEscrow();
         
         // Generate auction ID
         auctionId = _auctionIdCounter++;
+        
+        // Transfer USDC to escrow
+        USDC_TOKEN.safeTransferFrom(msg.sender, address(this), maxPrice);
         
         // Create auction
         Auction storage auction = auctions[auctionId];
         auction.id = auctionId;
         auction.buyer = msg.sender;
-        auction.serviceDescription = serviceDescription;
+        auction.serviceDescriptionCid = serviceDescriptionCid;
         auction.maxPrice = maxPrice;
         auction.duration = duration;
         auction.startTime = block.timestamp;
@@ -149,7 +170,7 @@ contract ReverseAuction {
         auction.winningBid = 0;
         auction.isActive = true;
         auction.isCompleted = false;
-        auction.escrowAmount = msg.value;
+        auction.escrowAmount = maxPrice;
         
         // Set up provider eligibility mapping
         for (uint256 i = 0; i < eligibleProviders.length; i++) {
@@ -162,7 +183,7 @@ contract ReverseAuction {
         emit AuctionCreated(
             auctionId,
             msg.sender,
-            serviceDescription,
+            serviceDescriptionCid,
             maxPrice,
             duration,
             eligibleProviders
@@ -173,12 +194,10 @@ contract ReverseAuction {
      * @dev Places a bid in a reverse auction
      * @param auctionId The auction ID to bid on
      * @param bidAmount The bid amount (must be lower than current lowest bid)
-     * @param proposal Optional proposal/details from the provider
      */
     function placeBid(
         uint256 auctionId,
-        uint256 bidAmount,
-        string calldata proposal
+        uint256 bidAmount
     ) external {
         Auction storage auction = auctions[auctionId];
         
@@ -194,8 +213,7 @@ contract ReverseAuction {
         Bid memory newBid = Bid({
             provider: msg.sender,
             amount: bidAmount,
-            timestamp: block.timestamp,
-            proposal: proposal
+            timestamp: block.timestamp
         });
         
         auctionBids[auctionId].push(newBid);
@@ -244,7 +262,7 @@ contract ReverseAuction {
      * @param auctionId The auction ID
      * @dev Can only be called by the buyer to confirm service completion
      */
-    function completeService(uint256 auctionId) external {
+    function completeService(uint256 auctionId) external nonReentrant {
         Auction storage auction = auctions[auctionId];
         
         // Validation
@@ -269,13 +287,11 @@ contract ReverseAuction {
         auction.escrowAmount = 0;
         
         // Transfer winning bid to service provider
-        (bool successProvider, ) = auction.winningProvider.call{value: winningBid}("");
-        require(successProvider, "Payment to provider failed");
+        USDC_TOKEN.safeTransfer(auction.winningProvider, winningBid);
         
         // Refund excess to buyer if any
         if (refundAmount > 0) {
-            (bool successBuyer, ) = auction.buyer.call{value: refundAmount}("");
-            require(successBuyer, "Refund to buyer failed");
+            USDC_TOKEN.safeTransfer(auction.buyer, refundAmount);
         }
         
         emit ServiceCompleted(auctionId, auction.winningProvider);
@@ -286,7 +302,7 @@ contract ReverseAuction {
      * @dev Allows buyer to get refund if auction ended with no bids
      * @param auctionId The auction ID
      */
-    function refundBuyer(uint256 auctionId) external {
+    function refundBuyer(uint256 auctionId) external nonReentrant {
         Auction storage auction = auctions[auctionId];
         
         // Validation
@@ -302,8 +318,7 @@ contract ReverseAuction {
         auction.isCompleted = true; // Mark as completed to prevent re-entry
         
         // Transfer refund to buyer
-        (bool success, ) = auction.buyer.call{value: refundAmount}("");
-        require(success, "Refund failed");
+        USDC_TOKEN.safeTransfer(auction.buyer, refundAmount);
         
         emit FundsReleased(auctionId, auction.buyer, refundAmount);
     }
