@@ -31,6 +31,7 @@ contract ReverseAuction is ReentrancyGuard {
         bool isActive;                // Whether auction is currently active
         bool isCompleted;             // Whether service has been completed
         uint256 escrowAmount;         // Amount held in escrow
+        uint256 reputationWeight;     // Weight for reputation (0-100, represents 0.00-1.00)
     }
     
     /**
@@ -40,6 +41,8 @@ contract ReverseAuction is ReentrancyGuard {
         address provider;             // Address of the bidding provider
         uint256 amount;              // Bid amount
         uint256 timestamp;           // When the bid was placed
+        uint256 reputation;          // Provider's reputation score (0-100)
+        uint256 score;               // Calculated weighted score (0-10000 for precision)
     }
     
     // ============ STATE VARIABLES ============
@@ -63,6 +66,12 @@ contract ReverseAuction is ReentrancyGuard {
     /// @dev Mapping to track the lowest bid for each auction
     mapping(uint256 => uint256) public lowestBid;
     
+    /// @dev Mapping to track the highest score for each auction
+    mapping(uint256 => uint256) public highestScore;
+    
+    /// @dev Precision constant for score calculations (2 decimal places)
+    uint256 private constant SCORE_PRECISION = 100;
+    
     // ============ EVENTS ============
     
     event AuctionCreated(
@@ -71,13 +80,16 @@ contract ReverseAuction is ReentrancyGuard {
         string serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
-        address[] eligibleProviders
+        address[] eligibleProviders,
+        uint256 reputationWeight
     );
     
     event BidPlaced(
         uint256 indexed auctionId,
         address indexed provider,
         uint256 bidAmount,
+        uint256 reputation,
+        uint256 score,
         uint256 timestamp
     );
     
@@ -112,6 +124,8 @@ contract ReverseAuction is ReentrancyGuard {
     error NotAuthorized();
     error InvalidServiceCid();
     error ServiceAlreadyCompleted();
+    error InvalidReputationWeight();
+    error BidScoreNotCompetitive();
     
     // ============ CONSTRUCTOR ============
     
@@ -120,7 +134,7 @@ contract ReverseAuction is ReentrancyGuard {
      * @param usdcTokenAddress Address of the USDC token contract
      */
     constructor(address usdcTokenAddress) {
-        if (usdcTokenAddress == address(0)) revert InvalidMaxPrice(); // Reusing error for zero address
+        if (usdcTokenAddress == address(0)) revert ();
         USDC_TOKEN = IERC20(usdcTokenAddress);
         _auctionIdCounter = 1; // Start auction IDs from 1
     }
@@ -133,19 +147,22 @@ contract ReverseAuction is ReentrancyGuard {
      * @param maxPrice Maximum price buyer is willing to pay (also escrow amount) in USDC
      * @param duration Auction duration in seconds
      * @param eligibleProviders Array of preselected service provider addresses
+     * @param reputationWeight Weight for reputation in scoring (0-100, represents 0.00-1.00)
      * @return auctionId The ID of the created auction
      */
     function createAuction(
         string calldata serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
-        address[] calldata eligibleProviders
+        address[] calldata eligibleProviders,
+        uint256 reputationWeight
     ) external nonReentrant returns (uint256 auctionId) {
         // Validation
         if (duration == 0) revert InvalidAuctionDuration();
         if (maxPrice == 0) revert InvalidMaxPrice();
         if (eligibleProviders.length == 0) revert NoEligibleProviders();
         if (bytes(serviceDescriptionCid).length == 0) revert InvalidServiceCid();
+        if (reputationWeight > 100) revert InvalidReputationWeight();
         
         // Check USDC allowance and balance
         if (USDC_TOKEN.allowance(msg.sender, address(this)) < maxPrice) revert InsufficientEscrow();
@@ -171,6 +188,7 @@ contract ReverseAuction is ReentrancyGuard {
         auction.isActive = true;
         auction.isCompleted = false;
         auction.escrowAmount = maxPrice;
+        auction.reputationWeight = reputationWeight;
         
         // Set up provider eligibility mapping
         for (uint256 i = 0; i < eligibleProviders.length; i++) {
@@ -180,24 +198,30 @@ contract ReverseAuction is ReentrancyGuard {
         // Initialize lowest bid to max price
         lowestBid[auctionId] = maxPrice;
         
+        // Initialize highest score to 0
+        highestScore[auctionId] = 0;
+        
         emit AuctionCreated(
             auctionId,
             msg.sender,
             serviceDescriptionCid,
             maxPrice,
             duration,
-            eligibleProviders
+            eligibleProviders,
+            reputationWeight
         );
     }
     
     /**
      * @dev Places a bid in a reverse auction
      * @param auctionId The auction ID to bid on
-     * @param bidAmount The bid amount (must be lower than current lowest bid)
+     * @param bidAmount The bid amount
+     * @param reputation The provider's reputation score (0-100)
      */
     function placeBid(
         uint256 auctionId,
-        uint256 bidAmount
+        uint256 bidAmount,
+        uint256 reputation
     ) external {
         Auction storage auction = auctions[auctionId];
         
@@ -206,26 +230,38 @@ contract ReverseAuction is ReentrancyGuard {
         if (!auction.isActive) revert AuctionNotActive();
         if (block.timestamp > auction.startTime + auction.duration) revert AuctionNotActive();
         if (!isEligibleProvider[auctionId][msg.sender]) revert ProviderNotEligible();
-        if (bidAmount >= lowestBid[auctionId]) revert BidTooHigh();
         if (bidAmount == 0) revert InvalidMaxPrice(); // Reusing error for zero bid
+        if (bidAmount > auction.maxPrice) revert BidTooHigh();
+        
+        // Calculate weighted score for this bid
+        uint256 score = _calculateScore(reputation, bidAmount, auction.maxPrice, auction.reputationWeight);
+        
+        // Check if this bid's score is better than the current highest score
+        // Higher score is better
+        if (auction.winningProvider != address(0) && score <= highestScore[auctionId]) {
+            revert BidScoreNotCompetitive();
+        }
         
         // Create and store the bid
         Bid memory newBid = Bid({
             provider: msg.sender,
             amount: bidAmount,
-            timestamp: block.timestamp
+            timestamp: block.timestamp,
+            reputation: reputation,
+            score: score
         });
         
         auctionBids[auctionId].push(newBid);
         
-        // Update lowest bid tracking
+        // Update tracking
         lowestBid[auctionId] = bidAmount;
+        highestScore[auctionId] = score;
         
         // Update auction state with current best bid
         auction.winningProvider = msg.sender;
         auction.winningBid = bidAmount;
         
-        emit BidPlaced(auctionId, msg.sender, bidAmount, block.timestamp);
+        emit BidPlaced(auctionId, msg.sender, bidAmount, reputation, score, block.timestamp);
     }
     
     /**
@@ -323,6 +359,48 @@ contract ReverseAuction is ReentrancyGuard {
         emit FundsReleased(auctionId, auction.buyer, refundAmount);
     }
     
+    // ============ INTERNAL FUNCTIONS ============
+    
+    /**
+     * @dev Calculates the weighted score for a bid
+     * @param reputation Provider's reputation score (0-100)
+     * @param bidAmount The bid amount
+     * @param maxPrice Maximum price from auction
+     * @param reputationWeight Weight for reputation (0-100, represents 0.00-1.00)
+     * @return score The calculated weighted score (0-10000)
+     * 
+     * Formula: score = w * normalize(reputation) + (1 - w) * normalize(1 / bidAmount)
+     * where:
+     *   - w = reputationWeight / 100
+     *   - normalize(reputation) = reputation / 100
+     *   - normalize(1 / bidAmount) = 1 - (bidAmount / maxPrice)
+     * 
+     * Higher score is better
+     */
+    function _calculateScore(
+        uint256 reputation,
+        uint256 bidAmount,
+        uint256 maxPrice,
+        uint256 reputationWeight
+    ) internal pure returns (uint256 score) {
+        // Normalize reputation: reputation is already 0-100, so we just use it
+        // For precision, we multiply by SCORE_PRECISION (100)
+        uint256 normalizedReputation = reputation; // Already 0-100
+        
+        // Normalize bid amount (inverted so lower price = higher score)
+        // Formula: (1 - bidAmount/maxPrice) * 100
+        // To avoid division precision issues: (maxPrice - bidAmount) * 100 / maxPrice
+        uint256 normalizedBidScore = ((maxPrice - bidAmount) * SCORE_PRECISION) / maxPrice;
+        
+        // Calculate weighted score
+        // score = w * normalizedReputation + (100 - w) * normalizedBidScore
+        // All values are already scaled by 100, so result is in range 0-10000
+        score = (reputationWeight * normalizedReputation + 
+                (SCORE_PRECISION - reputationWeight) * normalizedBidScore) / SCORE_PRECISION;
+        
+        return score;
+    }
+    
     // ============ VIEW FUNCTIONS ============
     
     /**
@@ -356,6 +434,16 @@ contract ReverseAuction is ReentrancyGuard {
     function getCurrentLowestBid(uint256 auctionId) external view returns (uint256 currentLowestBid) {
         if (auctions[auctionId].buyer == address(0)) revert AuctionNotFound();
         return lowestBid[auctionId];
+    }
+    
+    /**
+     * @dev Returns the current highest score for an auction
+     * @param auctionId The auction ID
+     * @return currentHighestScore The current highest weighted score
+     */
+    function getCurrentHighestScore(uint256 auctionId) external view returns (uint256 currentHighestScore) {
+        if (auctions[auctionId].buyer == address(0)) revert AuctionNotFound();
+        return highestScore[auctionId];
     }
     
     /**
