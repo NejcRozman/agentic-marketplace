@@ -4,10 +4,12 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
+import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
 
 /**
  * @title ReverseAuction
- * @dev A reverse auction contract for AI services where buyers preselect eligible providers
+ * @dev A reverse auction contract for AI services integrated with ERC-8004 agent reputation
  * @author Agentic Marketplace
  */
 contract ReverseAuction is ReentrancyGuard {
@@ -25,8 +27,8 @@ contract ReverseAuction is ReentrancyGuard {
         uint256 maxPrice;              // Maximum price buyer is willing to pay
         uint256 duration;              // Auction duration in seconds
         uint256 startTime;             // When the auction started
-        address[] eligibleProviders;   // Preselected service providers
-        address winningProvider;       // Winner of the auction (if any)
+        uint256[] eligibleAgentIds;    // Preselected agent IDs from ERC-8004 Identity Registry
+        uint256 winningAgentId;        // ID of the winning agent
         uint256 winningBid;           // Winning bid amount
         bool isActive;                // Whether auction is currently active
         bool isCompleted;             // Whether service has been completed
@@ -39,9 +41,10 @@ contract ReverseAuction is ReentrancyGuard {
      */
     struct Bid {
         address provider;             // Address of the bidding provider
+        uint256 agentId;             // ID of the agent used for bidding
         uint256 amount;              // Bid amount
         uint256 timestamp;           // When the bid was placed
-        uint256 reputation;          // Provider's reputation score (0-100)
+        uint256 reputation;          // Agent's reputation score from ERC-8004 (0-100)
         uint256 score;               // Calculated weighted score (0-10000 for precision)
     }
     
@@ -49,6 +52,12 @@ contract ReverseAuction is ReentrancyGuard {
     
     /// @dev USDC token contract
     IERC20 public immutable USDC_TOKEN;
+    
+    /// @dev ERC-8004 Identity Registry for agent ownership
+    IIdentityRegistry public immutable IDENTITY_REGISTRY;
+    
+    /// @dev ERC-8004 Reputation Registry for agent reputation
+    IReputationRegistry public immutable REPUTATION_REGISTRY;
     
     /// @dev Counter for generating unique auction IDs
     uint256 private _auctionIdCounter;
@@ -59,9 +68,9 @@ contract ReverseAuction is ReentrancyGuard {
     /// @dev Mapping from auction ID to array of bids
     mapping(uint256 => Bid[]) public auctionBids;
     
-    /// @dev Mapping to check if a provider is eligible for a specific auction
-    /// auctionId => provider => isEligible
-    mapping(uint256 => mapping(address => bool)) public isEligibleProvider;
+    /// @dev Mapping to check if an agent is eligible for a specific auction
+    /// auctionId => agentId => isEligible
+    mapping(uint256 => mapping(uint256 => bool)) public isEligibleAgent;
     
     /// @dev Mapping to track the lowest bid for each auction
     mapping(uint256 => uint256) public lowestBid;
@@ -80,13 +89,14 @@ contract ReverseAuction is ReentrancyGuard {
         string serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
-        address[] eligibleProviders,
+        uint256[] eligibleAgentIds,
         uint256 reputationWeight
     );
     
     event BidPlaced(
         uint256 indexed auctionId,
         address indexed provider,
+        uint256 indexed agentId,
         uint256 bidAmount,
         uint256 reputation,
         uint256 score,
@@ -95,17 +105,19 @@ contract ReverseAuction is ReentrancyGuard {
     
     event AuctionEnded(
         uint256 indexed auctionId,
-        address indexed winner,
+        uint256 indexed winningAgentId,
         uint256 winningBid
     );
     
     event ServiceCompleted(
         uint256 indexed auctionId,
+        uint256 indexed agentId,
         address indexed provider
     );
     
     event FundsReleased(
         uint256 indexed auctionId,
+        uint256 indexed agentId,
         address indexed provider,
         uint256 amount
     );
@@ -114,11 +126,13 @@ contract ReverseAuction is ReentrancyGuard {
     
     error InvalidAuctionDuration();
     error InvalidMaxPrice();
-    error NoEligibleProviders();
+    error NoEligibleAgents();
     error InsufficientEscrow();
     error AuctionNotFound();
     error AuctionNotActive();
-    error ProviderNotEligible();
+    error AgentNotEligible();
+    error NotAgentOwner();
+    error AgentNotFound();
     error BidTooHigh();
     error AuctionStillActive();
     error NotAuthorized();
@@ -130,12 +144,23 @@ contract ReverseAuction is ReentrancyGuard {
     // ============ CONSTRUCTOR ============
     
     /**
-     * @dev Constructor sets the USDC token address
+     * @dev Constructor sets the USDC token and ERC-8004 registry addresses
      * @param usdcTokenAddress Address of the USDC token contract
+     * @param identityRegistry Address of the ERC-8004 Identity Registry
+     * @param reputationRegistry Address of the ERC-8004 Reputation Registry
      */
-    constructor(address usdcTokenAddress) {
+    constructor(
+        address usdcTokenAddress,
+        address identityRegistry,
+        address reputationRegistry
+    ) {
         if (usdcTokenAddress == address(0)) revert ();
+        if (identityRegistry == address(0)) revert ();
+        if (reputationRegistry == address(0)) revert ();
+        
         USDC_TOKEN = IERC20(usdcTokenAddress);
+        IDENTITY_REGISTRY = IIdentityRegistry(identityRegistry);
+        REPUTATION_REGISTRY = IReputationRegistry(reputationRegistry);
         _auctionIdCounter = 1; // Start auction IDs from 1
     }
     
@@ -146,7 +171,7 @@ contract ReverseAuction is ReentrancyGuard {
      * @param serviceDescriptionCid IPFS CID containing service description and requirements
      * @param maxPrice Maximum price buyer is willing to pay (also escrow amount) in USDC
      * @param duration Auction duration in seconds
-     * @param eligibleProviders Array of preselected service provider addresses
+     * @param eligibleAgentIds Array of preselected agent IDs from ERC-8004 Identity Registry
      * @param reputationWeight Weight for reputation in scoring (0-100, represents 0.00-1.00)
      * @return auctionId The ID of the created auction
      */
@@ -154,15 +179,20 @@ contract ReverseAuction is ReentrancyGuard {
         string calldata serviceDescriptionCid,
         uint256 maxPrice,
         uint256 duration,
-        address[] calldata eligibleProviders,
+        uint256[] calldata eligibleAgentIds,
         uint256 reputationWeight
     ) external nonReentrant returns (uint256 auctionId) {
         // Validation
         if (duration == 0) revert InvalidAuctionDuration();
         if (maxPrice == 0) revert InvalidMaxPrice();
-        if (eligibleProviders.length == 0) revert NoEligibleProviders();
+        if (eligibleAgentIds.length == 0) revert NoEligibleAgents();
         if (bytes(serviceDescriptionCid).length == 0) revert InvalidServiceCid();
         if (reputationWeight > 100) revert InvalidReputationWeight();
+        
+        // Validate all agents exist in Identity Registry
+        for (uint256 i = 0; i < eligibleAgentIds.length; i++) {
+            if (!_agentExists(eligibleAgentIds[i])) revert AgentNotFound();
+        }
         
         // Check USDC allowance and balance
         if (USDC_TOKEN.allowance(msg.sender, address(this)) < maxPrice) revert InsufficientEscrow();
@@ -182,17 +212,17 @@ contract ReverseAuction is ReentrancyGuard {
         auction.maxPrice = maxPrice;
         auction.duration = duration;
         auction.startTime = block.timestamp;
-        auction.eligibleProviders = eligibleProviders;
-        auction.winningProvider = address(0);
+        auction.eligibleAgentIds = eligibleAgentIds;
+        auction.winningAgentId = 0;
         auction.winningBid = 0;
         auction.isActive = true;
         auction.isCompleted = false;
         auction.escrowAmount = maxPrice;
         auction.reputationWeight = reputationWeight;
         
-        // Set up provider eligibility mapping
-        for (uint256 i = 0; i < eligibleProviders.length; i++) {
-            isEligibleProvider[auctionId][eligibleProviders[i]] = true;
+        // Set up agent eligibility mapping for O(1) lookup
+        for (uint256 i = 0; i < eligibleAgentIds.length; i++) {
+            isEligibleAgent[auctionId][eligibleAgentIds[i]] = true;
         }
         
         // Initialize lowest bid to max price
@@ -207,7 +237,7 @@ contract ReverseAuction is ReentrancyGuard {
             serviceDescriptionCid,
             maxPrice,
             duration,
-            eligibleProviders,
+            eligibleAgentIds,
             reputationWeight
         );
     }
@@ -216,12 +246,12 @@ contract ReverseAuction is ReentrancyGuard {
      * @dev Places a bid in a reverse auction
      * @param auctionId The auction ID to bid on
      * @param bidAmount The bid amount
-     * @param reputation The provider's reputation score (0-100)
+     * @param agentId The agent ID to bid with
      */
     function placeBid(
         uint256 auctionId,
         uint256 bidAmount,
-        uint256 reputation
+        uint256 agentId
     ) external {
         Auction storage auction = auctions[auctionId];
         
@@ -229,22 +259,38 @@ contract ReverseAuction is ReentrancyGuard {
         if (auction.buyer == address(0)) revert AuctionNotFound();
         if (!auction.isActive) revert AuctionNotActive();
         if (block.timestamp > auction.startTime + auction.duration) revert AuctionNotActive();
-        if (!isEligibleProvider[auctionId][msg.sender]) revert ProviderNotEligible();
+        if (!isEligibleAgent[auctionId][agentId]) revert AgentNotEligible();
         if (bidAmount == 0) revert InvalidMaxPrice(); // Reusing error for zero bid
         if (bidAmount > auction.maxPrice) revert BidTooHigh();
+        
+        // Check caller owns the agent
+        if (IDENTITY_REGISTRY.ownerOf(agentId) != msg.sender) revert NotAgentOwner();
+        
+        // Fetch reputation from ERC-8004 Reputation Registry
+        address[] memory emptyAddresses = new address[](0);
+        (uint256 feedbackCount, uint256 averageScore) = REPUTATION_REGISTRY.getSummary(
+            agentId,
+            emptyAddresses,
+            0,  // tag1 - no filter
+            0   // tag2 - no filter
+        );
+        
+        // Use default reputation of 50 if agent has no feedback
+        uint256 reputation = feedbackCount > 0 ? averageScore : 50;
         
         // Calculate weighted score for this bid
         uint256 score = _calculateScore(reputation, bidAmount, auction.maxPrice, auction.reputationWeight);
         
         // Check if this bid's score is better than the current highest score
         // Higher score is better
-        if (auction.winningProvider != address(0) && score <= highestScore[auctionId]) {
+        if (auction.winningAgentId != 0 && score <= highestScore[auctionId]) {
             revert BidScoreNotCompetitive();
         }
         
         // Create and store the bid
         Bid memory newBid = Bid({
             provider: msg.sender,
+            agentId: agentId,
             amount: bidAmount,
             timestamp: block.timestamp,
             reputation: reputation,
@@ -258,10 +304,10 @@ contract ReverseAuction is ReentrancyGuard {
         highestScore[auctionId] = score;
         
         // Update auction state with current best bid
-        auction.winningProvider = msg.sender;
+        auction.winningAgentId = agentId;
         auction.winningBid = bidAmount;
         
-        emit BidPlaced(auctionId, msg.sender, bidAmount, reputation, score, block.timestamp);
+        emit BidPlaced(auctionId, msg.sender, agentId, bidAmount, reputation, score, block.timestamp);
     }
     
     /**
@@ -286,11 +332,11 @@ contract ReverseAuction is ReentrancyGuard {
         auction.isActive = false;
         
         // If there are bids, the current winner is already set
-        // If no bids, winningProvider remains address(0)
-        address winner = auction.winningProvider;
+        // If no bids, winningAgentId remains 0
+        uint256 winningAgent = auction.winningAgentId;
         uint256 winningAmount = auction.winningBid;
         
-        emit AuctionEnded(auctionId, winner, winningAmount);
+        emit AuctionEnded(auctionId, winningAgent, winningAmount);
     }
     
     /**
@@ -306,7 +352,7 @@ contract ReverseAuction is ReentrancyGuard {
         if (msg.sender != auction.buyer) revert NotAuthorized();
         if (auction.isActive) revert AuctionStillActive();
         if (auction.isCompleted) revert ServiceAlreadyCompleted();
-        if (auction.winningProvider == address(0)) {
+        if (auction.winningAgentId == 0) {
             // No winner - this will be handled by refund function
             revert NotAuthorized();
         }
@@ -322,16 +368,19 @@ contract ReverseAuction is ReentrancyGuard {
         // Reset escrow amount
         auction.escrowAmount = 0;
         
-        // Transfer winning bid to service provider
-        USDC_TOKEN.safeTransfer(auction.winningProvider, winningBid);
+        // Get current owner of the winning agent (handles transfers during auction!)
+        address currentOwner = IDENTITY_REGISTRY.ownerOf(auction.winningAgentId);
+        
+        // Transfer winning bid to current agent owner
+        USDC_TOKEN.safeTransfer(currentOwner, winningBid);
         
         // Refund excess to buyer if any
         if (refundAmount > 0) {
             USDC_TOKEN.safeTransfer(auction.buyer, refundAmount);
         }
         
-        emit ServiceCompleted(auctionId, auction.winningProvider);
-        emit FundsReleased(auctionId, auction.winningProvider, winningBid);
+        emit ServiceCompleted(auctionId, auction.winningAgentId, currentOwner);
+        emit FundsReleased(auctionId, auction.winningAgentId, currentOwner, winningBid);
     }
     
     /**
@@ -346,7 +395,7 @@ contract ReverseAuction is ReentrancyGuard {
         if (msg.sender != auction.buyer) revert NotAuthorized();
         if (auction.isActive) revert AuctionStillActive();
         if (auction.isCompleted) revert ServiceAlreadyCompleted();
-        if (auction.winningProvider != address(0)) revert NotAuthorized(); // Has winner
+        if (auction.winningAgentId != 0) revert NotAuthorized(); // Has winner
         if (auction.escrowAmount == 0) revert InsufficientEscrow(); // Already refunded
         
         uint256 refundAmount = auction.escrowAmount;
@@ -356,10 +405,23 @@ contract ReverseAuction is ReentrancyGuard {
         // Transfer refund to buyer
         USDC_TOKEN.safeTransfer(auction.buyer, refundAmount);
         
-        emit FundsReleased(auctionId, auction.buyer, refundAmount);
+        emit FundsReleased(auctionId, 0, auction.buyer, refundAmount);
     }
     
     // ============ INTERNAL FUNCTIONS ============
+    
+    /**
+     * @dev Checks if an agent exists in the Identity Registry
+     * @param agentId The agent token ID to check
+     * @return exists True if the agent has been minted and exists
+     */
+    function _agentExists(uint256 agentId) internal view returns (bool exists) {
+        try IDENTITY_REGISTRY.ownerOf(agentId) returns (address owner) {
+            return owner != address(0);
+        } catch {
+            return false;
+        }
+    }
     
     /**
      * @dev Calculates the weighted score for a bid
