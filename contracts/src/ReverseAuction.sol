@@ -4,6 +4,9 @@ pragma solidity ^0.8.24;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {ECDSA} from "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
+import {IERC1271} from "@openzeppelin/contracts/interfaces/IERC1271.sol";
 import {IIdentityRegistry} from "./interfaces/IIdentityRegistry.sol";
 import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
 
@@ -14,6 +17,7 @@ import {IReputationRegistry} from "./interfaces/IReputationRegistry.sol";
  */
 contract ReverseAuction is ReentrancyGuard {
     using SafeERC20 for IERC20;
+    using ECDSA for bytes32;
     
     // ============ STRUCTS ============
     
@@ -122,6 +126,13 @@ contract ReverseAuction is ReentrancyGuard {
         uint256 amount
     );
     
+    event FeedbackAuthProvided(
+        uint256 indexed auctionId,
+        uint256 indexed agentId,
+        address indexed buyer,
+        bytes feedbackAuth
+    );
+    
     // ============ ERRORS ============
     
     error InvalidAuctionDuration();
@@ -140,6 +151,9 @@ contract ReverseAuction is ReentrancyGuard {
     error ServiceAlreadyCompleted();
     error InvalidReputationWeight();
     error BidScoreNotCompetitive();
+    error InvalidFeedbackAuth();
+    error FeedbackAuthExpired();
+    error InvalidSignature();
     
     // ============ CONSTRUCTOR ============
     
@@ -342,45 +356,65 @@ contract ReverseAuction is ReentrancyGuard {
     /**
      * @dev Marks a service as completed and releases payment to the winner
      * @param auctionId The auction ID
-     * @dev Can only be called by the buyer to confirm service completion
+     * @param feedbackAuth Signed authorization for buyer to give feedback (per ERC-8004)
+     * @dev Can only be called by the service provider (owner of winning agent)
+     * 
+     * The feedbackAuth must be in ERC-8004 format:
+     * - First 224 bytes: abi.encode(agentId, clientAddress, indexLimit, expiry, chainId, identityRegistry, signerAddress)
+     * - Last 65 bytes: signature
+     * 
+     * This allows the buyer to later submit feedback to the ERC-8004 Reputation Registry.
      */
-    function completeService(uint256 auctionId) external nonReentrant {
+    function completeService(uint256 auctionId, bytes calldata feedbackAuth) external nonReentrant {
         Auction storage auction = auctions[auctionId];
         
-        // Validation
+        // Basic validation
         if (auction.buyer == address(0)) revert AuctionNotFound();
-        if (msg.sender != auction.buyer) revert NotAuthorized();
         if (auction.isActive) revert AuctionStillActive();
         if (auction.isCompleted) revert ServiceAlreadyCompleted();
-        if (auction.winningAgentId == 0) {
-            // No winner - this will be handled by refund function
-            revert NotAuthorized();
-        }
+        if (auction.winningAgentId == 0) revert NotAuthorized();
         
-        // Mark service as completed
+        // Check caller is agent owner
+        address currentOwner = IDENTITY_REGISTRY.ownerOf(auction.winningAgentId);
+        if (msg.sender != currentOwner) revert NotAgentOwner();
+        
+        // Verify feedbackAuth is valid and properly signed
+        _verifyFeedbackAuth(
+            feedbackAuth,
+            auction.winningAgentId,
+            auction.buyer,
+            currentOwner
+        );
+        
+        // Release payment
         auction.isCompleted = true;
         
-        // Calculate payment amounts
         uint256 winningBid = auction.winningBid;
         uint256 escrowAmount = auction.escrowAmount;
         uint256 refundAmount = escrowAmount - winningBid;
         
-        // Reset escrow amount
         auction.escrowAmount = 0;
         
-        // Get current owner of the winning agent (handles transfers during auction!)
-        address currentOwner = IDENTITY_REGISTRY.ownerOf(auction.winningAgentId);
-        
-        // Transfer winning bid to current agent owner
+        // Transfer winning bid to provider
         USDC_TOKEN.safeTransfer(currentOwner, winningBid);
         
-        // Refund excess to buyer if any
+        // Refund excess to buyer
         if (refundAmount > 0) {
             USDC_TOKEN.safeTransfer(auction.buyer, refundAmount);
         }
         
+        // ===== EMIT EVENTS =====
         emit ServiceCompleted(auctionId, auction.winningAgentId, currentOwner);
         emit FundsReleased(auctionId, auction.winningAgentId, currentOwner, winningBid);
+        
+        // Emit feedbackAuth for buyer to retrieve from event logs
+        // Buyer can later use this to submit feedback to ERC-8004 Reputation Registry
+        emit FeedbackAuthProvided(
+            auctionId,
+            auction.winningAgentId,
+            auction.buyer,
+            feedbackAuth
+        );
     }
     
     /**
@@ -461,6 +495,85 @@ contract ReverseAuction is ReentrancyGuard {
                 (SCORE_PRECISION - reputationWeight) * normalizedBidScore) / SCORE_PRECISION;
         
         return score;
+    }
+    
+    /**
+     * @dev Verifies feedbackAuth signature and parameters (ERC-8004 compatible)
+     * @param feedbackAuth The encoded feedbackAuth from provider
+     * @param expectedAgentId The agent ID that should be in feedbackAuth
+     * @param expectedClient The buyer address that should be in feedbackAuth
+     * @param currentOwner The current owner of the agent (for authorization check)
+     */
+    function _verifyFeedbackAuth(
+        bytes calldata feedbackAuth,
+        uint256 expectedAgentId,
+        address expectedClient,
+        address currentOwner
+    ) internal view {
+        // ERC-8004 format: [224 bytes params][65 bytes signature]
+        if (feedbackAuth.length < 289) revert InvalidFeedbackAuth();
+        
+        // Decode first 224 bytes
+        (
+            uint256 authAgentId,
+            address authClient,
+            uint64 authIndexLimit,
+            uint256 authExpiry,
+            uint256 authChainId,
+            address authIdentityRegistry,
+            address authSigner
+        ) = abi.decode(feedbackAuth[:224], (uint256, address, uint64, uint256, uint256, address, address));
+        
+        // Extract signature (last 65 bytes)
+        bytes memory signature = feedbackAuth[224:];
+        
+        // Verify tuple fields match expected context
+        if (authAgentId != expectedAgentId) revert InvalidFeedbackAuth();
+        if (authClient != expectedClient) revert InvalidFeedbackAuth();
+        if (authExpiry <= block.timestamp) revert FeedbackAuthExpired();
+        if (authChainId != block.chainid) revert InvalidFeedbackAuth();
+        if (authIdentityRegistry != address(IDENTITY_REGISTRY)) revert InvalidFeedbackAuth();
+        
+        // Reconstruct message hash and apply EIP-191 prefix (matching official ERC-8004)
+        bytes32 messageHash = MessageHashUtils.toEthSignedMessageHash(
+            keccak256(
+                abi.encode(
+                    authAgentId,
+                    authClient,
+                    authIndexLimit,
+                    authExpiry,
+                    authChainId,
+                    authIdentityRegistry,
+                    authSigner
+                )
+            )
+        );
+        
+        // Verify signature (supports both EOA and ERC-1271 smart contract wallets)
+        address recoveredSigner = ECDSA.recover(messageHash, signature);
+        if (recoveredSigner != authSigner) {
+            // If not EOA signature, try ERC-1271 for smart contract wallets
+            if (authSigner.code.length > 0) {
+                // Try ERC-1271 verification
+                try IERC1271(authSigner).isValidSignature(messageHash, signature) returns (bytes4 magicValue) {
+                    if (magicValue != IERC1271.isValidSignature.selector) {
+                        revert InvalidSignature();
+                    }
+                } catch {
+                    revert InvalidSignature();
+                }
+            } else {
+                revert InvalidSignature();
+            }
+        }
+        
+        // Verify signer is authorized (owner or approved operator)
+        if (authSigner != currentOwner) {
+            // Check if signer is an approved operator
+            bool isApproved = IDENTITY_REGISTRY.isApprovedForAll(currentOwner, authSigner) ||
+                             IDENTITY_REGISTRY.getApproved(expectedAgentId) == authSigner;
+            if (!isApproved) revert NotAgentOwner();
+        }
     }
     
     // ============ VIEW FUNCTIONS ============
