@@ -69,3 +69,5 @@ broadcast/
 .local/
 temp/
 tmp/
+
+agents/utils/files/

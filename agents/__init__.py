@@ -11,4 +11,10 @@ __version__ = "0.1.0"
 from .core.base_agent import BaseAgent
 from .core.blockchain_client import BlockchainClient
 
-__all__ = ["BaseAgent", "BlockchainClient"]
+"""Core modules for the agentic marketplace agents."""
+
+from .core.blockchain_client import BlockchainClient
+
+__version__ = "0.1.0"
+
+__all__ = ["BlockchainClient", "__version__"]
