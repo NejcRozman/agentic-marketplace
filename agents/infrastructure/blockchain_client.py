@@ -4,11 +4,10 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Union
 from web3 import Web3, AsyncWeb3
-from web3.middleware import geth_poa_middleware
 from eth_account import Account
 from eth_utils import to_checksum_address
 
-from .config import config, BlockchainConfig
+from ..config import config
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +23,8 @@ class BlockchainClient:
     - Account management
     """
     
-    def __init__(self, blockchain_config: Optional[BlockchainConfig] = None):
-        self.config = blockchain_config or config.blockchain
+    def __init__(self, blockchain_config = None):
+        self.config = blockchain_config or config
         self.w3: Optional[AsyncWeb3] = None
         self.account: Optional[Account] = None
         self.contracts: Dict[str, Any] = {}
@@ -39,9 +38,8 @@ class BlockchainClient:
             # Create Web3 instance
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.config.rpc_url))
             
-            # Add PoA middleware if needed (for networks like BSC, Polygon)
-            if self.config.chain_id in [56, 137, 80001]:  # BSC, Polygon, Mumbai
-                self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+            # Note: PoA middleware is no longer needed in web3.py v7+
+            # The library handles PoA chains automatically
             
             # Set up account if private key is provided
             if self.config.private_key:

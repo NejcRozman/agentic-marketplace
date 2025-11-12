@@ -14,8 +14,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
 
-from ..core.config import config
-from ..core.blockchain_client import BlockchainClient
+from ..config import config
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,6 @@ class LiteratureReviewAgent:
     - Creates vector database for semantic search
     - Performs literature reviews based on prompts
     - Provides properly cited responses
-    - Integrates with blockchain for marketplace operations
     """
     
     # Default RAG parameters
@@ -63,8 +61,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
     def __init__(
         self,
         agent_id: str,
-        workspace_dir: Optional[str] = None,
-        blockchain_client: Optional[BlockchainClient] = None
+        workspace_dir: Optional[str] = None
     ):
         """
         Initialize the Literature Review Agent.
@@ -72,26 +69,22 @@ Maintain professional academic tone and provide detailed, well-structured respon
         Args:
             agent_id: Unique identifier for this agent instance
             workspace_dir: Directory for storing RAG databases (optional)
-            blockchain_client: Blockchain client for marketplace operations (optional)
         """
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir or config.workspace_dir) / agent_id
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Blockchain client (optional for now)
-        self.blockchain_client = blockchain_client
         
         # Initialize LLM and embeddings
         if not config.google_api_key:
             raise ValueError("GOOGLE_API_KEY not found in environment variables")
         
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash-exp",
+            model="gemini-2.5-pro",
             temperature=0,
             google_api_key=config.google_api_key
         )
         self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-004",
+            model="models/text-embedding-001",
             google_api_key=config.google_api_key
         )
         
@@ -401,50 +394,3 @@ Maintain professional academic tone and provide detailed, well-structured respon
             result["error"] = str(e)
         
         return result
-    
-    # Blockchain integration methods (placeholders for Step 2)
-    
-    def register_service(self) -> str:
-        """
-        Register this agent as a literature review service provider on blockchain.
-        
-        Returns:
-            Transaction hash
-        """
-        # TODO: Implement in Step 2
-        logger.warning("register_service not yet implemented")
-        return "0x0"
-    
-    def bid_on_auction(self, auction_id: int, bid_amount: int) -> str:
-        """
-        Submit a bid for an auction.
-        
-        Args:
-            auction_id: ID of the auction
-            bid_amount: Bid amount in tokens
-            
-        Returns:
-            Transaction hash
-        """
-        # TODO: Implement in Step 2
-        logger.warning("bid_on_auction not yet implemented")
-        return "0x0"
-    
-    def complete_service_on_chain(
-        self,
-        auction_id: int,
-        results: Dict[str, Any]
-    ) -> str:
-        """
-        Call completeService() on ReverseAuction contract with review results.
-        
-        Args:
-            auction_id: ID of the auction
-            results: Literature review results
-            
-        Returns:
-            Transaction hash
-        """
-        # TODO: Implement in Step 2
-        logger.warning("complete_service_on_chain not yet implemented")
-        return "0x0"

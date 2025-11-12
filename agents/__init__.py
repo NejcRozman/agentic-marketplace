@@ -2,19 +2,47 @@
 Agentic Marketplace - AI Agents Package
 
 This package contains AI agents for the agentic marketplace, built with LangGraph.
-It includes service provider agents, consumer agents, and the core infrastructure
-for interacting with the blockchain-based marketplace.
+
+Structure:
+- infrastructure/: Shared blockchain utilities (client, ABIs, feedbackAuth)
+- provider_agent/: Complete service provider agent (literature review + blockchain + orchestration)
+- consumer_agent/: Complete service consumer agent (future)
+- config.py: Shared configuration
 """
 
 __version__ = "0.1.0"
 
-from .core.base_agent import BaseAgent
-from .core.blockchain_client import BlockchainClient
+from .config import config
+from .infrastructure import (
+    BlockchainClient,
+    AuctionInfo,
+    contract_abis,
+    get_reverse_auction_abi,
+    get_identity_registry_abi,
+    get_reputation_registry_abi,
+    generate_feedback_auth,
+    parse_feedback_auth,
+    verify_feedback_auth_format
+)
+from .provider_agent import (
+    LiteratureReviewAgent,
+    BlockchainHandler,
+    BlockchainState
+)
 
-"""Core modules for the agentic marketplace agents."""
-
-from .core.blockchain_client import BlockchainClient
-
-__version__ = "0.1.0"
-
-__all__ = ["BlockchainClient", "__version__"]
+__all__ = [
+    "config",
+    "BlockchainClient",
+    "AuctionInfo",
+    "contract_abis",
+    "get_reverse_auction_abi",
+    "get_identity_registry_abi",
+    "get_reputation_registry_abi",
+    "generate_feedback_auth",
+    "parse_feedback_auth",
+    "verify_feedback_auth_format",
+    "LiteratureReviewAgent",
+    "BlockchainHandler",
+    "BlockchainState",
+    "__version__"
+]
