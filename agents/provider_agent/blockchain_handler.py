@@ -43,9 +43,14 @@ class BlockchainState(TypedDict):
     client_address: Optional[str]
     feedback_auth: Optional[bytes]
     
+    # Block tracking fields
+    last_processed_block: Optional[int]  # Track last processed block to avoid reprocessing
+    current_block: Optional[int]  # Current block number when fetching events
+    
     # Event monitoring fields
-    events: List[Dict[str, Any]]
-    processed_event: Optional[Dict[str, Any]]
+    unprocessed_events: List[Dict[str, Any]]  # Events waiting to be processed
+    processed_events: List[Dict[str, Any]]  # Events that have been processed
+    processed_event: Optional[Dict[str, Any]]  # Current event being processed
     event_type: Optional[str]  # "AuctionCreated" or "AuctionEnded"
     
     # Auction analysis fields
@@ -83,6 +88,9 @@ class BlockchainHandler:
         self.reverse_auction_contract = None
         self.identity_registry_contract = None
         self.reputation_registry_contract = None
+        
+        # Block tracking - persists across graph invocations
+        self._last_processed_block: int = 0
         
         self.graph = self._build_graph()
         logger.info(f"BlockchainHandler initialized for agent {agent_id}")
@@ -134,7 +142,7 @@ class BlockchainHandler:
             self._route_event_type,
             {
                 "auction_created": "fetch_ipfs_data",
-                "auction_ended": END,
+                "auction_ended": "check_more_events",
                 "no_events": END
             }
         )
@@ -149,10 +157,21 @@ class BlockchainHandler:
             self._route_bid_decision,
             {
                 "submit": "submit_bid",
-                "skip": END
+                "skip": "check_more_events"
             }
         )
-        workflow.add_edge("submit_bid", END)
+        workflow.add_edge("submit_bid", "check_more_events")
+        
+        # Check for more events node (loops back or ends)
+        workflow.add_node("check_more_events", self._check_more_events_node)
+        workflow.add_conditional_edges(
+            "check_more_events",
+            self._route_more_events,
+            {
+                "more_events": "process_events",
+                "done": END
+            }
+        )
         
         return workflow.compile()
     
@@ -222,6 +241,13 @@ class BlockchainHandler:
         if state.get("should_bid", False):
             return "submit"
         return "skip"
+    
+    def _route_more_events(self, state: BlockchainState) -> str:
+        """Routing function to check if more events need processing."""
+        unprocessed = state.get("unprocessed_events", [])
+        if unprocessed:
+            return "more_events"
+        return "done"
     
     # ==================== Complete Service Path ====================
     
@@ -313,42 +339,62 @@ class BlockchainHandler:
         logger.info("📡 Fetching blockchain events...")
         
         try:
-            # TODO: Track last processed block to avoid reprocessing
-            # For now, fetch latest events
+            # Get current block number
+            current_block = asyncio.run(self.client.get_block_number())
+            state["current_block"] = current_block
+            
+            # Determine from_block based on last processed
+            last_processed = state.get("last_processed_block")
+            if last_processed is not None and last_processed > 0:
+                # Start from the block after the last processed one
+                from_block = last_processed + 1
+            else:
+                # First run: look back 10 blocks
+                from_block = max(0, current_block - 10)
+            
+            logger.info(f"Fetching events from block {from_block} to {current_block}")
+            
+            # Fetch events from the block range
             events = asyncio.run(self.client.get_contract_events(
                 contract_name="ReverseAuction",
                 event_name="AuctionCreated",
-                from_block="latest",
-                to_block="latest"
+                from_block=from_block,
+                to_block=current_block
             ))
             
-            state["events"] = events
-            state["messages"].append(SystemMessage(content=f"Fetched {len(events)} events"))
-            logger.info(f"Fetched {len(events)} AuctionCreated events")
+            # Update last processed block to current
+            state["last_processed_block"] = current_block
+            state["unprocessed_events"] = list(events)  # Queue for processing
+            state["processed_events"] = []  # Reset processed list
+            state["messages"].append(SystemMessage(content=f"Fetched {len(events)} events from blocks {from_block}-{current_block}"))
+            logger.info(f"Fetched {len(events)} AuctionCreated events from blocks {from_block}-{current_block}")
             
         except Exception as e:
             logger.error(f"Error fetching events: {e}")
             state["error"] = str(e)
-            state["events"] = []
+            state["unprocessed_events"] = []
         
         return state
     
     def _process_events_node(self, state: BlockchainState) -> BlockchainState:
-        """Process events and determine event type."""
+        """Process next event from unprocessed_events queue."""
         logger.info("🔍 Processing events...")
         
         try:
-            events = state.get("events", [])
+            unprocessed = state.get("unprocessed_events", [])
             
-            if not events:
+            if not unprocessed:
                 state["event_type"] = None
                 state["messages"].append(SystemMessage(content="No events to process"))
                 logger.info("No events to process")
                 return state
             
-            # Process first event (TODO: handle multiple events)
-            event = events[0]
+            # Pop first event from unprocessed queue
+            event = unprocessed.pop(0)
+            state["unprocessed_events"] = unprocessed
             event_name = event.get("event", "")
+            
+            logger.info(f"Processing event: {event_name} ({len(unprocessed)} remaining)")
             
             if event_name == "AuctionCreated":
                 state["event_type"] = "AuctionCreated"
@@ -361,10 +407,16 @@ class BlockchainHandler:
                 state["event_type"] = "AuctionEnded"
                 state["processed_event"] = event
                 auction_id = event.get("args", {}).get("auctionId")
+                state["auction_id"] = auction_id
                 # TODO: Check if we won this auction
                 state["won_auction"] = False  # Placeholder
                 state["messages"].append(SystemMessage(content=f"AuctionEnded for auction {auction_id}"))
                 logger.info(f"AuctionEnded for auction {auction_id}")
+            
+            else:
+                # Unknown event type, skip it
+                state["event_type"] = None
+                logger.warning(f"Unknown event type: {event_name}")
             
         except Exception as e:
             logger.error(f"Error processing events: {e}")
@@ -373,7 +425,41 @@ class BlockchainHandler:
         
         return state
     
-    # ==================== Auction Workflow Path ====================
+    def _check_more_events_node(self, state: BlockchainState) -> BlockchainState:
+        """Check if there are more events to process and prepare for next iteration."""
+        # Add current event to processed list
+        processed_event = state.get("processed_event")
+        if processed_event:
+            processed_events = state.get("processed_events", [])
+            processed_events.append(processed_event)
+            state["processed_events"] = processed_events
+        
+        unprocessed = state.get("unprocessed_events", [])
+        logger.info(f"🔄 Check more events: {len(unprocessed)} remaining")
+        
+        if unprocessed:
+            # Reset per-event state for next iteration
+            state["processed_event"] = None
+            state["event_type"] = None
+            state["auction_id"] = None
+            state["ipfs_data"] = None
+            state["auction_state"] = None
+            state["reputations"] = None
+            state["estimated_cost"] = None
+            state["should_bid"] = False
+            state["bid_amount"] = None
+            state["bid_reasoning"] = None
+            state["won_auction"] = None
+            state["tx_hash"] = None
+            # Keep error if any, but could reset: state["error"] = None
+            state["messages"].append(SystemMessage(content=f"Moving to next event ({len(unprocessed)} remaining)"))
+        else:
+            state["messages"].append(SystemMessage(content=f"All {len(state.get('processed_events', []))} events processed"))
+            logger.info(f"✅ All events processed")
+        
+        return state
+    
+    # ==================== Auction Workflow Path ======================================
     
     def _fetch_ipfs_data_node(self, state: BlockchainState) -> BlockchainState:
         """Fetch service requirements from IPFS using CID."""
@@ -761,7 +847,10 @@ Should we bid? If yes, what amount?
             "auction_id": None,
             "client_address": None,
             "feedback_auth": None,
-            "events": [],
+            "last_processed_block": self._last_processed_block,  # Use instance variable for persistence
+            "current_block": None,
+            "unprocessed_events": [],
+            "processed_events": [],
             "processed_event": None,
             "event_type": None,
             "ipfs_data": None,
@@ -779,6 +868,10 @@ Should we bid? If yes, what amount?
         
         result = self.graph.invoke(initial_state)
         
+        # Persist the last processed block for next invocation
+        if result.get("last_processed_block"):
+            self._last_processed_block = result["last_processed_block"]
+        
         return {
             "event_type": result.get("event_type"),
             "auction_id": result.get("auction_id"),
@@ -787,6 +880,8 @@ Should we bid? If yes, what amount?
             "bid_reasoning": result.get("bid_reasoning"),
             "tx_hash": result.get("tx_hash"),
             "won_auction": result.get("won_auction"),
+            "last_processed_block": result.get("last_processed_block"),
+            "processed_events_count": len(result.get("processed_events", [])),
             "error": result.get("error")
         }
     
@@ -802,7 +897,10 @@ Should we bid? If yes, what amount?
             "auction_id": auction_id,
             "client_address": client_address,
             "feedback_auth": None,
-            "events": [],
+            "last_processed_block": None,
+            "current_block": None,
+            "unprocessed_events": [],
+            "processed_events": [],
             "processed_event": None,
             "event_type": None,
             "ipfs_data": None,
