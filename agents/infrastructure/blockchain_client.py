@@ -84,8 +84,10 @@ class BlockchainClient:
         if not self.w3:
             raise RuntimeError("Blockchain client not initialized")
         
-        if self.config.gas_price:
-            return self.config.gas_price
+        # Use configured gas_price if available
+        gas_price = getattr(self.config, 'gas_price', None)
+        if gas_price:
+            return gas_price
         
         return await self.w3.eth.gas_price
     
@@ -280,6 +282,13 @@ class BlockchainClient:
         
         block = await self.w3.eth.get_block(block_identifier)
         return dict(block)
+    
+    async def get_block_number(self) -> int:
+        """Get the current block number."""
+        if not self.w3:
+            raise RuntimeError("Blockchain client not initialized")
+        
+        return await self.w3.eth.block_number
     
     async def get_transaction(self, tx_hash: str) -> Dict[str, Any]:
         """Get transaction information."""

@@ -63,8 +63,8 @@ contract ReverseAuction is ReentrancyGuard {
     /// @dev ERC-8004 Reputation Registry for agent reputation
     IReputationRegistry public immutable REPUTATION_REGISTRY;
     
-    /// @dev Counter for generating unique auction IDs
-    uint256 private _auctionIdCounter;
+    /// @dev Counter for generating unique auction IDs (public for iteration)
+    uint256 public auctionIdCounter;
     
     /// @dev Mapping from auction ID to auction data
     mapping(uint256 => Auction) public auctions;
@@ -76,8 +76,8 @@ contract ReverseAuction is ReentrancyGuard {
     /// auctionId => agentId => isEligible
     mapping(uint256 => mapping(uint256 => bool)) public isEligibleAgent;
     
-    /// @dev Mapping to track the lowest bid for each auction
-    mapping(uint256 => uint256) public lowestBid;
+    /// @dev Mapping to track the winning bid for each auction
+    mapping(uint256 => uint256) public winningBid;
     
     /// @dev Mapping to track the highest score for each auction
     mapping(uint256 => uint256) public highestScore;
@@ -175,7 +175,7 @@ contract ReverseAuction is ReentrancyGuard {
         USDC_TOKEN = IERC20(usdcTokenAddress);
         IDENTITY_REGISTRY = IIdentityRegistry(identityRegistry);
         REPUTATION_REGISTRY = IReputationRegistry(reputationRegistry);
-        _auctionIdCounter = 1; // Start auction IDs from 1
+        auctionIdCounter = 0;
     }
     
     // ============ EXTERNAL FUNCTIONS ============
@@ -213,7 +213,7 @@ contract ReverseAuction is ReentrancyGuard {
         if (USDC_TOKEN.balanceOf(msg.sender) < maxPrice) revert InsufficientEscrow();
         
         // Generate auction ID
-        auctionId = _auctionIdCounter++;
+        auctionId = ++auctionIdCounter;
         
         // Transfer USDC to escrow
         USDC_TOKEN.safeTransferFrom(msg.sender, address(this), maxPrice);
@@ -239,8 +239,8 @@ contract ReverseAuction is ReentrancyGuard {
             isEligibleAgent[auctionId][eligibleAgentIds[i]] = true;
         }
         
-        // Initialize lowest bid to max price
-        lowestBid[auctionId] = maxPrice;
+        // Initialize winning bid to max price
+        winningBid[auctionId] = maxPrice;
         
         // Initialize highest score to 0
         highestScore[auctionId] = 0;
@@ -314,7 +314,7 @@ contract ReverseAuction is ReentrancyGuard {
         auctionBids[auctionId].push(newBid);
         
         // Update tracking
-        lowestBid[auctionId] = bidAmount;
+        winningBid[auctionId] = bidAmount;
         highestScore[auctionId] = score;
         
         // Update auction state with current best bid
@@ -602,13 +602,13 @@ contract ReverseAuction is ReentrancyGuard {
     }
     
     /**
-     * @dev Returns the current lowest bid for an auction
+     * @dev Returns the current winning bid for an auction
      * @param auctionId The auction ID
-     * @return currentLowestBid The current lowest bid amount
+     * @return currentWinningBid The current winning bid amount
      */
-    function getCurrentLowestBid(uint256 auctionId) external view returns (uint256 currentLowestBid) {
+    function getCurrentWinningBid(uint256 auctionId) external view returns (uint256 currentWinningBid) {
         if (auctions[auctionId].buyer == address(0)) revert AuctionNotFound();
-        return lowestBid[auctionId];
+        return winningBid[auctionId];
     }
     
     /**

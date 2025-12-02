@@ -624,15 +624,15 @@ contract ReverseAuctionTest is Test {
         assertFalse(auction.isAuctionActive(auctionId));
     }
 
-    function testGetCurrentLowestBid() public {
+    function testGetCurrentWinningBid() public {
         uint256 auctionId = _createTestAuction();
 
-        assertEq(auction.getCurrentLowestBid(auctionId), MAX_PRICE);
+        assertEq(auction.getCurrentWinningBid(auctionId), MAX_PRICE);
 
         vm.prank(provider1);
         auction.placeBid(auctionId, 800e6, agentId1);
 
-        assertEq(auction.getCurrentLowestBid(auctionId), 800e6);
+        assertEq(auction.getCurrentWinningBid(auctionId), 800e6);
     }
 
     function testScoreCalculation() public {

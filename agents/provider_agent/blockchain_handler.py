@@ -1,10 +1,9 @@
 """
 BlockchainHandler - Agentic handler for blockchain operations.
 
-This agent uses LangGraph to reason about blockchain operations:
-- Monitoring auctions and deciding which to participate in
-- Calculating optimal bids based on risk assessment
-- Managing service completion and payment release
+This agent uses LangGraph to handle blockchain operations:
+- Complete service path: Deterministic workflow for completing auctions
+- Monitor path: ReAct agent with tools for intelligent bidding decisions
 
 Built with LangGraph for agentic reasoning and decision-making.
 """
@@ -12,16 +11,18 @@ Built with LangGraph for agentic reasoning and decision-making.
 import asyncio
 import logging
 import json
+import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END
-from langchain_core.messages import SystemMessage, HumanMessage
+from langgraph.prebuilt import create_react_agent
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..infrastructure.blockchain_client import BlockchainClient
-from ..infrastructure.auction_data import AuctionInfo
 from ..infrastructure.contract_abis import (
     get_reverse_auction_abi,
     get_identity_registry_abi,
@@ -43,27 +44,12 @@ class BlockchainState(TypedDict):
     client_address: Optional[str]
     feedback_auth: Optional[bytes]
     
-    # Block tracking fields
-    last_processed_block: Optional[int]  # Track last processed block to avoid reprocessing
-    current_block: Optional[int]  # Current block number when fetching events
+    # Monitor path - gathered state (deterministic)
+    won_auctions: List[int]  # Auction IDs we won (from AuctionEnded events)
+    eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on
     
-    # Event monitoring fields
-    unprocessed_events: List[Dict[str, Any]]  # Events waiting to be processed
-    processed_events: List[Dict[str, Any]]  # Events that have been processed
-    processed_event: Optional[Dict[str, Any]]  # Current event being processed
-    event_type: Optional[str]  # "AuctionCreated" or "AuctionEnded"
-    
-    # Auction analysis fields
-    ipfs_data: Optional[Dict[str, Any]]
-    auction_state: Optional[Dict[str, Any]]
-    reputations: Optional[Dict[str, Any]]
-    estimated_cost: Optional[int]
-    
-    # Bidding decision fields
-    should_bid: bool
-    bid_amount: Optional[int]
-    bid_reasoning: Optional[str]
-    won_auction: Optional[bool]
+    # Monitor path - ReAct results
+    bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
     
     # Transaction results
     tx_hash: Optional[str]
@@ -75,7 +61,8 @@ class BlockchainHandler:
     """
     Agentic blockchain handler using LangGraph.
     
-    Handles blockchain operations with reasoning capabilities.
+    - complete_service: Deterministic path for service completion
+    - monitor: ReAct agent for intelligent bidding decisions
     """
     
     def __init__(self, agent_id: int, blockchain_client: Optional[BlockchainClient] = None):
@@ -89,89 +76,187 @@ class BlockchainHandler:
         self.identity_registry_contract = None
         self.reputation_registry_contract = None
         
-        # Block tracking - persists across graph invocations
+        # Block tracking - persists across invocations
         self._last_processed_block: int = 0
         
+        # Bids placed tracker (for ReAct tool results)
+        self._bids_placed: List[Dict[str, Any]] = []
+        
+        # Build tools for ReAct agent
+        self._tools = self._build_tools()
+        
+        # Build the graph
         self.graph = self._build_graph()
         logger.info(f"BlockchainHandler initialized for agent {agent_id}")
+    
+    def _build_tools(self) -> List:
+        """Build tools for the ReAct agent."""
+        handler = self
+        
+        @tool
+        def get_ipfs_data(auction_id: int) -> Dict[str, Any]:
+            """Fetch service requirements from IPFS for a specific auction.
+            
+            Args:
+                auction_id: The auction ID to fetch IPFS data for
+                
+            Returns:
+                Dictionary containing service requirements from IPFS
+            """
+            try:
+                auction_data = asyncio.run(handler.client.call_contract_method(
+                    "ReverseAuction",
+                    "getAuctionDetails",
+                    auction_id
+                ))
+                cid = auction_data[2]  # serviceDescriptionCid
+                
+                if not cid:
+                    return {"error": "No IPFS CID found"}
+                
+                import aiohttp
+                ipfs_gateway_url = f"https://ipfs.io/ipfs/{cid}"
+                
+                async def fetch():
+                    async with aiohttp.ClientSession() as session:
+                        async with session.get(ipfs_gateway_url, timeout=10) as response:
+                            if response.status == 200:
+                                return await response.json()
+                            return {"error": f"IPFS fetch failed: {response.status}"}
+                
+                return asyncio.run(fetch())
+            except Exception as e:
+                return {"error": str(e)}
+        
+        @tool
+        def get_reputation(agent_id: int) -> Dict[str, Any]:
+            """Get reputation score for an agent from ERC-8004 ReputationRegistry.
+            
+            Args:
+                agent_id: The agent ID to get reputation for
+                
+            Returns:
+                Dictionary with rating and feedback count
+            """
+            try:
+                if not handler.reputation_registry_contract:
+                    return {"rating": 50, "feedback_count": 0, "note": "ReputationRegistry not configured"}
+                
+                result = asyncio.run(handler.client.call_contract_method(
+                    "ReputationRegistry",
+                    "getSummary",
+                    agent_id,
+                    [],
+                    0,
+                    0
+                ))
+                feedback_count = result[0]
+                average_score = result[1] if feedback_count > 0 else 50
+                
+                return {"rating": average_score, "feedback_count": feedback_count}
+            except Exception as e:
+                return {"error": str(e), "rating": 50, "feedback_count": 0}
+        
+        @tool
+        def estimate_cost(service_requirements: str) -> Dict[str, Any]:
+            """Estimate cost to deliver a service based on requirements.
+            
+            Args:
+                service_requirements: JSON string of service requirements from IPFS
+                
+            Returns:
+                Dictionary with estimated cost and confidence
+            """
+            try:
+                requirements = json.loads(service_requirements) if isinstance(service_requirements, str) else service_requirements
+                
+                complexity = requirements.get("complexity", "medium")
+                base_cost = 100
+                
+                multipliers = {"low": 0.7, "medium": 1.0, "high": 1.5}
+                multiplier = multipliers.get(complexity, 1.0)
+                
+                estimated = int(base_cost * multiplier * 1e6)
+                
+                return {"estimated_cost": estimated, "confidence": 0.7, "complexity": complexity}
+            except Exception as e:
+                return {"error": str(e), "estimated_cost": 0, "confidence": 0}
+        
+        @tool
+        def place_bid(auction_id: int, bid_amount: int) -> Dict[str, Any]:
+            """Submit a bid for an auction on the blockchain.
+            
+            Args:
+                auction_id: The auction ID to bid on
+                bid_amount: The bid amount in USDC (with decimals)
+                
+            Returns:
+                Dictionary with transaction result
+            """
+            try:
+                logger.info(f"📤 Placing bid: auction={auction_id}, amount={bid_amount}")
+                
+                estimated_gas = asyncio.run(handler.client.estimate_gas(
+                    "ReverseAuction",
+                    "placeBid",
+                    auction_id,
+                    bid_amount,
+                    handler.agent_id
+                ))
+                
+                tx_hash = asyncio.run(handler.client.send_transaction(
+                    "ReverseAuction",
+                    "placeBid",
+                    auction_id,
+                    bid_amount,
+                    handler.agent_id,
+                    gas_limit=estimated_gas + 50000
+                ))
+                
+                receipt = asyncio.run(handler.client.wait_for_transaction(tx_hash))
+                
+                if receipt['status'] == 1:
+                    logger.info(f"✅ Bid placed successfully: {tx_hash}")
+                    result = {
+                        "success": True,
+                        "tx_hash": tx_hash,
+                        "auction_id": auction_id,
+                        "bid_amount": bid_amount,
+                        "block_number": receipt['blockNumber']
+                    }
+                    handler._bids_placed.append(result)
+                    return result
+                else:
+                    return {"success": False, "error": "Transaction failed"}
+                    
+            except Exception as e:
+                logger.error(f"Error placing bid: {e}")
+                return {"success": False, "error": str(e)}
+        
+        return [get_ipfs_data, get_reputation, estimate_cost, place_bid]
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow for blockchain operations."""
         workflow = StateGraph(BlockchainState)
         
-        # Router node
         workflow.add_node("router", self._router_node)
-        
-        # Complete service path
         workflow.add_node("generate_feedback_auth", self._generate_feedback_auth_node)
         workflow.add_node("call_complete_service", self._call_complete_service_node)
+        workflow.add_node("gather_state", self._gather_state_node)
+        workflow.add_node("react_reasoning", self._react_reasoning_node)
         
-        # Monitor path - event processing
-        workflow.add_node("fetch_events", self._fetch_events_node)
-        workflow.add_node("process_events", self._process_events_node)
-        
-        # Auction workflow (for AuctionCreated events)
-        workflow.add_node("fetch_ipfs_data", self._fetch_ipfs_data_node)
-        workflow.add_node("get_auction_state", self._get_auction_state_node)
-        workflow.add_node("get_reputations", self._get_reputations_node)
-        workflow.add_node("estimate_cost", self._estimate_cost_node)
-        workflow.add_node("reason_bid", self._reason_bid_node)
-        workflow.add_node("submit_bid", self._submit_bid_node)
-        
-        # Entry point
         workflow.set_entry_point("router")
         
-        # Router conditional edges
         workflow.add_conditional_edges(
             "router",
             self._route_action,
-            {
-                "complete_service": "generate_feedback_auth",
-                "monitor": "fetch_events"
-            }
+            {"complete_service": "generate_feedback_auth", "monitor": "gather_state"}
         )
         
-        # Complete service path
         workflow.add_edge("generate_feedback_auth", "call_complete_service")
         workflow.add_edge("call_complete_service", END)
-        
-        # Monitor path
-        workflow.add_edge("fetch_events", "process_events")
-        workflow.add_conditional_edges(
-            "process_events",
-            self._route_event_type,
-            {
-                "auction_created": "fetch_ipfs_data",
-                "auction_ended": "check_more_events",
-                "no_events": END
-            }
-        )
-        
-        # Auction workflow path
-        workflow.add_edge("fetch_ipfs_data", "get_auction_state")
-        workflow.add_edge("get_auction_state", "get_reputations")
-        workflow.add_edge("get_reputations", "estimate_cost")
-        workflow.add_edge("estimate_cost", "reason_bid")
-        workflow.add_conditional_edges(
-            "reason_bid",
-            self._route_bid_decision,
-            {
-                "submit": "submit_bid",
-                "skip": "check_more_events"
-            }
-        )
-        workflow.add_edge("submit_bid", "check_more_events")
-        
-        # Check for more events node (loops back or ends)
-        workflow.add_node("check_more_events", self._check_more_events_node)
-        workflow.add_conditional_edges(
-            "check_more_events",
-            self._route_more_events,
-            {
-                "more_events": "process_events",
-                "done": END
-            }
-        )
+        workflow.add_edge("gather_state", "react_reasoning")
+        workflow.add_edge("react_reasoning", END)
         
         return workflow.compile()
     
@@ -212,44 +297,16 @@ class BlockchainHandler:
             logger.error(f"Failed to initialize BlockchainHandler: {e}", exc_info=True)
             return False
     
-    # ==================== Router Nodes ====================
-    
     def _router_node(self, state: BlockchainState) -> BlockchainState:
         """Router node - entry point that examines action field."""
         logger.info(f"🔀 Router: action={state['action']}")
-        state["messages"].append(SystemMessage(content=f"Routing to {state['action']} path"))
         return state
     
     def _route_action(self, state: BlockchainState) -> str:
         """Routing function for action field."""
-        action = state.get("action", "monitor")
-        if action == "complete_service":
+        if state.get("action") == "complete_service":
             return "complete_service"
         return "monitor"
-    
-    def _route_event_type(self, state: BlockchainState) -> str:
-        """Routing function for event type."""
-        event_type = state.get("event_type")
-        if event_type == "AuctionCreated":
-            return "auction_created"
-        elif event_type == "AuctionEnded":
-            return "auction_ended"
-        return "no_events"
-    
-    def _route_bid_decision(self, state: BlockchainState) -> str:
-        """Routing function for bid decision."""
-        if state.get("should_bid", False):
-            return "submit"
-        return "skip"
-    
-    def _route_more_events(self, state: BlockchainState) -> str:
-        """Routing function to check if more events need processing."""
-        unprocessed = state.get("unprocessed_events", [])
-        if unprocessed:
-            return "more_events"
-        return "done"
-    
-    # ==================== Complete Service Path ====================
     
     def _generate_feedback_auth_node(self, state: BlockchainState) -> BlockchainState:
         """Generate ERC-8004 feedbackAuth for service completion."""
@@ -258,9 +315,8 @@ class BlockchainHandler:
         try:
             client_address = state.get("client_address")
             if not client_address:
-                raise ValueError("client_address is required for feedback_auth generation")
+                raise ValueError("client_address is required")
             
-            # Generate feedbackAuth with 1 hour expiry
             expiry = int(datetime.now().timestamp()) + 3600
             feedback_auth = generate_feedback_auth(
                 agent_id=self.agent_id,
@@ -277,7 +333,6 @@ class BlockchainHandler:
                 raise ValueError("Generated feedbackAuth has invalid format")
             
             state["feedback_auth"] = feedback_auth
-            state["messages"].append(SystemMessage(content="FeedbackAuth generated successfully"))
             logger.info("✅ FeedbackAuth generated")
             
         except Exception as e:
@@ -288,7 +343,7 @@ class BlockchainHandler:
     
     def _call_complete_service_node(self, state: BlockchainState) -> BlockchainState:
         """Call completeService on ReverseAuction contract."""
-        logger.info("📝 Calling completeService on blockchain...")
+        logger.info("📝 Calling completeService...")
         
         try:
             auction_id = state.get("auction_id")
@@ -299,7 +354,6 @@ class BlockchainHandler:
             if not feedback_auth:
                 raise ValueError("feedback_auth is required")
             
-            # Estimate gas
             estimated_gas = asyncio.run(self.client.estimate_gas(
                 "ReverseAuction",
                 "completeService",
@@ -307,7 +361,6 @@ class BlockchainHandler:
                 feedback_auth
             ))
             
-            # Send transaction
             tx_hash = asyncio.run(self.client.send_transaction(
                 "ReverseAuction",
                 "completeService",
@@ -316,13 +369,11 @@ class BlockchainHandler:
                 gas_limit=estimated_gas + 50000
             ))
             
-            # Wait for confirmation
             receipt = asyncio.run(self.client.wait_for_transaction(tx_hash))
             
             if receipt['status'] == 1:
                 state["tx_hash"] = tx_hash
-                state["messages"].append(SystemMessage(content=f"Service completed: {tx_hash}"))
-                logger.info(f"✅ Service completed in block {receipt['blockNumber']}")
+                logger.info(f"✅ Service completed: {tx_hash}")
             else:
                 raise Exception("Transaction failed")
             
@@ -332,514 +383,183 @@ class BlockchainHandler:
         
         return state
     
-    # ==================== Monitor Path - Event Processing ====================
-    
-    def _fetch_events_node(self, state: BlockchainState) -> BlockchainState:
-        """Fetch new events from ReverseAuction contract."""
-        logger.info("📡 Fetching blockchain events...")
+    def _gather_state_node(self, state: BlockchainState) -> BlockchainState:
+        """Gather blockchain state: won auctions and active eligible auctions."""
+        logger.info("📡 Gathering blockchain state...")
         
         try:
-            # Get current block number
             current_block = asyncio.run(self.client.get_block_number())
-            state["current_block"] = current_block
+            from_block = self._last_processed_block + 1 if self._last_processed_block > 0 else max(0, current_block - 100)
             
-            # Determine from_block based on last processed
-            last_processed = state.get("last_processed_block")
-            if last_processed is not None and last_processed > 0:
-                # Start from the block after the last processed one
-                from_block = last_processed + 1
-            else:
-                # First run: look back 10 blocks
-                from_block = max(0, current_block - 10)
-            
-            logger.info(f"Fetching events from block {from_block} to {current_block}")
-            
-            # Fetch events from the block range
-            events = asyncio.run(self.client.get_contract_events(
-                contract_name="ReverseAuction",
-                event_name="AuctionCreated",
-                from_block=from_block,
-                to_block=current_block
-            ))
-            
-            # Update last processed block to current
-            state["last_processed_block"] = current_block
-            state["unprocessed_events"] = list(events)  # Queue for processing
-            state["processed_events"] = []  # Reset processed list
-            state["messages"].append(SystemMessage(content=f"Fetched {len(events)} events from blocks {from_block}-{current_block}"))
-            logger.info(f"Fetched {len(events)} AuctionCreated events from blocks {from_block}-{current_block}")
-            
-        except Exception as e:
-            logger.error(f"Error fetching events: {e}")
-            state["error"] = str(e)
-            state["unprocessed_events"] = []
-        
-        return state
-    
-    def _process_events_node(self, state: BlockchainState) -> BlockchainState:
-        """Process next event from unprocessed_events queue."""
-        logger.info("🔍 Processing events...")
-        
-        try:
-            unprocessed = state.get("unprocessed_events", [])
-            
-            if not unprocessed:
-                state["event_type"] = None
-                state["messages"].append(SystemMessage(content="No events to process"))
-                logger.info("No events to process")
-                return state
-            
-            # Pop first event from unprocessed queue
-            event = unprocessed.pop(0)
-            state["unprocessed_events"] = unprocessed
-            event_name = event.get("event", "")
-            
-            logger.info(f"Processing event: {event_name} ({len(unprocessed)} remaining)")
-            
-            if event_name == "AuctionCreated":
-                state["event_type"] = "AuctionCreated"
-                state["processed_event"] = event
-                state["auction_id"] = event.get("args", {}).get("auctionId")
-                state["messages"].append(SystemMessage(content=f"Processing AuctionCreated event for auction {state['auction_id']}"))
-                logger.info(f"Processing AuctionCreated for auction {state['auction_id']}")
+            # 1. Fetch AuctionEnded events to find won auctions
+            won_auctions = []
+            try:
+                ended_events = asyncio.run(self.client.get_contract_events(
+                    contract_name="ReverseAuction",
+                    event_name="AuctionEnded",
+                    from_block=from_block,
+                    to_block=current_block
+                ))
                 
-            elif event_name == "AuctionEnded":
-                state["event_type"] = "AuctionEnded"
-                state["processed_event"] = event
-                auction_id = event.get("args", {}).get("auctionId")
-                state["auction_id"] = auction_id
-                # TODO: Check if we won this auction
-                state["won_auction"] = False  # Placeholder
-                state["messages"].append(SystemMessage(content=f"AuctionEnded for auction {auction_id}"))
-                logger.info(f"AuctionEnded for auction {auction_id}")
+                for event in ended_events:
+                    args = event.get("args", {})
+                    if args.get("winningAgentId") == self.agent_id:
+                        auction_id = args.get("auctionId")
+                        won_auctions.append(auction_id)
+                        logger.info(f"🎉 Won auction {auction_id}!")
+            except Exception as e:
+                logger.warning(f"Error fetching AuctionEnded events: {e}")
             
-            else:
-                # Unknown event type, skip it
-                state["event_type"] = None
-                logger.warning(f"Unknown event type: {event_name}")
+            state["won_auctions"] = won_auctions
             
-        except Exception as e:
-            logger.error(f"Error processing events: {e}")
-            state["error"] = str(e)
-            state["event_type"] = None
-        
-        return state
-    
-    def _check_more_events_node(self, state: BlockchainState) -> BlockchainState:
-        """Check if there are more events to process and prepare for next iteration."""
-        # Add current event to processed list
-        processed_event = state.get("processed_event")
-        if processed_event:
-            processed_events = state.get("processed_events", [])
-            processed_events.append(processed_event)
-            state["processed_events"] = processed_events
-        
-        unprocessed = state.get("unprocessed_events", [])
-        logger.info(f"🔄 Check more events: {len(unprocessed)} remaining")
-        
-        if unprocessed:
-            # Reset per-event state for next iteration
-            state["processed_event"] = None
-            state["event_type"] = None
-            state["auction_id"] = None
-            state["ipfs_data"] = None
-            state["auction_state"] = None
-            state["reputations"] = None
-            state["estimated_cost"] = None
-            state["should_bid"] = False
-            state["bid_amount"] = None
-            state["bid_reasoning"] = None
-            state["won_auction"] = None
-            state["tx_hash"] = None
-            # Keep error if any, but could reset: state["error"] = None
-            state["messages"].append(SystemMessage(content=f"Moving to next event ({len(unprocessed)} remaining)"))
-        else:
-            state["messages"].append(SystemMessage(content=f"All {len(state.get('processed_events', []))} events processed"))
-            logger.info(f"✅ All events processed")
-        
-        return state
-    
-    # ==================== Auction Workflow Path ======================================
-    
-    def _fetch_ipfs_data_node(self, state: BlockchainState) -> BlockchainState:
-        """Fetch service requirements from IPFS using CID."""
-        logger.info("🌐 Fetching IPFS data...")
-        
-        try:
-            auction_state = state.get("auction_state", {})
-            cid = auction_state.get("serviceDescriptionCid", "")
+            # 2. Fetch all active auctions we're eligible for
+            eligible_active_auctions = []
+            try:
+                auction_count = asyncio.run(self.client.call_contract_method(
+                    "ReverseAuction",
+                    "auctionIdCounter"
+                ))
+                
+                logger.info(f"Checking {auction_count} auctions for eligibility...")
+                
+                for auction_id in range(1, auction_count + 1):
+                    try:
+                        is_eligible = asyncio.run(self.client.call_contract_method(
+                            "ReverseAuction",
+                            "isEligibleAgent",
+                            auction_id,
+                            self.agent_id
+                        ))
+                        
+                        if not is_eligible:
+                            continue
+                        
+                        auction = asyncio.run(self.client.call_contract_method(
+                            "ReverseAuction",
+                            "getAuctionDetails",
+                            auction_id
+                        ))
+                        
+                        # Auction struct indices (based on contract):
+                        # 0: id, 1: buyer, 2: serviceDescriptionCid, 3: maxPrice
+                        # 4: duration, 5: startTime, 6: eligibleAgentIds (array)
+                        # 7: winningAgentId, 8: winningBid, 9: isActive
+                        # 10: isCompleted, 11: escrowAmount, 12: reputationWeight
+                        
+                        is_active = auction[9]
+                        start_time = auction[5]
+                        duration = auction[4]
+                        
+                        current_time = int(time.time())
+                        end_time = start_time + duration
+                        time_remaining = max(0, end_time - current_time)
+                        
+                        if not is_active or time_remaining == 0:
+                            continue
+                        
+                        auction_info = {
+                            "auction_id": auction_id,
+                            "buyer": auction[1],
+                            "service_description_cid": auction[2],
+                            "max_price": auction[3],
+                            "duration": duration,
+                            "start_time": start_time,
+                            "end_time": end_time,
+                            "time_remaining": time_remaining,
+                            "winning_agent_id": auction[7],
+                            "winning_bid": auction[8],
+                            "is_active": is_active,
+                            "reputation_weight": auction[12]
+                        }
+                        
+                        eligible_active_auctions.append(auction_info)
+                        logger.info(f"📋 Eligible auction {auction_id}: max_price={auction[3]}, time_remaining={time_remaining}s")
+                        
+                    except Exception as e:
+                        logger.debug(f"Error checking auction {auction_id}: {e}")
+                        continue
+                        
+            except Exception as e:
+                logger.error(f"Error fetching active auctions: {e}")
             
-            if not cid:
-                raise ValueError("No IPFS CID in auction state")
+            state["eligible_active_auctions"] = eligible_active_auctions
+            self._last_processed_block = current_block
             
-            # Fetch from IPFS (using public gateway for now)
-            # TODO: Configure IPFS gateway (Pinata, Infura, or local node)
-            import aiohttp
-            
-            ipfs_gateway_url = f"https://ipfs.io/ipfs/{cid}"
-            
-            async def fetch_ipfs():
-                async with aiohttp.ClientSession() as session:
-                    async with session.get(ipfs_gateway_url, timeout=10) as response:
-                        if response.status == 200:
-                            return await response.json()
-                        else:
-                            raise Exception(f"IPFS fetch failed with status {response.status}")
-            
-            ipfs_data = asyncio.run(fetch_ipfs())
-            
-            state["ipfs_data"] = ipfs_data
-            state["messages"].append(SystemMessage(content=f"Fetched IPFS data from {cid}"))
-            logger.info(f"✅ Fetched IPFS data: {ipfs_data.get('title', 'unknown')}")
+            logger.info(f"✅ State gathered: {len(won_auctions)} won, {len(eligible_active_auctions)} active eligible")
             
         except Exception as e:
-            logger.error(f"Error fetching IPFS data: {e}")
+            logger.error(f"Error gathering state: {e}")
             state["error"] = str(e)
-            state["ipfs_data"] = {}
+            state["won_auctions"] = []
+            state["eligible_active_auctions"] = []
         
         return state
     
-    def _get_auction_state_node(self, state: BlockchainState) -> BlockchainState:
-        """Query ReverseAuction contract for current auction details."""
-        logger.info("📋 Getting auction state...")
+    def _react_reasoning_node(self, state: BlockchainState) -> BlockchainState:
+        """Use ReAct agent to reason about bidding decisions."""
+        logger.info("🤔 ReAct reasoning about auctions...")
+        
+        eligible_auctions = state.get("eligible_active_auctions", [])
+        
+        if not eligible_auctions:
+            logger.info("No eligible auctions to consider")
+            state["bids_placed"] = []
+            return state
+        
+        # Reset bids tracker
+        self._bids_placed = []
         
         try:
-            auction_id = state.get("auction_id")
-            if auction_id is None:
-                raise ValueError("auction_id is required")
+            auctions_context = json.dumps(eligible_auctions, indent=2)
             
-            # Call getAuctionDetails
-            auction_data = asyncio.run(self.client.call_contract_method(
-                "ReverseAuction",
-                "getAuctionDetails",
-                auction_id
-            ))
-            
-            auction_state = {
-                "buyer": auction_data[0],
-                "budget": auction_data[1],
-                "deadline": auction_data[2],
-                "serviceDescriptionCid": auction_data[3],
-                "isActive": auction_data[4],
-                "selectedProvider": auction_data[5],
-                "finalPrice": auction_data[6],
-                "serviceCompleted": auction_data[7]
-            }
-            
-            state["auction_state"] = auction_state
-            state["messages"].append(SystemMessage(content=f"Auction {auction_id}: budget={auction_state['budget']}, deadline={auction_state['deadline']}"))
-            logger.info(f"✅ Auction state: budget={auction_state['budget']}")
-            
-        except Exception as e:
-            logger.error(f"Error getting auction state: {e}")
-            state["error"] = str(e)
-            state["auction_state"] = {}
-        
-        return state
-    
-    def _get_reputations_node(self, state: BlockchainState) -> BlockchainState:
-        """Query ERC-8004 ReputationRegistry for self and competitor reputations."""
-        logger.info("⭐ Getting reputations...")
-        
-        try:
-            auction_id = state.get("auction_id")
-            if auction_id is None:
-                raise ValueError("auction_id is required")
-            
-            # Get list of bidders for this auction
-            # TODO: Query contract for existing bids
-            bidders = []  # Placeholder - need to query getBids or similar
-            
-            # Get our reputation
-            self_reputation = asyncio.run(self.client.call_contract_method(
-                "ReputationRegistry",
-                "getReputation",
-                self.agent_id
-            )) if self.reputation_registry_contract else {"rating": 0, "totalFeedback": 0}
-            
-            # Get competitor reputations
-            competitor_reputations = []
-            for bidder_id in bidders:
-                if bidder_id != self.agent_id:
-                    rep = asyncio.run(self.client.call_contract_method(
-                        "ReputationRegistry",
-                        "getReputation",
-                        bidder_id
-                    )) if self.reputation_registry_contract else {"rating": 0, "totalFeedback": 0}
-                    competitor_reputations.append({"agent_id": bidder_id, "reputation": rep})
-            
-            state["reputations"] = {
-                "self": self_reputation,
-                "competitors": competitor_reputations
-            }
-            state["messages"].append(SystemMessage(content=f"Self reputation: {self_reputation}, Competitors: {len(competitor_reputations)}"))
-            logger.info(f"✅ Reputations fetched: self={self_reputation}, competitors={len(competitor_reputations)}")
-            
-        except Exception as e:
-            logger.error(f"Error getting reputations: {e}")
-            state["error"] = str(e)
-            state["reputations"] = {"self": {}, "competitors": []}
-        
-        return state
-    
-    def _estimate_cost_node(self, state: BlockchainState) -> BlockchainState:
-        """Estimate cost of delivering the service."""
-        logger.info("💰 Estimating service cost...")
-        
-        try:
-            ipfs_data = state.get("ipfs_data", {})
-            auction_state = state.get("auction_state", {})
-            
-            # Simple cost estimation based on service requirements
-            # TODO: Implement sophisticated cost model
-            budget = auction_state.get("budget", 0)
-            
-            # Heuristic: estimate 70% of budget as base cost
-            base_cost = int(budget * 0.7)
-            
-            # Adjust based on complexity (if available in IPFS data)
-            complexity = ipfs_data.get("complexity", "medium")
-            if complexity == "high":
-                base_cost = int(base_cost * 1.2)
-            elif complexity == "low":
-                base_cost = int(base_cost * 0.8)
-            
-            state["estimated_cost"] = base_cost
-            state["messages"].append(SystemMessage(content=f"Estimated cost: {base_cost} wei"))
-            logger.info(f"✅ Estimated cost: {base_cost} wei")
-            
-        except Exception as e:
-            logger.error(f"Error estimating cost: {e}")
-            state["error"] = str(e)
-            state["estimated_cost"] = 0
-        
-        return state
-    
-    def _reason_bid_node(self, state: BlockchainState) -> BlockchainState:
-        """Use LLM to reason about bidding decision."""
-        logger.info("🤔 Reasoning about bid decision...")
-        
-        try:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_core.messages import HumanMessage
-            
-            # Gather all context
-            auction_state = state.get("auction_state", {})
-            ipfs_data = state.get("ipfs_data", {})
-            reputations = state.get("reputations", {})
-            estimated_cost = state.get("estimated_cost", 0)
-            
-            budget = auction_state.get("budget", 0)
-            deadline = auction_state.get("deadline", 0)
-            
-            # Build system prompt with bidding strategy
-            system_prompt = """You are a bidding agent for a decentralized service marketplace.
-Your goal is to win auctions by bidding competitively while maintaining profitability.
+            system_prompt = f"""You are a bidding agent (ID: {self.agent_id}) for a decentralized AI service marketplace.
 
-Bidding Strategy:
-1. Only bid if estimated cost < budget (profitable)
-2. Consider your reputation vs competitors
-3. Bid lower if you have better reputation
-4. Bid slightly below budget to maximize winning chance
-5. Account for deadline urgency
-6. Consider service complexity
+Available tools:
+- get_ipfs_data(auction_id): Fetch service requirements from IPFS
+- get_reputation(agent_id): Get reputation score for an agent  
+- estimate_cost(service_requirements): Estimate cost to deliver a service
+- place_bid(auction_id, bid_amount): Submit a bid for an auction
 
-Output format (JSON):
-{
-    "should_bid": true/false,
-    "bid_amount": <amount in wei>,
-    "reasoning": "<brief explanation>"
-}"""
-            
-            # Build context
-            context = f"""
-Auction Analysis:
-- Budget: {budget} wei
-- Deadline: {deadline} (unix timestamp)
-- Estimated Cost: {estimated_cost} wei
-- Profit Margin: {budget - estimated_cost} wei ({((budget - estimated_cost) / budget * 100) if budget > 0 else 0:.1f}%)
+BIDDING GUIDELINES:
+1. Analyze each auction before bidding
+2. Only bid if profitable (bid_amount > estimated_cost)
+3. Consider time remaining - urgent auctions may need immediate bids
+4. Check current winning bid - you need a better score to win
+5. Your reputation affects your score
+6. You can bid on multiple auctions if profitable
+7. If no auctions are profitable, don't bid
 
-Service Requirements:
-{ipfs_data}
+Current eligible auctions:
+{auctions_context}
 
-Reputation Context:
-- Self: {reputations.get('self', {})}
-- Competitors: {len(reputations.get('competitors', []))} bidders
+Analyze these auctions and decide which to bid on."""
 
-Should we bid? If yes, what amount?
-"""
-            
-            # Call LLM
             llm = ChatGoogleGenerativeAI(
-                model=self.config.gemini_model,
-                google_api_key=self.config.gemini_api_key,
+                model="gemini-2.5-pro",
+                google_api_key=self.config.google_api_key,
                 temperature=0.3
             )
             
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=context)
-            ]
+            react_agent = create_react_agent(llm, self._tools)
             
-            response = llm.invoke(messages)
+            react_agent.invoke({"messages": [HumanMessage(content=system_prompt)]})
             
-            # Parse response
-            import json
-            response_text = response.content
-            # Extract JSON from markdown code blocks if present
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
-            
-            decision = json.loads(response_text)
-            
-            state["should_bid"] = decision.get("should_bid", False)
-            state["bid_amount"] = decision.get("bid_amount", 0)
-            state["bid_reasoning"] = decision.get("reasoning", "")
-            
-            state["messages"].append(SystemMessage(content=f"Bid decision: {decision}"))
-            logger.info(f"✅ Bid decision: should_bid={state['should_bid']}, amount={state['bid_amount']}")
-            logger.info(f"   Reasoning: {state['bid_reasoning']}")
+            state["bids_placed"] = self._bids_placed
+            logger.info(f"✅ ReAct completed: {len(self._bids_placed)} bids placed")
             
         except Exception as e:
-            logger.error(f"Error in bid reasoning: {e}")
+            logger.error(f"Error in ReAct reasoning: {e}")
             state["error"] = str(e)
-            state["should_bid"] = False
-            state["bid_reasoning"] = f"Error: {str(e)}"
+            state["bids_placed"] = []
         
         return state
     
-    def _submit_bid_node(self, state: BlockchainState) -> BlockchainState:
-        """Submit bid transaction to blockchain."""
-        logger.info("📤 Submitting bid...")
-        
-        try:
-            auction_id = state.get("auction_id")
-            bid_amount = state.get("bid_amount", 0)
-            
-            if auction_id is None:
-                raise ValueError("auction_id is required")
-            if bid_amount <= 0:
-                raise ValueError("bid_amount must be positive")
-            
-            # Estimate gas
-            estimated_gas = asyncio.run(self.client.estimate_gas(
-                "ReverseAuction",
-                "placeBid",
-                auction_id,
-                value=0
-            ))
-            
-            # Send transaction
-            tx_hash = asyncio.run(self.client.send_transaction(
-                "ReverseAuction",
-                "placeBid",
-                auction_id,
-                value=0,
-                gas_limit=estimated_gas + 50000
-            ))
-            
-            # Wait for confirmation
-            receipt = asyncio.run(self.client.wait_for_transaction(tx_hash))
-            
-            if receipt['status'] == 1:
-                state["tx_hash"] = tx_hash
-                state["messages"].append(SystemMessage(content=f"Bid submitted: {tx_hash}"))
-                logger.info(f"✅ Bid submitted in block {receipt['blockNumber']}")
-            else:
-                raise Exception("Transaction failed")
-            
-        except Exception as e:
-            logger.error(f"Error submitting bid: {e}")
-            state["error"] = str(e)
-        
-        return state
-    
-    # ==================== Helper Methods ====================
-    
-    async def _fetch_auctions(self, from_block: str = "latest", to_block: str = "latest") -> List[AuctionInfo]:
-        """Fetch auctions from blockchain."""
-        if not self.contracts_loaded:
-            await self.initialize()
-        
-        try:
-            events = await self.client.get_contract_events(
-                contract_name="ReverseAuction",
-                event_name="AuctionCreated",
-                from_block=from_block,
-                to_block=to_block
-            )
-            
-            auctions = []
-            for event in events:
-                args = event.get('args', {})
-                auction_id = args.get('auctionId', 0)
-                
-                auction_data = await self.client.call_contract_method(
-                    "ReverseAuction",
-                    "getAuctionDetails",
-                    auction_id
-                )
-                
-                auction_info = AuctionInfo({
-                    'auctionId': auction_id,
-                    'buyer': auction_data[0],
-                    'budget': auction_data[1],
-                    'deadline': auction_data[2],
-                    'serviceDescriptionCid': auction_data[3],
-                    'isActive': auction_data[4],
-                    'selectedProvider': auction_data[5],
-                    'finalPrice': auction_data[6],
-                    'serviceCompleted': auction_data[7]
-                })
-                
-                auctions.append(auction_info)
-            
-            return auctions
-            
-        except Exception as e:
-            logger.error(f"Error fetching auctions: {e}")
-            return []
-    
-    async def _submit_bid(self, auction_id: int, bid_amount: int) -> Optional[str]:
-        """Submit bid transaction."""
-        try:
-            logger.info(f"Submitting bid to auction {auction_id}: {bid_amount}")
-            
-            estimated_gas = await self.client.estimate_gas(
-                "ReverseAuction",
-                "placeBid",
-                auction_id,
-                value=0
-            )
-            
-            tx_hash = await self.client.send_transaction(
-                "ReverseAuction",
-                "placeBid",
-                auction_id,
-                value=0,
-                gas_limit=estimated_gas + 50000
-            )
-            
-            receipt = await self.client.wait_for_transaction(tx_hash)
-            
-            if receipt['status'] == 1:
-                logger.info(f"✅ Bid confirmed in block {receipt['blockNumber']}")
-                return tx_hash
-            else:
-                logger.error("❌ Bid transaction failed")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error submitting bid: {e}")
-            return None
-    
-    async def monitor_auctions(self, from_block: str = "latest", to_block: str = "latest") -> Dict[str, Any]:
+    async def monitor_auctions(self) -> Dict[str, Any]:
         """
-        Monitor blockchain for new auction events.
+        Monitor blockchain for auctions and make bidding decisions.
         
-        This invokes the graph with action="monitor" to process events.
+        Returns:
+            Dictionary with won_auctions, bids_placed, and any errors
         """
         initial_state: BlockchainState = {
             "agent_id": self.agent_id,
@@ -847,20 +567,9 @@ Should we bid? If yes, what amount?
             "auction_id": None,
             "client_address": None,
             "feedback_auth": None,
-            "last_processed_block": self._last_processed_block,  # Use instance variable for persistence
-            "current_block": None,
-            "unprocessed_events": [],
-            "processed_events": [],
-            "processed_event": None,
-            "event_type": None,
-            "ipfs_data": None,
-            "auction_state": None,
-            "reputations": None,
-            "estimated_cost": None,
-            "should_bid": False,
-            "bid_amount": None,
-            "bid_reasoning": None,
-            "won_auction": None,
+            "won_auctions": [],
+            "eligible_active_auctions": [],
+            "bids_placed": [],
             "tx_hash": None,
             "error": None,
             "messages": []
@@ -868,20 +577,10 @@ Should we bid? If yes, what amount?
         
         result = self.graph.invoke(initial_state)
         
-        # Persist the last processed block for next invocation
-        if result.get("last_processed_block"):
-            self._last_processed_block = result["last_processed_block"]
-        
         return {
-            "event_type": result.get("event_type"),
-            "auction_id": result.get("auction_id"),
-            "should_bid": result.get("should_bid"),
-            "bid_amount": result.get("bid_amount"),
-            "bid_reasoning": result.get("bid_reasoning"),
-            "tx_hash": result.get("tx_hash"),
-            "won_auction": result.get("won_auction"),
-            "last_processed_block": result.get("last_processed_block"),
-            "processed_events_count": len(result.get("processed_events", [])),
+            "won_auctions": result.get("won_auctions", []),
+            "eligible_active_auctions_count": len(result.get("eligible_active_auctions", [])),
+            "bids_placed": result.get("bids_placed", []),
             "error": result.get("error")
         }
     
@@ -889,7 +588,12 @@ Should we bid? If yes, what amount?
         """
         Complete service for an auction.
         
-        This invokes the graph with action="complete_service".
+        Args:
+            auction_id: The auction ID to complete
+            client_address: The buyer's address
+            
+        Returns:
+            Dictionary with tx_hash, feedback_auth, and any errors
         """
         initial_state: BlockchainState = {
             "agent_id": self.agent_id,
@@ -897,20 +601,9 @@ Should we bid? If yes, what amount?
             "auction_id": auction_id,
             "client_address": client_address,
             "feedback_auth": None,
-            "last_processed_block": None,
-            "current_block": None,
-            "unprocessed_events": [],
-            "processed_events": [],
-            "processed_event": None,
-            "event_type": None,
-            "ipfs_data": None,
-            "auction_state": None,
-            "reputations": None,
-            "estimated_cost": None,
-            "should_bid": False,
-            "bid_amount": None,
-            "bid_reasoning": None,
-            "won_auction": None,
+            "won_auctions": [],
+            "eligible_active_auctions": [],
+            "bids_placed": [],
             "tx_hash": None,
             "error": None,
             "messages": []
@@ -924,37 +617,3 @@ Should we bid? If yes, what amount?
             "error": result.get("error")
         }
     
-    def create_feedback_auth(self, client_address: str, index_limit: int = 1000, expiry: Optional[int] = None) -> bytes:
-        """Generate ERC-8004 compliant feedbackAuth."""
-        if expiry is None:
-            expiry = int(datetime.now().timestamp()) + 3600
-        
-        if not self.client.account:
-            raise ValueError("No account configured")
-        
-        feedback_auth = generate_feedback_auth(
-            agent_id=self.agent_id,
-            client_address=client_address,
-            index_limit=index_limit,
-            expiry=expiry,
-            chain_id=self.config.chain_id,
-            identity_registry_address=self.config.identity_registry_address,
-            signer_address=self.client.account.address,
-            private_key=self.config.private_key
-        )
-        
-        if not verify_feedback_auth_format(feedback_auth):
-            raise ValueError("Generated feedbackAuth has invalid format")
-        
-        logger.info(f"✅ Created feedbackAuth for agent {self.agent_id}")
-        return feedback_auth
-    
-    async def get_agent_address(self) -> str:
-        """Get agent's blockchain address."""
-        if self.client.account:
-            return self.client.account.address
-        return "0x0000000000000000000000000000000000000000"
-    
-    async def get_balance(self, address: Optional[str] = None) -> int:
-        """Get balance in wei."""
-        return await self.client.get_balance(address)
