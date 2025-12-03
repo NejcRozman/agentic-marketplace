@@ -29,6 +29,7 @@ from ..infrastructure.contract_abis import (
     get_reputation_registry_abi
 )
 from ..infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
+from ..infrastructure.ipfs_client import IPFSClient
 from ..config import config
 
 logger = logging.getLogger(__name__)
@@ -94,37 +95,26 @@ class BlockchainHandler:
         handler = self
         
         @tool
-        def get_ipfs_data(auction_id: int) -> Dict[str, Any]:
-            """Fetch service requirements from IPFS for a specific auction.
+        def get_ipfs_data(cid: str) -> Dict[str, Any]:
+            """Fetch service requirements from IPFS using a CID.
             
             Args:
-                auction_id: The auction ID to fetch IPFS data for
+                cid: The IPFS content identifier (from auction's service_description_cid)
                 
             Returns:
                 Dictionary containing service requirements from IPFS
             """
             try:
-                auction_data = asyncio.run(handler.client.call_contract_method(
-                    "ReverseAuction",
-                    "getAuctionDetails",
-                    auction_id
-                ))
-                cid = auction_data[2]  # serviceDescriptionCid
-                
                 if not cid:
-                    return {"error": "No IPFS CID found"}
+                    return {"error": "No IPFS CID provided"}
                 
-                import aiohttp
-                ipfs_gateway_url = f"https://ipfs.io/ipfs/{cid}"
+                ipfs_client = IPFSClient()
+                result = asyncio.run(ipfs_client.fetch_json(cid))
                 
-                async def fetch():
-                    async with aiohttp.ClientSession() as session:
-                        async with session.get(ipfs_gateway_url, timeout=10) as response:
-                            if response.status == 200:
-                                return await response.json()
-                            return {"error": f"IPFS fetch failed: {response.status}"}
+                if result is None:
+                    return {"error": "Failed to fetch from IPFS"}
                 
-                return asyncio.run(fetch())
+                return result
             except Exception as e:
                 return {"error": str(e)}
         
@@ -515,7 +505,7 @@ class BlockchainHandler:
             system_prompt = f"""You are a bidding agent (ID: {self.agent_id}) for a decentralized AI service marketplace.
 
 Available tools:
-- get_ipfs_data(auction_id): Fetch service requirements from IPFS
+- get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
 - get_reputation(agent_id): Get reputation score for an agent  
 - estimate_cost(service_requirements): Estimate cost to deliver a service
 - place_bid(auction_id, bid_amount): Submit a bid for an auction

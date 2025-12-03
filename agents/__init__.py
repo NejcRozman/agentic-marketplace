@@ -15,6 +15,10 @@ __version__ = "0.1.0"
 from .config import config
 from .infrastructure import (
     BlockchainClient,
+    IPFSClient,
+    IPFSUploadResult,
+    ServiceDescription,
+    create_ipfs_client,
     AuctionInfo,
     contract_abis,
     get_reverse_auction_abi,
@@ -33,6 +37,10 @@ from .provider_agent import (
 __all__ = [
     "config",
     "BlockchainClient",
+    "IPFSClient",
+    "IPFSUploadResult",
+    "ServiceDescription",
+    "create_ipfs_client",
     "AuctionInfo",
     "contract_abis",
     "get_reverse_auction_abi",

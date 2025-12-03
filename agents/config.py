@@ -21,6 +21,11 @@ class Config:
         # Google Gemini API
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
         
+        # Pinata IPFS
+        self.pinata_api_key = os.getenv("PINATA_API_KEY")
+        self.pinata_api_secret = os.getenv("PINATA_API_SECRET")
+        self.pinata_jwt = os.getenv("PINATA_JWT")
+        
         # Blockchain connection
         self.rpc_url = os.getenv("BLOCKCHAIN_RPC_URL", "http://localhost:8545")
         self.chain_id = int(os.getenv("BLOCKCHAIN_CHAIN_ID", "31337"))
@@ -77,6 +82,8 @@ class Config:
         """Display current configuration (hiding sensitive data)."""
         print("Configuration:")
         print(f"  Google API Key: {'✓ Set' if self.google_api_key else '✗ Not set'}")
+        print(f"  Pinata JWT: {'✓ Set' if self.pinata_jwt else '✗ Not set'}")
+        print(f"  Pinata API Key: {'✓ Set' if self.pinata_api_key else '✗ Not set'}")
         print(f"  RPC URL: {self.rpc_url}")
         print(f"  Chain ID: {self.chain_id}")
         print(f"  Private Key: {'✓ Set' if self.private_key else '✗ Not set'}")
