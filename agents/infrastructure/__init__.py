@@ -18,7 +18,6 @@ from .feedback_auth import (
     parse_feedback_auth,
     verify_feedback_auth_format
 )
-from .auction_data import AuctionInfo
 
 __all__ = [
     "BlockchainClient",
@@ -33,5 +32,4 @@ __all__ = [
     "generate_feedback_auth",
     "parse_feedback_auth",
     "verify_feedback_auth_format",
-    "AuctionInfo",
 ]

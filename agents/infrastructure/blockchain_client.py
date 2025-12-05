@@ -28,12 +28,13 @@ class BlockchainClient:
         self.w3: Optional[AsyncWeb3] = None
         self.account: Optional[Account] = None
         self.contracts: Dict[str, Any] = {}
-        
-        # Initialize connection
-        asyncio.create_task(self._initialize())
+        self._initialized = False
     
     async def _initialize(self):
         """Initialize the blockchain connection."""
+        if self._initialized:
+            return
+        
         try:
             # Create Web3 instance
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.config.rpc_url))
@@ -50,6 +51,7 @@ class BlockchainClient:
             if await self.is_connected():
                 chain_id = await self.w3.eth.chain_id
                 logger.info(f"Connected to blockchain - Chain ID: {chain_id}")
+                self._initialized = True
             else:
                 logger.error("Failed to connect to blockchain")
                 

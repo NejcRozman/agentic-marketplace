@@ -10,40 +10,36 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
  * @notice Creates a test auction for the provider agent to discover and bid on
  * 
  * Usage:
- *   1. Make sure Anvil is running with Sepolia fork
- *   2. Make sure Deploy.s.sol has been run
+ *   1. Make sure ReverseAuction is deployed (run Deploy.s.sol first)
+ *   2. Make sure AGENT_ID is set in .env (run RegisterAgent.s.sol first)
  *   3. Run this script:
- *      forge script script/CreateAuction.s.sol --rpc-url localhost --broadcast
+ *      forge script script/CreateAuction.s.sol --rpc-url sepolia --broadcast
  * 
- * The script will:
- *   - Approve USDC spending for the ReverseAuction contract
- *   - Create a new auction with test parameters
- *   - Output the auction ID for testing
+ * Required .env variables:
+ *   - PRIVATE_KEY: Private key of the buyer account (must have USDC)
+ *   - REVERSE_AUCTION_ADDRESS: Deployed ReverseAuction contract
+ *   - MOCK_USDC_ADDRESS: Mock USDC token contract (from Deploy.s.sol)
+ *   - AGENT_ID: The agent ID to include as eligible bidder
+ *   - SERVICE_DESCRIPTION_CID: (optional) IPFS CID for service description
  */
 contract CreateAuctionScript is Script {
-    // Anvil's pre-funded test accounts
-    address constant BUYER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
-    
-    // Anvil's private key for Buyer (Account 1)
-    uint256 constant BUYER_PK = 0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d;
-    
     function run() external {
-        // Load contract addresses from environment
+        // Load from environment
+        uint256 privateKey = vm.envUint("PRIVATE_KEY");
+        address buyer = vm.addr(privateKey);
         address reverseAuctionAddr = vm.envAddress("REVERSE_AUCTION_ADDRESS");
         address usdcAddr = vm.envAddress("MOCK_USDC_ADDRESS");
+        uint256 agentId = vm.envUint("AGENT_ID");
         
         console.log("=== Create Auction ===");
-        console.log("Buyer:", BUYER);
+        console.log("Buyer:", buyer);
         console.log("ReverseAuction:", reverseAuctionAddr);
         console.log("USDC:", usdcAddr);
-        console.log("Eligible Agent ID:", vm.envUint("AGENT_ID"));
+        console.log("Eligible Agent ID:", agentId);
         console.log("");
         
         ReverseAuction reverseAuction = ReverseAuction(reverseAuctionAddr);
         IERC20 usdc = IERC20(usdcAddr);
-        
-        // Load the provider's agent ID
-        uint256 agentId = vm.envUint("AGENT_ID");
         
         // Load service description CID from environment (or use default for testing)
         string memory serviceDescriptionCID = vm.envOr(
@@ -56,14 +52,14 @@ contract CreateAuctionScript is Script {
         uint256 duration = 1 hours;
         uint256 reputationWeight = 50; // 50% reputation, 50% price
         
-        // Create eligible agents array with just our provider's agent
+        // Create eligible agents array with the provider's agent
         uint256[] memory eligibleAgentIds = new uint256[](1);
         eligibleAgentIds[0] = agentId;
         
-        vm.startBroadcast(BUYER_PK);
+        vm.startBroadcast(privateKey);
         
         // Check buyer's USDC balance
-        uint256 balance = usdc.balanceOf(BUYER);
+        uint256 balance = usdc.balanceOf(buyer);
         console.log("Buyer USDC balance:", balance / 1e6, "USDC");
         require(balance >= maxBudget, "Insufficient USDC balance");
         
