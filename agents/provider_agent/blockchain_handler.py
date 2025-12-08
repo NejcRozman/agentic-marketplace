@@ -20,6 +20,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import create_react_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
+from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 from ..infrastructure.blockchain_client import BlockchainClient
@@ -298,7 +299,7 @@ class BlockchainHandler:
             return "complete_service"
         return "monitor"
     
-    def _generate_feedback_auth_node(self, state: BlockchainState) -> BlockchainState:
+    async def _generate_feedback_auth_node(self, state: BlockchainState) -> BlockchainState:
         """Generate ERC-8004 feedbackAuth for service completion."""
         logger.info("🔐 Generating feedbackAuth...")
         
@@ -331,7 +332,7 @@ class BlockchainHandler:
         
         return state
     
-    def _call_complete_service_node(self, state: BlockchainState) -> BlockchainState:
+    async def _call_complete_service_node(self, state: BlockchainState) -> BlockchainState:
         """Call completeService on ReverseAuction contract."""
         logger.info("📝 Calling completeService...")
         
@@ -344,22 +345,22 @@ class BlockchainHandler:
             if not feedback_auth:
                 raise ValueError("feedback_auth is required")
             
-            estimated_gas = asyncio.run(self.client.estimate_gas(
+            estimated_gas = await self.client.estimate_gas(
                 "ReverseAuction",
                 "completeService",
                 auction_id,
                 feedback_auth
-            ))
+            )
             
-            tx_hash = asyncio.run(self.client.send_transaction(
+            tx_hash = await self.client.send_transaction(
                 "ReverseAuction",
                 "completeService",
                 auction_id,
                 feedback_auth,
                 gas_limit=estimated_gas + 50000
-            ))
+            )
             
-            receipt = asyncio.run(self.client.wait_for_transaction(tx_hash))
+            receipt = await self.client.wait_for_transaction(tx_hash)
             
             if receipt['status'] == 1:
                 state["tx_hash"] = tx_hash
@@ -373,23 +374,23 @@ class BlockchainHandler:
         
         return state
     
-    def _gather_state_node(self, state: BlockchainState) -> BlockchainState:
+    async def _gather_state_node(self, state: BlockchainState) -> BlockchainState:
         """Gather blockchain state: won auctions and active eligible auctions."""
         logger.info("📡 Gathering blockchain state...")
         
         try:
-            current_block = asyncio.run(self.client.get_block_number())
+            current_block = await self.client.get_block_number()
             from_block = self._last_processed_block + 1 if self._last_processed_block > 0 else max(0, current_block - 100)
             
             # 1. Fetch AuctionEnded events to find won auctions
             won_auctions = []
             try:
-                ended_events = asyncio.run(self.client.get_contract_events(
+                ended_events = await self.client.get_contract_events(
                     contract_name="ReverseAuction",
                     event_name="AuctionEnded",
                     from_block=from_block,
                     to_block=current_block
-                ))
+                )
                 
                 for event in ended_events:
                     args = event.get("args", {})
@@ -405,30 +406,30 @@ class BlockchainHandler:
             # 2. Fetch all active auctions we're eligible for
             eligible_active_auctions = []
             try:
-                auction_count = asyncio.run(self.client.call_contract_method(
+                auction_count = await self.client.call_contract_method(
                     "ReverseAuction",
                     "auctionIdCounter"
-                ))
+                )
                 
                 logger.info(f"Checking {auction_count} auctions for eligibility...")
                 
                 for auction_id in range(1, auction_count + 1):
                     try:
-                        is_eligible = asyncio.run(self.client.call_contract_method(
+                        is_eligible = await self.client.call_contract_method(
                             "ReverseAuction",
                             "isEligibleAgent",
                             auction_id,
                             self.agent_id
-                        ))
+                        )
                         
                         if not is_eligible:
                             continue
                         
-                        auction = asyncio.run(self.client.call_contract_method(
+                        auction = await self.client.call_contract_method(
                             "ReverseAuction",
                             "getAuctionDetails",
                             auction_id
-                        ))
+                        )
                         
                         # Auction struct indices (based on contract):
                         # 0: id, 1: buyer, 2: serviceDescriptionCid, 3: maxPrice
@@ -440,7 +441,10 @@ class BlockchainHandler:
                         start_time = auction[5]
                         duration = auction[4]
                         
-                        current_time = int(time.time())
+                        # Use blockchain timestamp, not real-world time
+                        # This is important for Anvil forks where time is frozen
+                        block = await self.client.get_block('latest')
+                        current_time = block['timestamp']
                         end_time = start_time + duration
                         time_remaining = max(0, end_time - current_time)
                         
@@ -485,7 +489,7 @@ class BlockchainHandler:
         
         return state
     
-    def _react_reasoning_node(self, state: BlockchainState) -> BlockchainState:
+    async def _react_reasoning_node(self, state: BlockchainState) -> BlockchainState:
         """Use ReAct agent to reason about bidding decisions."""
         logger.info("🤔 ReAct reasoning about auctions...")
         
@@ -524,15 +528,22 @@ Current eligible auctions:
 
 Analyze these auctions and decide which to bid on."""
 
+            rate_limiter = InMemoryRateLimiter(
+                requests_per_second=0.2, 
+                check_every_n_seconds=0.1,
+                max_bucket_size=1
+            )
+            
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-pro",
+                model="gemini-2.5-flash-lite",
                 google_api_key=self.config.google_api_key,
-                temperature=0.3
+                temperature=0.3,
+                rate_limiter=rate_limiter
             )
             
             react_agent = create_react_agent(llm, self._tools)
             
-            react_agent.invoke({"messages": [HumanMessage(content=system_prompt)]})
+            await react_agent.ainvoke({"messages": [HumanMessage(content=system_prompt)]})
             
             state["bids_placed"] = self._bids_placed
             logger.info(f"✅ ReAct completed: {len(self._bids_placed)} bids placed")
@@ -565,7 +576,7 @@ Analyze these auctions and decide which to bid on."""
             "messages": []
         }
         
-        result = self.graph.invoke(initial_state)
+        result = await self.graph.ainvoke(initial_state)
         
         return {
             "won_auctions": result.get("won_auctions", []),
@@ -599,7 +610,7 @@ Analyze these auctions and decide which to bid on."""
             "messages": []
         }
         
-        result = self.graph.invoke(initial_state)
+        result = await self.graph.ainvoke(initial_state)
         
         return {
             "tx_hash": result.get("tx_hash"),

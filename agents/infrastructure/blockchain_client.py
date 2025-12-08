@@ -30,6 +30,16 @@ class BlockchainClient:
         self.contracts: Dict[str, Any] = {}
         self._initialized = False
     
+    async def __aenter__(self):
+        """Async context manager entry."""
+        await self._initialize()
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit."""
+        await self.close()
+        return False
+    
     async def _initialize(self):
         """Initialize the blockchain connection."""
         if self._initialized:
@@ -38,10 +48,7 @@ class BlockchainClient:
         try:
             # Create Web3 instance
             self.w3 = AsyncWeb3(AsyncWeb3.AsyncHTTPProvider(self.config.rpc_url))
-            
-            # Note: PoA middleware is no longer needed in web3.py v7+
-            # The library handles PoA chains automatically
-            
+                       
             # Set up account if private key is provided
             if self.config.private_key:
                 self.account = Account.from_key(self.config.private_key)
@@ -192,21 +199,24 @@ class BlockchainClient:
         to_block: Union[int, str] = 'latest',
         filters: Optional[Dict] = None
     ) -> List[Dict]:
-        """Get contract events."""
+        """Get contract events using eth_getLogs."""
         if contract_name not in self.contracts:
             raise ValueError(f"Contract {contract_name} not loaded")
+        
+        if not self.w3:
+            raise RuntimeError("Blockchain client not initialized")
         
         contract = self.contracts[contract_name]
         event = getattr(contract.events, event_name)
         
-        event_filter = event.create_filter(
-            fromBlock=from_block,
-            toBlock=to_block,
+        # Use get_logs instead of create_filter for async web3
+        logs = await event.get_logs(
+            from_block=from_block,
+            to_block=to_block,
             argument_filters=filters or {}
         )
         
-        events = await event_filter.get_all_entries()
-        return [dict(event) for event in events]
+        return [dict(log) for log in logs]
     
     async def estimate_gas(
         self,
@@ -299,3 +309,13 @@ class BlockchainClient:
         
         tx = await self.w3.eth.get_transaction(tx_hash)
         return dict(tx)
+    
+    async def close(self):
+        """Close the blockchain client and release resources."""
+        if self.w3 and self.w3.provider:
+            try:
+                await self.w3.provider.disconnect()
+            except Exception as e:
+                logger.debug(f"Error disconnecting provider: {e}")
+        self._initialized = False
+        logger.info("BlockchainClient closed")

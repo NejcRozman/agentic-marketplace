@@ -65,6 +65,10 @@ class TestBlockchainClient(unittest.TestCase):
         """Create a BlockchainClient instance."""
         self.client = BlockchainClient()
     
+    def tearDown(self):
+        """Close the BlockchainClient."""
+        run_async(self.client.close())
+    
     def test_get_block_number(self):
         """Test getting current block number."""
         async def _test():
@@ -143,6 +147,10 @@ class TestBlockchainHandlerMonitor(unittest.TestCase):
         agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3272"))
         self.handler = BlockchainHandler(agent_id=agent_id)
     
+    def tearDown(self):
+        """Close the BlockchainClient."""
+        run_async(self.handler.client.close())
+    
     def test_handler_initialize(self):
         """Test that handler can initialize contracts."""
         async def _test():
@@ -183,6 +191,10 @@ class TestEndToEndWorkflow(unittest.TestCase):
         """Create a BlockchainHandler instance."""
         agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3272"))
         self.handler = BlockchainHandler(agent_id=agent_id)
+    
+    def tearDown(self):
+        """Close the BlockchainClient."""
+        run_async(self.handler.client.close())
     
     def test_full_workflow(self):
         """
