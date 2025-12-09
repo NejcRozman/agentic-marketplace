@@ -17,7 +17,7 @@ from datetime import datetime
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -34,7 +34,6 @@ from ..infrastructure.ipfs_client import IPFSClient
 from ..config import config
 
 logger = logging.getLogger(__name__)
-
 
 class BlockchainState(TypedDict):
     """State for blockchain agent workflow."""
@@ -162,7 +161,7 @@ class BlockchainHandler:
                 requirements = json.loads(service_requirements) if isinstance(service_requirements, str) else service_requirements
                 
                 complexity = requirements.get("complexity", "medium")
-                base_cost = 100
+                base_cost = 50  # Base cost in USDC
                 
                 multipliers = {"low": 0.7, "medium": 1.0, "high": 1.5}
                 multiplier = multipliers.get(complexity, 1.0)
@@ -529,21 +528,50 @@ Current eligible auctions:
 Analyze these auctions and decide which to bid on."""
 
             rate_limiter = InMemoryRateLimiter(
-                requests_per_second=0.2, 
+                requests_per_second=0.1, 
                 check_every_n_seconds=0.1,
                 max_bucket_size=1
             )
             
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
+                model="gemini-2.5-flash",
                 google_api_key=self.config.google_api_key,
                 temperature=0.3,
                 rate_limiter=rate_limiter
             )
             
-            react_agent = create_react_agent(llm, self._tools)
+            react_agent = create_agent(llm, self._tools)
             
-            await react_agent.ainvoke({"messages": [HumanMessage(content=system_prompt)]})
+            result = await react_agent.ainvoke({"messages": [HumanMessage(content=system_prompt)]})
+            
+            # Log the agent's reasoning trace
+            logger.info("\n" + "=" * 80)
+            logger.info("🤖 AGENT REASONING TRACE")
+            logger.info("=" * 80)
+            for i, msg in enumerate(result["messages"], 1):
+                msg_class = msg.__class__.__name__
+                
+                # Human/System messages
+                if hasattr(msg, 'content') and msg.content:
+                    content = str(msg.content)
+                    if len(content) > 500:
+                        content = content[:500] + "..."
+                    logger.info(f"\n[{i}] {msg_class}:\n{content}")
+                
+                # AI messages with tool calls
+                if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                    logger.info(f"\n[{i}] {msg_class} - Tool Calls:")
+                    for tc in msg.tool_calls:
+                        tool_name = tc.get('name', 'unknown')
+                        tool_args = tc.get('args', {})
+                        logger.info(f"  🔧 {tool_name}({tool_args})")
+                
+                # Tool messages (results)
+                if msg_class == "ToolMessage":
+                    tool_output = str(msg.content)[:300]
+                    logger.info(f"\n[{i}] ToolMessage:\n  ✅ {tool_output}")
+            
+            logger.info("=" * 80 + "\n")
             
             state["bids_placed"] = self._bids_placed
             logger.info(f"✅ ReAct completed: {len(self._bids_placed)} bids placed")

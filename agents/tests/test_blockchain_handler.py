@@ -21,6 +21,13 @@ Run with: python agents/tests/test_blockchain_handler.py
 import unittest
 import asyncio
 import os
+import logging
+
+# Configure logging to see all output
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Use absolute imports from agents package
 from agents.config import config
