@@ -37,20 +37,12 @@ contract RegisterAgentScript is Script {
         
         vm.startBroadcast(privateKey);
         
-        // Register agent - call register() which mints an agent NFT to msg.sender
-        (bool success, bytes memory data) = identityRegistryAddr.call(
-            abi.encodeWithSignature("register()")
-        );
-        require(success, "Registration failed");
-        
-        uint256 agentId;
-        if (data.length >= 32) {
-            agentId = abi.decode(data, (uint256));
-        }
+        // Register agent using the interface function
+        uint256 agentId = identityRegistry.register();
         
         vm.stopBroadcast();
         
-        // Verify registration
+        // Verify registration (view calls AFTER stopBroadcast to avoid nonce issues)
         uint256 balanceAfter = identityRegistry.balanceOf(caller);
         address agentOwner = identityRegistry.ownerOf(agentId);
         

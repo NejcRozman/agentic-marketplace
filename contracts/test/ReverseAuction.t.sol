@@ -12,9 +12,22 @@ import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/Messa
 
 contract MockIdentityRegistry is IIdentityRegistry {
     mapping(uint256 => address) private _owners;
+    mapping(uint256 => mapping(string => bytes)) private _metadata;
     uint256 private _tokenIdCounter;
 
     function register() external returns (uint256) {
+        uint256 tokenId = ++_tokenIdCounter;
+        _owners[tokenId] = msg.sender;
+        return tokenId;
+    }
+
+    function register(string calldata) external returns (uint256) {
+        uint256 tokenId = ++_tokenIdCounter;
+        _owners[tokenId] = msg.sender;
+        return tokenId;
+    }
+
+    function register(string calldata, MetadataEntry[] calldata) external returns (uint256) {
         uint256 tokenId = ++_tokenIdCounter;
         _owners[tokenId] = msg.sender;
         return tokenId;
@@ -32,6 +45,14 @@ contract MockIdentityRegistry is IIdentityRegistry {
 
     function setOwner(uint256 tokenId, address newOwner) external {
         _owners[tokenId] = newOwner;
+    }
+
+    function getMetadata(uint256, string calldata) external pure returns (bytes memory) {
+        return "";
+    }
+
+    function setMetadata(uint256 agentId, string calldata key, bytes calldata value) external {
+        _metadata[agentId][key] = value;
     }
 
     // ERC721 required functions (minimal implementation)
@@ -84,8 +105,8 @@ contract MockReputationRegistry is IReputationRegistry {
     function getSummary(
         uint256 agentId,
         address[] calldata clientAddresses,
-        uint256,
-        uint256
+        bytes32,
+        bytes32
     ) external view override returns (uint256 feedbackCount, uint256 averageScore) {
         if (clientAddresses.length == 0) {
             // Return default for all clients

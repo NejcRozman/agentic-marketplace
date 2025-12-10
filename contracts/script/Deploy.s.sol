@@ -22,28 +22,27 @@ import {ERC20Mock} from "@openzeppelin/contracts/mocks/token/ERC20Mock.sol";
  *   - Mint USDC to test accounts for auction creation
  */
 contract DeployScript is Script {
-    // Anvil's pre-funded test accounts (public keys - safe to hardcode)
-    address constant DEPLOYER = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
-    address constant BUYER = 0x70997970C51812dc3A010C7d01b50e0d17dc79C8;
-    address constant PROVIDER = 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC;
-    
-    // Anvil's private keys (these are public test keys)
-    uint256 constant DEPLOYER_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
+    // Anvil's first account for deployment (has funds by default)
+    uint256 constant ANVIL_DEFAULT_PK = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
     
     function run() external {
+        // Load private key from environment (the account that will use the contracts)
+        uint256 userPrivateKey = vm.envUint("PRIVATE_KEY");
+        address userAccount = vm.addr(userPrivateKey);
+        
         // Load ERC-8004 addresses from environment
         address identityRegistry = vm.envAddress("IDENTITY_REGISTRY_ADDRESS");
         address reputationRegistry = vm.envAddress("REPUTATION_REGISTRY_ADDRESS");
         
         console.log("=== Deploy Configuration ===");
-        console.log("Deployer:", DEPLOYER);
-        console.log("Buyer:", BUYER);
-        console.log("Provider:", PROVIDER);
+        console.log("Deployer (Anvil default):", vm.addr(ANVIL_DEFAULT_PK));
+        console.log("User Account (from PRIVATE_KEY):", userAccount);
         console.log("IdentityRegistry:", identityRegistry);
         console.log("ReputationRegistry:", reputationRegistry);
         console.log("");
         
-        vm.startBroadcast(DEPLOYER_PK);
+        // Use Anvil's default account for deployment (has funds)
+        vm.startBroadcast(ANVIL_DEFAULT_PK);
         
         // 1. Deploy Mock USDC
         ERC20Mock usdc = new ERC20Mock();
@@ -57,11 +56,10 @@ contract DeployScript is Script {
         );
         console.log("ReverseAuction deployed at:", address(auction));
         
-        // 3. Mint USDC to test accounts
+        // 3. Mint USDC to the user account (from PRIVATE_KEY in .env)
         uint256 mintAmount = 100_000 * 1e6; // 100,000 USDC (6 decimals like real USDC)
-        usdc.mint(BUYER, mintAmount);
-        usdc.mint(PROVIDER, mintAmount);
-        console.log("Minted", mintAmount / 1e6, "USDC to Buyer and Provider");
+        usdc.mint(userAccount, mintAmount);
+        console.log("Minted", mintAmount / 1e6, "USDC to user account:", userAccount);
         
         vm.stopBroadcast();
         

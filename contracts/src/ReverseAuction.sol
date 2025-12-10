@@ -285,8 +285,8 @@ contract ReverseAuction is ReentrancyGuard {
         (uint256 feedbackCount, uint256 averageScore) = REPUTATION_REGISTRY.getSummary(
             agentId,
             emptyAddresses,
-            0,  // tag1 - no filter
-            0   // tag2 - no filter
+            bytes32(0),  // tag1 - no filter
+            bytes32(0)   // tag2 - no filter
         );
         
         // Use default reputation of 50 if agent has no feedback
