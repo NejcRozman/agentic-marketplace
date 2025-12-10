@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Get the path to the agents directory where .env file is located
-AGENTS_DIR = Path(__file__).parent.parent
+AGENTS_DIR = Path(__file__).parent
 ENV_FILE_PATH = AGENTS_DIR / ".env"
 
 # Load environment variables from .env file
@@ -36,6 +36,9 @@ class Config:
         self.reverse_auction_address = os.getenv("BLOCKCHAIN_REVERSE_AUCTION_ADDRESS")
         self.identity_registry_address = os.getenv("BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS")
         self.reputation_registry_address = os.getenv("BLOCKCHAIN_REPUTATION_REGISTRY_ADDRESS")
+        
+        # Agent ID
+        self.agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3488"))
         
         # Agent workspace
         self.workspace_dir = os.getenv("WORKSPACE_DIR", "./workspaces")
@@ -91,6 +94,7 @@ class Config:
         print(f"  ReverseAuction: {self.reverse_auction_address or '✗ Not set'}")
         print(f"  IdentityRegistry: {self.identity_registry_address or '✗ Not set'}")
         print(f"  ReputationRegistry: {self.reputation_registry_address or '✗ Not set'}")
+        print(f"  Agent ID: {self.agent_id}")
         print(f"  Workspace: {self.workspace_dir}")
         print(f"  Environment: {self.environment}")
         print(f"  Debug: {self.debug}")

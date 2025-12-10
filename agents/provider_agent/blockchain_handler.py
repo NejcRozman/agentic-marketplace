@@ -132,13 +132,18 @@ class BlockchainHandler:
                 if not handler.reputation_registry_contract:
                     return {"rating": 50, "feedback_count": 0, "note": "ReputationRegistry not configured"}
                 
+                # Need to pass empty address array explicitly
+                # bytes32(0) for tags
+                empty_addresses = []
+                zero_bytes32 = b'\x00' * 32
+                
                 result = asyncio.run(handler.client.call_contract_method(
                     "ReputationRegistry",
                     "getSummary",
                     agent_id,
-                    [],
-                    0,
-                    0
+                    empty_addresses,
+                    zero_bytes32,
+                    zero_bytes32
                 ))
                 feedback_count = result[0]
                 average_score = result[1] if feedback_count > 0 else 50
@@ -518,7 +523,7 @@ BIDDING GUIDELINES:
 2. Only bid if profitable (bid_amount > estimated_cost)
 3. Consider time remaining - urgent auctions may need immediate bids
 4. Check current winning bid - you need a better score to win
-5. Your reputation affects your score
+5. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
 6. You can bid on multiple auctions if profitable
 7. If no auctions are profitable, don't bid
 
@@ -534,7 +539,7 @@ Analyze these auctions and decide which to bid on."""
             )
             
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-lite",
                 google_api_key=self.config.google_api_key,
                 temperature=0.3,
                 rate_limiter=rate_limiter

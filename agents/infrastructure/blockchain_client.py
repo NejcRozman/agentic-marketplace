@@ -167,7 +167,7 @@ class BlockchainClient:
         signed_txn = self.account.sign_transaction(transaction)
         
         # Send transaction
-        tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
         
         logger.info(f"Sent transaction: {tx_hash.hex()}")
         return tx_hash.hex()
@@ -276,7 +276,7 @@ class BlockchainClient:
         
         # Sign and send transaction
         signed_txn = self.account.sign_transaction(transaction)
-        tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.rawTransaction)
+        tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
         
         # Wait for deployment
         receipt = await self.wait_for_transaction(tx_hash.hex())

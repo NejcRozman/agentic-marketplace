@@ -56,13 +56,12 @@ class TestBlockchainHandlerSetup(unittest.TestCase):
     
     def test_handler_initialization(self):
         """Test BlockchainHandler initializes correctly."""
-        agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3272"))
-        handler = BlockchainHandler(agent_id=agent_id)
+        handler = BlockchainHandler(agent_id=config.agent_id)
         
-        self.assertEqual(handler.agent_id, agent_id)
+        self.assertEqual(handler.agent_id, config.agent_id)
         self.assertIsNotNone(handler.client)
         self.assertIsNotNone(handler.graph)
-        print(f"\n✓ Handler initialized for agent {agent_id}")
+        print(f"\n✓ Handler initialized for agent {config.agent_id}")
 
 
 class TestBlockchainClient(unittest.TestCase):
@@ -151,8 +150,7 @@ class TestBlockchainHandlerMonitor(unittest.TestCase):
     
     def setUp(self):
         """Create a BlockchainHandler instance."""
-        agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3272"))
-        self.handler = BlockchainHandler(agent_id=agent_id)
+        self.handler = BlockchainHandler(agent_id=config.agent_id)
     
     def tearDown(self):
         """Close the BlockchainClient."""
@@ -196,8 +194,7 @@ class TestEndToEndWorkflow(unittest.TestCase):
     
     def setUp(self):
         """Create a BlockchainHandler instance."""
-        agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3272"))
-        self.handler = BlockchainHandler(agent_id=agent_id)
+        self.handler = BlockchainHandler(agent_id=config.agent_id)
     
     def tearDown(self):
         """Close the BlockchainClient."""
