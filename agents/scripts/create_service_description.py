@@ -24,18 +24,23 @@ class ServiceDescription:
     """Service description to be stored on IPFS."""
     title: str
     description: str
-    requirements: list[str]
-    input_schema: dict[str, Any]
-    output_schema: dict[str, Any]
-    category: str = "general"
+    prompts: list[str]  # Questions for the literature review agent
+    input_files_cid: str | None = None  # CID of uploaded PDFs
+    requirements: dict[str, Any] | None = None  # Optional technical requirements
+    input_schema: dict[str, Any] | None = None  # Optional input schema
+    output_schema: dict[str, Any] | None = None  # Optional output schema
+    category: str = "research"
     tags: list[str] = field(default_factory=list)
-    estimated_duration_seconds: int = 60
+    estimated_duration_seconds: int = 300
     version: str = "1.0.0"
+    complexity: str = "medium"  # low, medium, high
+    customer_endpoint: str | None = None  # A2A endpoint for result delivery
     
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["created_at"] = datetime.now(timezone.utc).isoformat()
-        return data
+        # Remove None values for cleaner JSON
+        return {k: v for k, v in data.items() if v is not None}
 
 
 async def pin_json(data: dict, name: str, jwt: str = None, api_key: str = None, api_secret: str = None) -> str:
@@ -96,48 +101,43 @@ async def main():
         sys.exit(1)
     
     # Create a test service description
+    # Note: You should upload PDFs first and set input_files_cid
     service_description = ServiceDescription(
         title="Literature Review on AI Agent Marketplaces",
         description="Comprehensive literature review analyzing the current state of AI agent marketplaces, "
                     "including decentralized approaches, reputation systems, and economic models.",
-        requirements=[
-            "Search academic databases (arXiv, Google Scholar, Semantic Scholar)",
-            "Find at least 10 relevant papers published in the last 3 years",
-            "Summarize key findings and identify research gaps",
-            "Provide properly formatted citations",
+        prompts=[
+            "What are the main approaches to building decentralized AI agent marketplaces?",
+            "How do reputation systems work in agent marketplaces and what are their limitations?",
+            "What economic models have been proposed for agent-to-agent transactions?",
+            "What are the key technical challenges in implementing agent marketplaces?",
+            "What research gaps exist in the current literature?",
         ],
+        input_files_cid=None,  # Set this after uploading PDFs with upload_pdfs.py
+        requirements={
+            "min_papers": 10,
+            "max_age_years": 3,
+            "databases": ["arXiv", "Google Scholar", "Semantic Scholar"],
+        },
         input_schema={
             "type": "object",
             "properties": {
                 "topic": {"type": "string", "description": "The research topic to review"},
-                "num_papers": {"type": "integer", "description": "Minimum number of papers to include"},
-                "max_age_years": {"type": "integer", "description": "Maximum age of papers in years"},
+                "prompts": {"type": "array", "items": {"type": "string"}, "description": "Questions to answer"},
             },
-            "required": ["topic"],
+            "required": ["topic", "prompts"],
         },
         output_schema={
             "type": "object",
             "properties": {
-                "summary": {"type": "string", "description": "Executive summary of findings"},
-                "papers": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "title": {"type": "string"},
-                            "authors": {"type": "array", "items": {"type": "string"}},
-                            "year": {"type": "integer"},
-                            "summary": {"type": "string"},
-                            "relevance": {"type": "string"},
-                        },
-                    },
-                },
-                "research_gaps": {"type": "array", "items": {"type": "string"}},
+                "responses": {"type": "array", "items": {"type": "string"}, "description": "Answers to prompts"},
+                "citations": {"type": "array", "items": {"type": "string"}, "description": "Sources cited"},
             },
         },
         category="research",
         tags=["literature-review", "ai-agents", "marketplace", "research"],
         estimated_duration_seconds=300,
+        complexity="medium",
         version="1.0.0",
     )
     

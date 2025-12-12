@@ -52,24 +52,30 @@ class ServiceDescription:
     """Service description structure for auction creation."""
     title: str
     description: str
-    requirements: Dict[str, Any]
+    prompts: List[str]  # Questions/prompts for the agent to answer
+    input_files_cid: Optional[str] = None  # CID of input files directory (e.g., PDFs)
+    requirements: Optional[Dict[str, Any]] = None  # Optional technical requirements
     complexity: str = "medium"  # low, medium, high
     deadline: Optional[str] = None  # ISO 8601 format
-    agent_endpoint: Optional[str] = None  # A2A endpoint for result delivery
-    attachment_cids: Optional[List[str]] = None  # CIDs of uploaded files
+    customer_endpoint: Optional[str] = None  # A2A endpoint for result delivery
+    attachment_cids: Optional[List[str]] = None  # CIDs of additional files
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         data = {
             "title": self.title,
             "description": self.description,
-            "requirements": self.requirements,
+            "prompts": self.prompts,
             "complexity": self.complexity,
         }
+        if self.input_files_cid:
+            data["input_files_cid"] = self.input_files_cid
+        if self.requirements:
+            data["requirements"] = self.requirements
         if self.deadline:
             data["deadline"] = self.deadline
-        if self.agent_endpoint:
-            data["agent_endpoint"] = self.agent_endpoint
+        if self.customer_endpoint:
+            data["customer_endpoint"] = self.customer_endpoint
         if self.attachment_cids:
             data["attachments"] = self.attachment_cids
         return data
@@ -420,6 +426,36 @@ class IPFSClient:
             Raw bytes or None if fetch failed
         """
         return await self.fetch(cid, as_json=False, timeout=timeout)
+    
+    async def download_file(self, cid: str, output_path: Union[str, Path], timeout: int = 60) -> bool:
+        """
+        Download a file from IPFS and save it to local filesystem.
+        
+        Args:
+            cid: The IPFS content identifier
+            output_path: Local path to save the file
+            timeout: Request timeout in seconds
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            data = await self.fetch_file(cid, timeout=timeout)
+            if data:
+                output_path = Path(output_path)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(output_path, 'wb') as f:
+                    f.write(data)
+                
+                logger.info(f"✅ Downloaded {len(data)} bytes from {cid} to {output_path}")
+                return True
+            else:
+                logger.error(f"Failed to fetch file from IPFS: {cid}")
+                return False
+        except Exception as e:
+            logger.error(f"Error downloading file {cid}: {e}")
+            return False
     
     def get_gateway_url(self, cid: str, gateway_index: int = 0) -> str:
         """

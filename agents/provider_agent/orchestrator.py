@@ -4,7 +4,7 @@ Orchestrator for managing service execution in the agentic marketplace.
 The orchestrator coordinates between:
 - BlockchainHandler: Monitor auctions and handle blockchain interactions
 - LiteratureReviewAgent: Execute the actual service
-- IPFS/P2P: File transfer (mocked for v1, A2A protocol later)
+- IPFS/P2P: File transfer
 
 Workflow:
 1. Periodically check for won auctions
@@ -163,35 +163,26 @@ class Orchestrator:
             result = await self.blockchain_handler.monitor_auctions()
             won_auctions = result.get("won_auctions", [])
             
-            for auction_id in won_auctions:
+            for auction_details in won_auctions:
+                auction_id = auction_details["auction_id"]
                 if auction_id not in self.active_jobs:
-                    await self._start_job(auction_id)
+                    await self._start_job(auction_details)
                     
         except Exception as e:
             logger.error(f"Error checking won auctions: {e}")
     
-    async def _start_job(self, auction_id: int):
+    async def _start_job(self, auction_details: Dict[str, Any]):
         """Start a new job for a won auction."""
+        auction_id = auction_details["auction_id"]
         logger.info(f"🎉 Starting job for won auction {auction_id}")
         
         try:
-            # Get auction details to find buyer address and service CID
-            # We'll need to add this to blockchain_handler
-            auction_details = await self.blockchain_handler.client.call_contract_method(
-                "ReverseAuction",
-                "getAuctionDetails",
-                auction_id
-            )
-            
-            buyer_address = auction_details[1]
-            service_cid = auction_details[2]
-            
             job = Job(
                 auction_id=auction_id,
                 status=JobStatus.WON,
                 started_at=datetime.now(),
-                buyer_address=buyer_address,
-                service_cid=service_cid
+                buyer_address=auction_details["buyer_address"],
+                service_cid=auction_details["service_cid"]
             )
             
             self.active_jobs[auction_id] = job
@@ -253,8 +244,9 @@ class Orchestrator:
         """
         Fetch input files (PDFs) for the service.
         
-        For v1: Assumes files are on IPFS (input_files_cid in requirements)
-        For v2: Will use A2A protocol to request from customer
+        Supports two formats:
+        1. input_files_cid: Single CID pointing to one file
+        2. input_files: Dict/list of {filename: cid} mappings
         """
         logger.info(f"📥 Fetching input files for job {job.auction_id}")
         
@@ -263,18 +255,48 @@ class Orchestrator:
             job.pdf_directory = self.work_dir / f"auction_{job.auction_id}"
             job.pdf_directory.mkdir(exist_ok=True)
             
-            # For v1: Check if input_files_cid is provided
-            input_cid = job.service_requirements.get("input_files_cid")
+            downloaded_count = 0
             
+            # Check for single file CID
+            input_cid = job.service_requirements.get("input_files_cid")
             if input_cid:
-                # Download files from IPFS
-                # TODO: Implement IPFS directory download
-                logger.info(f"TODO: Download files from IPFS CID: {input_cid}")
-                # For now, assume files are already in the directory or will be provided
-                pass
-            else:
-                # No input files specified - this might be okay for some services
-                logger.warning(f"No input_files_cid in requirements for job {job.auction_id}")
+                logger.info(f"Downloading file from IPFS: {input_cid}")
+                output_path = job.pdf_directory / "input.pdf"
+                success = await self.ipfs_client.download_file(input_cid, output_path)
+                if success:
+                    downloaded_count += 1
+                else:
+                    logger.warning(f"Failed to download file from {input_cid}")
+            
+            # Check for multiple files (dict or list of CIDs)
+            input_files = job.service_requirements.get("input_files")
+            if input_files:
+                if isinstance(input_files, dict):
+                    # Format: {"file1.pdf": "Qm...", "file2.pdf": "Qm..."}
+                    for filename, cid in input_files.items():
+                        logger.info(f"Downloading {filename} from IPFS: {cid}")
+                        output_path = job.pdf_directory / filename
+                        success = await self.ipfs_client.download_file(cid, output_path)
+                        if success:
+                            downloaded_count += 1
+                        else:
+                            logger.warning(f"Failed to download {filename} from {cid}")
+                            
+                elif isinstance(input_files, list):
+                    # Format: ["Qm...", "Qm..."]
+                    for i, cid in enumerate(input_files):
+                        logger.info(f"Downloading file {i+1} from IPFS: {cid}")
+                        output_path = job.pdf_directory / f"input_{i+1}.pdf"
+                        success = await self.ipfs_client.download_file(cid, output_path)
+                        if success:
+                            downloaded_count += 1
+                        else:
+                            logger.warning(f"Failed to download file from {cid}")
+            
+            if downloaded_count == 0 and not input_cid and not input_files:
+                logger.warning(f"No input files specified for job {job.auction_id}")
+            elif downloaded_count > 0:
+                logger.info(f"✓ Downloaded {downloaded_count} files to {job.pdf_directory}")
             
             job.status = JobStatus.FETCHING_FILES
             

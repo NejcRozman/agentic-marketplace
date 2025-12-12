@@ -46,7 +46,7 @@ class BlockchainState(TypedDict):
     feedback_auth: Optional[bytes]
     
     # Monitor path - gathered state (deterministic)
-    won_auctions: List[int]  # Auction IDs we won (from AuctionEnded events)
+    won_auctions: List[Dict[str, Any]]  # Auctions we won with full details
     eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on
     
     # Monitor path - ReAct results
@@ -132,8 +132,6 @@ class BlockchainHandler:
                 if not handler.reputation_registry_contract:
                     return {"rating": 50, "feedback_count": 0, "note": "ReputationRegistry not configured"}
                 
-                # Need to pass empty address array explicitly
-                # bytes32(0) for tags
                 empty_addresses = []
                 zero_bytes32 = b'\x00' * 32
                 
@@ -400,8 +398,34 @@ class BlockchainHandler:
                     args = event.get("args", {})
                     if args.get("winningAgentId") == self.agent_id:
                         auction_id = args.get("auctionId")
-                        won_auctions.append(auction_id)
-                        logger.info(f"🎉 Won auction {auction_id}!")
+                        
+                        # Fetch full auction details
+                        try:
+                            auction = await self.client.call_contract_method(
+                                "ReverseAuction",
+                                "getAuctionDetails",
+                                auction_id
+                            )
+                            
+                            auction_info = {
+                                "auction_id": auction_id,
+                                "buyer_address": auction[1],
+                                "service_cid": auction[2],
+                                "max_price": auction[3],
+                                "duration": auction[4],
+                                "start_time": auction[5],
+                                "winning_agent_id": auction[7],
+                                "winning_bid": auction[8],
+                                "is_active": auction[9],
+                                "is_completed": auction[10],
+                                "escrow_amount": auction[11],
+                                "reputation_weight": auction[12]
+                            }
+                            
+                            won_auctions.append(auction_info)
+                            logger.info(f"🎉 Won auction {auction_id}! Buyer: {auction[1]}, Service CID: {auction[2]}")
+                        except Exception as e:
+                            logger.error(f"Error fetching details for won auction {auction_id}: {e}")
             except Exception as e:
                 logger.warning(f"Error fetching AuctionEnded events: {e}")
             
