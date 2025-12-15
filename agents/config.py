@@ -8,8 +8,8 @@ from dotenv import load_dotenv
 AGENTS_DIR = Path(__file__).parent
 ENV_FILE_PATH = AGENTS_DIR / ".env"
 
-# Load environment variables from .env file
-load_dotenv(ENV_FILE_PATH)
+# Load environment variables from .env file (override existing env vars)
+load_dotenv(ENV_FILE_PATH, override=True)
 
 
 class Config:

@@ -100,8 +100,8 @@ class Orchestrator:
         self.active_jobs: Dict[int, Job] = {}  # auction_id -> Job
         self.completed_jobs: List[Job] = []
         
-        # Working directory for downloaded files
-        self.work_dir = Path("./data/jobs")
+        # Working directory for downloaded files (inside agents folder)
+        self.work_dir = Path(__file__).parent.parent / "data" / "jobs"
         self.work_dir.mkdir(parents=True, exist_ok=True)
         
         # Runtime state

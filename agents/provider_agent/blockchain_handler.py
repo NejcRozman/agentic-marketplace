@@ -310,7 +310,11 @@ class BlockchainHandler:
             if not client_address:
                 raise ValueError("client_address is required")
             
-            expiry = int(datetime.now().timestamp()) + 3600
+            # Use blockchain time for expiry to handle time-travel scenarios (e.g., in tests)
+            current_block = await self.client.w3.eth.get_block('latest')
+            block_timestamp = current_block['timestamp']
+            expiry = block_timestamp + 3600  # 1 hour from current block time
+            
             feedback_auth = generate_feedback_auth(
                 agent_id=self.agent_id,
                 client_address=client_address,
