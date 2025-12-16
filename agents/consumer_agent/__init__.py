@@ -1,5 +1,15 @@
-"""Service Consumer Agent - Complete agent for requesting services in marketplace."""
+"""Consumer agent for the decentralized AI services marketplace."""
 
-# Future consumer agent components will go here
+from .consumer import Consumer, AuctionStatus, AuctionTracker
+from .service_generator import ServiceGenerator
+from .evaluator import ServiceEvaluator
+from .blockchain_handler import ConsumerBlockchainHandler
 
-__all__ = []
+__all__ = [
+    "Consumer",
+    "AuctionStatus",
+    "AuctionTracker",
+    "ServiceGenerator",
+    "ServiceEvaluator",
+    "ConsumerBlockchainHandler",
+]

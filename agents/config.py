@@ -37,8 +37,14 @@ class Config:
         self.identity_registry_address = os.getenv("BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS")
         self.reputation_registry_address = os.getenv("BLOCKCHAIN_REPUTATION_REGISTRY_ADDRESS")
         
-        # Agent ID
-        self.agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "3488"))
+        # Provider Agent ID
+        self.agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "4427"))
+        
+        # Consumer Agent Configuration
+        self.consumer_agent_id = int(os.getenv("CONSUMER_AGENT_ID", "0"))  # Set to 0 if not a consumer
+        eligible_str = os.getenv("ELIGIBLE_PROVIDERS", "")
+        self.eligible_providers = [int(id.strip()) for id in eligible_str.split(",") if id.strip()]
+        self.consumer_check_interval = int(os.getenv("CONSUMER_CHECK_INTERVAL", "15"))
         
         # Agent workspace
         self.workspace_dir = os.getenv("WORKSPACE_DIR", "./workspaces")

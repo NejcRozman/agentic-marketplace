@@ -1,0 +1,347 @@
+"""
+Consumer Agent - Main orchestrator for service consumers.
+
+Responsibilities:
+- Generate service requirements
+- Create auctions with eligible providers
+- Monitor auction progress and end when appropriate
+- Retrieve completed service results
+- Evaluate service quality
+- Submit feedback to reputation registry
+"""
+
+import asyncio
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional, Any
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+
+from ..config import config
+from ..infrastructure.ipfs_client import IPFSClient
+from .blockchain_handler import ConsumerBlockchainHandler
+from .service_generator import ServiceGenerator
+from .evaluator import ServiceEvaluator
+
+logger = logging.getLogger(__name__)
+
+
+class AuctionStatus(str, Enum):
+    """Status of consumer's auction tracking."""
+    CREATED = "created"
+    ACTIVE = "active"
+    ENDED = "ended"
+    COMPLETED = "completed"
+    EVALUATED = "evaluated"
+    FAILED = "failed"
+
+
+@dataclass
+class AuctionTracker:
+    """Tracks a single auction lifecycle from consumer perspective."""
+    auction_id: int
+    status: AuctionStatus
+    created_at: datetime
+    service_cid: str
+    max_budget: int
+    duration: int
+    eligible_providers: List[int]
+    
+    # Auction results
+    winning_agent_id: Optional[int] = None
+    winning_bid: Optional[int] = None
+    ended_at: Optional[datetime] = None
+    
+    # Service delivery
+    result_path: Optional[Path] = None
+    completed_at: Optional[datetime] = None
+    
+    # Evaluation
+    evaluation: Optional[Dict[str, Any]] = None
+    feedback_submitted: bool = False
+    
+    # Error tracking
+    error: Optional[str] = None
+    retry_count: int = 0
+    max_retries: int = 3
+
+
+class Consumer:
+    """
+    Consumer agent for the decentralized AI services marketplace.
+    
+    Manages the full lifecycle of service requests:
+    1. Generate service requirements (via ReAct)
+    2. Create auctions with eligible providers
+    3. Monitor and end auctions
+    4. Retrieve and evaluate completed services
+    5. Submit feedback to reputation registry
+    """
+    
+    def __init__(self, config: Config):
+        """Initialize consumer agent."""
+        self.config = config
+        
+        # Core components
+        self.blockchain_handler = ConsumerBlockchainHandler(config)
+        self.ipfs_client = IPFSClient(config)
+        self.service_generator = ServiceGenerator(config)
+        self.evaluator = ServiceEvaluator(config)
+        
+        # Auction tracking
+        self.active_auctions: Dict[int, AuctionTracker] = {}
+        self.completed_auctions: List[AuctionTracker] = []
+        
+        # Runtime state
+        self.running = False
+        self.check_interval = config.consumer_check_interval
+        
+        logger.info(f"Consumer initialized")
+    
+    async def initialize(self):
+        """Initialize blockchain connections and contracts."""
+        logger.info("Initializing consumer components...")
+        
+        success = await self.blockchain_handler.initialize()
+        if not success:
+            raise RuntimeError("Failed to initialize consumer blockchain handler")
+        
+        logger.info("✅ Consumer initialized successfully")
+    
+    async def create_auction(
+        self,
+        service_requirements: Optional[Dict[str, Any]] = None,
+        max_budget: int = 100_000_000,  # 100 USDC
+        duration: int = 7200,  # 2 hours
+        eligible_providers: Optional[List[int]] = None
+    ) -> int:
+        """
+        Create a new auction for a service.
+        
+        Args:
+            service_requirements: Service description dict, or None to generate via ReAct
+            max_budget: Maximum budget in USDC (with 6 decimals)
+            duration: Auction duration in seconds
+            eligible_providers: List of provider agent IDs, or None to use from config
+            
+        Returns:
+            Auction ID
+        """
+        logger.info("📝 Creating new auction...")
+        
+        # Generate service requirements if not provided
+        if service_requirements is None:
+            logger.info("Generating service requirements via ReAct...")
+            service_requirements = await self.service_generator.generate_service()
+        
+        # Upload service requirements to IPFS
+        logger.info("Uploading service requirements to IPFS...")
+        service_cid = await self.ipfs_client.upload_json(service_requirements)
+        logger.info(f"✓ Service CID: {service_cid}")
+        
+        # Use eligible providers from config if not specified
+        if eligible_providers is None:
+            eligible_providers = self.config.eligible_providers
+        
+        # Create auction on blockchain
+        logger.info(f"Creating auction on blockchain (budget: {max_budget}, duration: {duration}s)...")
+        
+        result = await self.blockchain_handler.create_auction(
+            service_cid=service_cid,
+            max_price=max_budget,
+            duration=duration,
+            eligible_agent_ids=eligible_providers
+        )
+        
+        if result['error']:
+            raise RuntimeError(f"Failed to create auction: {result['error']}")
+        
+        auction_id = result['auction_id']
+        tx_hash = result['tx_hash']
+        
+        logger.info(f"✓ Auction created on blockchain: ID={auction_id}, tx={tx_hash}")
+        
+        # Track the auction
+        tracker = AuctionTracker(
+            auction_id=auction_id,
+            status=AuctionStatus.CREATED,
+            created_at=datetime.now(),
+            service_cid=service_cid,
+            max_budget=max_budget,
+            duration=duration,
+            eligible_providers=eligible_providers
+        )
+        
+        self.active_auctions[auction_id] = tracker
+        
+        logger.info(f"✅ Auction {auction_id} created")
+        return auction_id
+    
+    async def monitor_auctions(self):
+        """Monitor active auctions and update their status."""
+        for auction_id, tracker in list(self.active_auctions.items()):
+            try:
+                # Get auction details from blockchain
+                auction_data = await self.blockchain_handler.get_auction_status(auction_id)
+                
+                if auction_data.get('error'):
+                    logger.error(f"Error getting auction status: {auction_data['error']}")
+                    continue
+                
+                is_active = auction_data['active']
+                
+                if not is_active and tracker.status in [AuctionStatus.CREATED, AuctionStatus.ACTIVE]:
+                    # Auction has ended
+                    logger.info(f"🏁 Auction {auction_id} has ended")
+                    tracker.status = AuctionStatus.ENDED
+                    tracker.ended_at = datetime.now()
+                    tracker.winning_agent_id = auction_data['winning_agent_id']
+                    tracker.winning_bid = auction_data['winning_bid']
+                    
+                elif is_active:
+                    tracker.status = AuctionStatus.ACTIVE
+                    
+                    # Check if we should end the auction
+                    elapsed = (datetime.now() - tracker.created_at).total_seconds()
+                    if elapsed >= tracker.duration:
+                        logger.info(f"⏰ Ending auction {auction_id} (duration expired)")
+                        await self.end_auction(auction_id)
+                
+                # TODO: Check if service is completed - need to add this to get_auction_status
+                # For now, we'll check result file directly
+                if tracker.status == AuctionStatus.ENDED and not tracker.result:
+                    await self._retrieve_result(tracker)
+                    
+            except Exception as e:
+                logger.error(f"Error monitoring auction {auction_id}: {e}")
+                tracker.error = str(e)
+    
+    async def end_auction(self, auction_id: int):
+        """End an auction."""
+        logger.info(f"Ending auction {auction_id}...")
+        
+        result = await self.blockchain_handler.end_auction(auction_id)
+        
+        if result['error']:
+            logger.error(f"Failed to end auction: {result['error']}")
+            return
+        
+        logger.info(f"✓ Auction ended: tx={result['tx_hash']}, winner={result['winning_agent_id']}")
+    
+    async def _retrieve_result(self, tracker: AuctionTracker):
+        """Retrieve completed service result from provider's local storage."""
+        logger.info(f"📥 Retrieving result for auction {tracker.auction_id}...")
+        
+        # Result is stored in provider's local directory
+        # Path: agents/data/jobs/auction_{id}/result.json
+        result_path = Path(__file__).parent.parent / "data" / "jobs" / f"auction_{tracker.auction_id}" / "result.json"
+        
+        if not result_path.exists():
+            logger.warning(f"Result file not found: {result_path}")
+            tracker.error = "Result file not found"
+            return
+        
+        tracker.result_path = result_path
+        logger.info(f"✓ Result retrieved from {result_path}")
+        
+        # Evaluate the result
+        await self._evaluate_result(tracker)
+    
+    async def _evaluate_result(self, tracker: AuctionTracker):
+        """Evaluate the service result using ReAct evaluator."""
+        logger.info(f"🔍 Evaluating result for auction {tracker.auction_id}...")
+        
+        # Read result file
+        import json
+        with open(tracker.result_path, 'r') as f:
+            result = json.load(f)
+        
+        # Get original service requirements
+        service_requirements = await self.ipfs_client.fetch_json(tracker.service_cid)
+        
+        # Evaluate using ReAct agent
+        evaluation = await self.evaluator.evaluate(
+            service_requirements=service_requirements,
+            result=result
+        )
+        
+        tracker.evaluation = evaluation
+        tracker.status = AuctionStatus.EVALUATED
+        
+        logger.info(f"✓ Evaluation complete: rating={evaluation['rating']}/100")
+        
+        # Submit feedback
+        await self._submit_feedback(tracker)
+    
+    async def _submit_feedback(self, tracker: AuctionTracker):
+        """Submit feedback to reputation registry."""
+        logger.info(f"📤 Submitting feedback for auction {tracker.auction_id}...")
+        
+        try:
+            # Wait for FeedbackAuthProvided event from provider
+            feedback_auth = await self.blockchain_handler.wait_for_feedback_auth(
+                auction_id=tracker.auction_id,
+                timeout=300  # 5 minutes
+            )
+            
+            if not feedback_auth:
+                logger.error(f"No feedbackAuth received for auction {tracker.auction_id}")
+                tracker.error = "No feedbackAuth received"
+                return
+            
+            # Submit feedback to reputation registry
+            result = await self.blockchain_handler.submit_feedback(
+                auction_id=tracker.auction_id,
+                agent_id=tracker.winning_agent_id,
+                rating=tracker.evaluation['rating'],
+                feedback_text=tracker.evaluation.get('summary', ''),
+                feedback_auth=feedback_auth
+            )
+            
+            if result['error']:
+                logger.error(f"Failed to submit feedback: {result['error']}")
+                tracker.error = result['error']
+                return
+            
+            tracker.feedback_submitted = True
+            logger.info(f"✓ Feedback submitted: tx={result['tx_hash']}")
+            
+            # Move to completed
+            self.completed_auctions.append(tracker)
+            del self.active_auctions[tracker.auction_id]
+            
+        except Exception as e:
+            logger.error(f"Error submitting feedback: {e}")
+            tracker.error = str(e)
+    
+    async def run(self):
+        """Run the consumer agent main loop."""
+        logger.info("Starting consumer agent...")
+        self.running = True
+        
+        try:
+            while self.running:
+                # Monitor active auctions
+                await self.monitor_auctions()
+                
+                # Sleep before next cycle
+                await asyncio.sleep(self.check_interval)
+                
+        except Exception as e:
+            logger.error(f"Consumer agent error: {e}", exc_info=True)
+        finally:
+            logger.info("Consumer agent stopped")
+    
+    def stop(self):
+        """Stop the consumer agent."""
+        logger.info("Stopping consumer agent...")
+        self.running = False
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current status of consumer agent."""
+        return {
+            "active_auctions": len(self.active_auctions),
+            "completed_auctions": len(self.completed_auctions),
+            "running": self.running
+        }
