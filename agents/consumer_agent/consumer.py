@@ -52,6 +52,7 @@ class AuctionTracker:
     winning_agent_id: Optional[int] = None
     winning_bid: Optional[int] = None
     ended_at: Optional[datetime] = None
+    ended_block: Optional[int] = None  # Block number when auction ended
     
     # Service delivery
     result_path: Optional[Path] = None
@@ -193,9 +194,11 @@ class Consumer:
                 
                 if not is_active and tracker.status in [AuctionStatus.CREATED, AuctionStatus.ACTIVE]:
                     # Auction has ended
+                    current_block = await self.blockchain_handler.client.get_block_number()
                     logger.info(f"🏁 Auction {auction_id} has ended")
                     tracker.status = AuctionStatus.ENDED
                     tracker.ended_at = datetime.now()
+                    tracker.ended_block = current_block
                     tracker.winning_agent_id = auction_data['winning_agent_id']
                     tracker.winning_bid = auction_data['winning_bid']
                     
@@ -208,9 +211,12 @@ class Consumer:
                         logger.info(f"⏰ Ending auction {auction_id} (duration expired)")
                         await self.end_auction(auction_id)
                 
-                # TODO: Check if service is completed - need to add this to get_auction_status
-                # For now, we'll check result file directly
-                if tracker.status == AuctionStatus.ENDED and not tracker.result:
+                # Check if service is completed
+                is_completed = auction_data.get('completed', False)
+                if is_completed and tracker.status == AuctionStatus.ENDED and not tracker.result:
+                    logger.info(f"✅ Service {auction_id} completed by provider")
+                    tracker.status = AuctionStatus.COMPLETED
+                    tracker.completed_at = datetime.now()
                     await self._retrieve_result(tracker)
                     
             except Exception as e:
@@ -279,15 +285,19 @@ class Consumer:
         logger.info(f"📤 Submitting feedback for auction {tracker.auction_id}...")
         
         try:
-            # Wait for FeedbackAuthProvided event from provider
-            feedback_auth = await self.blockchain_handler.wait_for_feedback_auth(
+            # Query for FeedbackAuthProvided event (already emitted by provider)
+            # Use ended_block as starting point to minimize search range
+            from_block = tracker.ended_block if tracker.ended_block else None
+            
+            feedback_auth = await self.blockchain_handler.get_feedback_auth(
                 auction_id=tracker.auction_id,
-                timeout=300  # 5 minutes
+                from_block=from_block,
+                lookback_blocks=1000  # Search last ~1000 blocks if no ended_block
             )
             
             if not feedback_auth:
-                logger.error(f"No feedbackAuth received for auction {tracker.auction_id}")
-                tracker.error = "No feedbackAuth received"
+                logger.error(f"FeedbackAuthProvided event not found for auction {tracker.auction_id}")
+                tracker.error = "FeedbackAuthProvided event not found"
                 return
             
             # Submit feedback to reputation registry

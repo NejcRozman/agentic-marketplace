@@ -235,25 +235,31 @@ class ConsumerBlockchainHandler:
             if not self._initialized:
                 await self.initialize()
             
-            # Call getAuction view function
+            # Call getAuctionDetails view function (returns Auction struct)
             auction_data = await self.client.call_contract_method(
                 "ReverseAuction",
-                "getAuction",
+                "getAuctionDetails",
                 auction_id
             )
             
-            # Parse auction status
-            # Assumes auction_data returns: (buyer, serviceDescriptionCid, maxPrice, 
-            #                                 startTime, duration, winningAgentId, winningBid, active)
+            # Parse auction status using struct field names
+            # Auction struct has: id, buyer, serviceDescriptionCid, maxPrice, duration,
+            #                     startTime, eligibleAgentIds, winningAgentId, winningBid,
+            #                     isActive, isCompleted, escrowAmount, reputationWeight
             return {
-                "buyer": auction_data[0],
-                "service_cid": auction_data[1],
-                "max_price": auction_data[2],
-                "start_time": auction_data[3],
+                "id": auction_data[0],
+                "buyer": auction_data[1],
+                "service_cid": auction_data[2],
+                "max_price": auction_data[3],
                 "duration": auction_data[4],
-                "winning_agent_id": auction_data[5],
-                "winning_bid": auction_data[6],
-                "active": auction_data[7],
+                "start_time": auction_data[5],
+                "eligible_agent_ids": auction_data[6],
+                "winning_agent_id": auction_data[7],
+                "winning_bid": auction_data[8],
+                "active": auction_data[9],
+                "completed": auction_data[10],
+                "escrow_amount": auction_data[11],
+                "reputation_weight": auction_data[12],
                 "error": None
             }
             
@@ -263,13 +269,22 @@ class ConsumerBlockchainHandler:
                 "error": str(e)
             }
     
-    async def wait_for_feedback_auth(self, auction_id: int, timeout: int = 300) -> Optional[bytes]:
+    async def get_feedback_auth(
+        self, 
+        auction_id: int, 
+        from_block: Optional[int] = None,
+        lookback_blocks: int = 1000
+    ) -> Optional[bytes]:
         """
-        Wait for FeedbackAuthProvided event after service completion.
+        Get FeedbackAuthProvided event for a completed service.
+        
+        This queries historical events rather than waiting/polling. Should be called
+        after detecting service completion (isCompleted=true).
         
         Args:
-            auction_id: The auction ID to monitor
-            timeout: Maximum time to wait in seconds
+            auction_id: The auction ID to query
+            from_block: Optional starting block number, defaults to lookback_blocks ago
+            lookback_blocks: How many blocks to search backwards if from_block not provided
             
         Returns:
             feedbackAuth bytes if found, None otherwise
@@ -278,35 +293,32 @@ class ConsumerBlockchainHandler:
             if not self._initialized:
                 await self.initialize()
             
-            logger.info(f"Waiting for FeedbackAuthProvided event for auction {auction_id}...")
+            # Determine starting block for search
+            if from_block is None:
+                current_block = await self.client.get_block_number()
+                from_block = max(0, current_block - lookback_blocks)
             
-            # Get current block
-            current_block = await self.client.get_block_number()
+            logger.info(f"Querying FeedbackAuthProvided event for auction {auction_id} from block {from_block}...")
             
-            # Poll for event
-            start_time = asyncio.get_event_loop().time()
-            while (asyncio.get_event_loop().time() - start_time) < timeout:
-                events = await self.client.get_contract_events(
-                    "ReverseAuction",
-                    "FeedbackAuthProvided",
-                    from_block=current_block,
-                    to_block="latest",
-                    argument_filters={"auctionId": auction_id}
-                )
-                
-                if events:
-                    feedback_auth = events[0]['args']['feedbackAuth']
-                    logger.info(f"✅ Received feedbackAuth for auction {auction_id}")
-                    return feedback_auth
-                
-                # Sleep before next poll
-                await asyncio.sleep(5)
+            # Query historical events
+            events = await self.client.get_contract_events(
+                "ReverseAuction",
+                "FeedbackAuthProvided",
+                from_block=from_block,
+                to_block="latest",
+                argument_filters={"auctionId": auction_id}
+            )
             
-            logger.warning(f"Timeout waiting for FeedbackAuthProvided for auction {auction_id}")
-            return None
+            if events:
+                feedback_auth = events[0]['args']['feedbackAuth']
+                logger.info(f"✅ Found feedbackAuth for auction {auction_id}")
+                return feedback_auth
+            else:
+                logger.warning(f"No FeedbackAuthProvided event found for auction {auction_id}")
+                return None
             
         except Exception as e:
-            logger.error(f"Failed to wait for feedbackAuth: {e}")
+            logger.error(f"Failed to get feedbackAuth for auction {auction_id}: {e}")
             return None
     
     async def submit_feedback(
@@ -315,17 +327,23 @@ class ConsumerBlockchainHandler:
         agent_id: int,
         rating: int,
         feedback_text: str,
-        feedback_auth: bytes
+        feedback_auth: bytes,
+        tag1: bytes = None,
+        tag2: bytes = None,
+        feedback_uri: str = ""
     ) -> Dict[str, Any]:
         """
-        Submit feedback to ReputationRegistry using ERC-8004 feedbackAuth.
+        Submit feedback to ReputationRegistry using ERC-8004 giveFeedback.
         
         Args:
-            auction_id: The auction ID
+            auction_id: The auction ID (for logging)
             agent_id: The provider agent ID to rate
-            rating: Rating score (0-100)
-            feedback_text: Textual feedback
-            feedback_auth: Signed authorization from provider
+            rating: Rating score (0-100, REQUIRED)
+            feedback_text: Textual feedback (unused if no feedback_uri)
+            feedback_auth: Signed authorization from provider (REQUIRED)
+            tag1: Optional first categorization tag (bytes32)
+            tag2: Optional second categorization tag (bytes32)
+            feedback_uri: Optional URI to detailed feedback JSON (IPFS or HTTPS)
             
         Returns:
             Dictionary with tx_hash and any errors
@@ -334,34 +352,46 @@ class ConsumerBlockchainHandler:
             if not self._initialized:
                 await self.initialize()
             
+            # Validate rating is 0-100
+            if not (0 <= rating <= 100):
+                raise ValueError(f"Rating must be 0-100, got {rating}")
+            
             logger.info(f"Submitting feedback for auction {auction_id}, agent {agent_id}, rating {rating}")
             
-            # ERC-8004 feedback submission
-            # The exact method name and signature depends on the ReputationRegistry implementation
-            # Common pattern: addFeedback(bytes feedbackAuth, uint256 score, bytes metadata)
+            # Use empty tags if not provided (bytes32(0))
+            if tag1 is None:
+                tag1 = b'\x00' * 32
+            if tag2 is None:
+                tag2 = b'\x00' * 32
             
-            # For now, we'll use a placeholder that matches typical ERC-8004 pattern
-            # TODO: Verify actual ReputationRegistry method signature
-            
-            # Encode feedback metadata (could be JSON or other format)
-            feedback_metadata = feedback_text.encode('utf-8')
+            # Calculate file hash (only for non-IPFS URIs, optional otherwise)
+            file_hash = b'\x00' * 32  # Empty hash for IPFS or no file
+            # Note: For HTTPS URIs, caller can compute hash if needed
             
             # Estimate gas
             estimated_gas = await self.client.estimate_gas(
                 "ReputationRegistry",
-                "addFeedback",
-                feedback_auth,
+                "giveFeedback",
+                agent_id,
                 rating,
-                feedback_metadata
+                tag1,
+                tag2,
+                feedback_uri,
+                file_hash,
+                feedback_auth
             )
             
             # Send transaction
             tx_hash = await self.client.send_transaction(
                 "ReputationRegistry",
-                "addFeedback",
-                feedback_auth,
+                "giveFeedback",
+                agent_id,
                 rating,
-                feedback_metadata,
+                tag1,
+                tag2,
+                feedback_uri,
+                file_hash,
+                feedback_auth,
                 gas_limit=estimated_gas + 50000
             )
             
