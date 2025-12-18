@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from ..config import config
+from ..config import config, Config
 from ..infrastructure.ipfs_client import IPFSClient
 from .blockchain_handler import ConsumerBlockchainHandler
 from .service_generator import ServiceGenerator

@@ -96,10 +96,27 @@ contract MockIdentityRegistry is IIdentityRegistry {
 contract MockReputationRegistry is IReputationRegistry {
     mapping(uint256 => mapping(address => uint256)) private _feedbackCounts;
     mapping(uint256 => mapping(address => uint256)) private _scores;
+    address private _identityRegistry;
+
+    constructor(address identityRegistry_) {
+        _identityRegistry = identityRegistry_;
+    }
 
     function setReputation(uint256 agentId, address client, uint256 count, uint256 score) external {
         _feedbackCounts[agentId][client] = count;
         _scores[agentId][client] = score;
+    }
+
+    function giveFeedback(
+        uint256,
+        uint8,
+        bytes32,
+        bytes32,
+        string calldata,
+        bytes32,
+        bytes memory
+    ) external override {
+        // Mock implementation - does nothing
     }
 
     function getSummary(
@@ -117,6 +134,10 @@ contract MockReputationRegistry is IReputationRegistry {
             feedbackCount = _feedbackCounts[agentId][clientAddresses[0]];
             averageScore = _scores[agentId][clientAddresses[0]];
         }
+    }
+
+    function getIdentityRegistry() external view override returns (address) {
+        return _identityRegistry;
     }
 }
 
@@ -192,7 +213,7 @@ contract ReverseAuctionTest is Test {
         // Deploy mocks
         usdc = new ERC20Mock();
         identityRegistry = new MockIdentityRegistry();
-        reputationRegistry = new MockReputationRegistry();
+        reputationRegistry = new MockReputationRegistry(address(identityRegistry));
 
         // Deploy auction contract
         auction = new ReverseAuction(address(usdc), address(identityRegistry), address(reputationRegistry));

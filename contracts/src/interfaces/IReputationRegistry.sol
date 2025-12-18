@@ -25,7 +25,7 @@ interface IReputationRegistry {
         bytes32 tag1,
         bytes32 tag2,
         string calldata fileuri,
-        bytes32 calldata filehash,
+        bytes32 filehash,
         bytes memory feedbackAuth
     ) external;
     

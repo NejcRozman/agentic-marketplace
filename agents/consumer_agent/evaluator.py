@@ -6,7 +6,7 @@ Uses ReAct pattern with LLM to assess service quality and generate ratings.
 
 import logging
 from typing import Dict, Any
-import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI as genai
 
 from ..config import Config
 

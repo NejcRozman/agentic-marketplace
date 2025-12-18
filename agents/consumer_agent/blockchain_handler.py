@@ -133,8 +133,7 @@ class ConsumerBlockchainHandler:
                 duration,
                 eligible_agent_ids,
                 reputation_weight,
-                gas_limit=estimated_gas + 50000,
-                value=max_price  # Deposit max_price as escrow
+                gas_limit=estimated_gas + 50000
             )
             
             # Wait for transaction receipt
@@ -306,7 +305,7 @@ class ConsumerBlockchainHandler:
                 "FeedbackAuthProvided",
                 from_block=from_block,
                 to_block="latest",
-                argument_filters={"auctionId": auction_id}
+                filters={"auctionId": auction_id}
             )
             
             if events:
@@ -425,8 +424,11 @@ class ConsumerBlockchainHandler:
         )
         
         # Find event matching this transaction
+        # Both transactionHash values are already hex strings from blockchain_client
+        receipt_tx_hash = receipt['transactionHash'] if isinstance(receipt['transactionHash'], str) else receipt['transactionHash'].hex()
         for event in events:
-            if event['transactionHash'].hex() == receipt['transactionHash'].hex():
+            event_tx_hash = event['transactionHash'] if isinstance(event['transactionHash'], str) else event['transactionHash'].hex()
+            if event_tx_hash == receipt_tx_hash:
                 return event['args']['auctionId']
         
         raise Exception("AuctionCreated event not found in receipt")
@@ -438,7 +440,7 @@ class ConsumerBlockchainHandler:
             "AuctionEnded",
             from_block=receipt['blockNumber'],
             to_block=receipt['blockNumber'],
-            argument_filters={"auctionId": auction_id}
+            filters={"auctionId": auction_id}
         )
         
         if not events:

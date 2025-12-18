@@ -100,10 +100,10 @@ class TestCreateAuction(unittest.TestCase):
         async def _test():
             await self.handler.initialize()
             
-            # Create auction
+            # Create auction 
             result = await self.handler.create_auction(
                 service_cid="QmTest123",
-                max_price=1000000000000000000,  # 1 ETH in wei
+                max_price=1000000,  # 1 USDC (1 * 10^6)
                 duration=3600,  # 1 hour
                 eligible_agent_ids=config.eligible_providers,
                 reputation_weight=50
@@ -132,7 +132,7 @@ class TestCreateAuction(unittest.TestCase):
             # Create auction without specifying eligible_agent_ids
             result = await self.handler.create_auction(
                 service_cid="QmTest456",
-                max_price=500000000000000000,  # 0.5 ETH
+                max_price=500000,  # 0.5 ETH
                 duration=1800  # 30 minutes
             )
             
@@ -151,7 +151,7 @@ class TestCreateAuction(unittest.TestCase):
             
             result = await handler.create_auction(
                 service_cid="QmTest789",
-                max_price=2000000000000000000,
+                max_price=2000000,
                 duration=7200
             )
             
@@ -174,7 +174,7 @@ class TestGetAuctionStatus(unittest.TestCase):
             await self.handler.initialize()
             result = await self.handler.create_auction(
                 service_cid="QmStatusTest",
-                max_price=1000000000000000000,
+                max_price=1000000,
                 duration=3600,
                 reputation_weight=50
             )
@@ -190,7 +190,7 @@ class TestGetAuctionStatus(unittest.TestCase):
             self.assertIsNone(status.get('error'))
             self.assertEqual(status['id'], self.auction_id)
             self.assertEqual(status['service_cid'], "QmStatusTest")
-            self.assertEqual(status['max_price'], 1000000000000000000)
+            self.assertEqual(status['max_price'], 1000000)  # 1 USDC (1 * 10^6)
             self.assertEqual(status['duration'], 3600)
             self.assertEqual(status['reputation_weight'], 50)
             self.assertTrue(status['active'])
@@ -231,7 +231,7 @@ class TestEndAuction(unittest.TestCase):
             await self.handler.initialize()
             result = await self.handler.create_auction(
                 service_cid="QmEndTest",
-                max_price=1000000000000000000,
+                max_price=1000000,
                 duration=60,  # 1 minute for faster testing
                 reputation_weight=50
             )
@@ -258,10 +258,10 @@ class TestEndAuction(unittest.TestCase):
             print(f"  Winner: {result['winning_agent_id']}")
             print(f"  Winning Bid: {result['winning_bid']}")
             
-            # Verify auction is now completed
+            # Verify auction is now inactive (not completed until payment released or refunded)
             status = await self.handler.get_auction_status(self.auction_id)
             self.assertFalse(status['active'])
-            self.assertTrue(status['completed'])
+            # Note: completed is only true after completeService or refund, not after endAuction
         
         run_async(_test())
     
@@ -473,7 +473,7 @@ class TestEventExtraction(unittest.TestCase):
             await self.handler.initialize()
             result = await self.handler.create_auction(
                 service_cid="QmEventTest",
-                max_price=1000000000000000000,
+                max_price=1000000,
                 duration=3600
             )
             return result['auction_id'], result['tx_hash']
@@ -551,7 +551,7 @@ class TestIntegrationFullFlow(unittest.TestCase):
             print("\n1. Creating auction...")
             create_result = await handler.create_auction(
                 service_cid="QmIntegrationTest",
-                max_price=2000000000000000000,
+                max_price=2000000,
                 duration=120,  # 2 minutes
                 reputation_weight=60
             )
@@ -581,8 +581,8 @@ class TestIntegrationFullFlow(unittest.TestCase):
             print("\n5. Checking final status...")
             final_status = await handler.get_auction_status(auction_id)
             self.assertFalse(final_status['active'])
-            self.assertTrue(final_status['completed'])
-            print(f"✓ Auction is completed")
+            # Note: completed is only true after completeService or refund
+            print(f"✓ Auction is inactive (completed={final_status['completed']})")
             
             # 6. Try to get feedback auth (may not exist in this test)
             print("\n6. Querying for feedback auth...")
