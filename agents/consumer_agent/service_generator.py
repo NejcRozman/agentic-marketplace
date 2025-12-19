@@ -31,8 +31,8 @@ class ServiceGenerator:
         
         # Initialize Gemini (same as evaluator)
         self.model = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash",
-            google_api_key=config.gemini_api_key,
+            model="gemini-2.5-flash-lite",
+            google_api_key=config.google_api_key,
             temperature=0.7
         )
         
