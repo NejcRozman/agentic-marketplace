@@ -10,7 +10,7 @@ from typing import Dict, Any, List, Optional
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END
-from langchain.agents import create_react_agent
+from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -196,13 +196,13 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
             )
             
             llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
+                model="gemini-2.5-flash",
                 google_api_key=self.config.google_api_key,
                 temperature=0.3,
                 rate_limiter=rate_limiter
             )
             
-            react_agent = create_react_agent(llm, self._tools)
+            react_agent = create_agent(llm, self._tools)
             
             # Run agent
             agent_result = await react_agent.ainvoke({
