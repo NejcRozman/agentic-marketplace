@@ -56,6 +56,7 @@ class AuctionTracker:
     
     # Service delivery
     result_path: Optional[Path] = None
+    result: Optional[Dict[str, Any]] = None  # Actual result data
     completed_at: Optional[datetime] = None
     
     # Evaluation
@@ -94,34 +95,71 @@ class Consumer:
         self.active_auctions: Dict[int, AuctionTracker] = {}
         self.completed_auctions: List[AuctionTracker] = []
         
+        # Service generation cache
+        self.available_services: List[Dict[str, Any]] = []  # Pre-generated services
+        self.service_index: int = 0  # Track which service to use next
+        
         # Runtime state
         self.running = False
         self.check_interval = config.consumer_check_interval
+        self.result_base_path = Path(config.result_base_path) if hasattr(config, 'result_base_path') else Path(__file__).parent.parent / "data" / "jobs"
         
         logger.info(f"Consumer initialized")
     
-    async def initialize(self):
-        """Initialize blockchain connections and contracts."""
+    async def initialize(self, pdf_dir: Optional[Path] = None, complexity: str = "medium"):
+        """Initialize blockchain connections and contracts. Pre-generate services if PDF directory provided.
+        
+        Args:
+            pdf_dir: Optional directory containing PDFs to generate services from
+            complexity: Service complexity level (low/medium/high)
+        """
         logger.info("Initializing consumer components...")
         
         success = await self.blockchain_handler.initialize()
         if not success:
             raise RuntimeError("Failed to initialize consumer blockchain handler")
         
+        # Pre-generate services from PDFs if directory provided
+        if pdf_dir:
+            await self.load_services(pdf_dir, complexity)
+        
         logger.info("✅ Consumer initialized successfully")
+    
+    async def load_services(self, pdf_dir: Path, complexity: str = "medium"):
+        """Pre-generate all services from PDF directory.
+        
+        Args:
+            pdf_dir: Directory containing PDF files with corresponding .txt abstracts
+            complexity: Service complexity level (low/medium/high)
+        """
+        logger.info(f"📚 Loading services from {pdf_dir}...")
+        
+        result = await self.service_generator.generate_services_from_pdfs(
+            pdf_dir=pdf_dir,
+            complexity=complexity,
+            skip_processed=True
+        )
+        
+        self.available_services = result["processed"]
+        self.service_index = 0
+        
+        logger.info(f"✅ Loaded {len(self.available_services)} services")
+        if result["failed"]:
+            logger.warning(f"⚠️  {len(result['failed'])} services failed to generate")
+        if result["skipped"]:
+            logger.info(f"⏭️  {len(result['skipped'])} services skipped (already processed)")
     
     async def create_auction(
         self,
-        service_requirements: Optional[Dict[str, Any]] = None,
+        service_index: Optional[int] = None,
         max_budget: int = 100_000_000,  # 100 USDC
-        duration: int = 7200,  # 2 hours
+        duration: int = 1800,  # 30 minutes
         eligible_providers: Optional[List[int]] = None
     ) -> int:
-        """
-        Create a new auction for a service.
+        """Create a new auction for a pre-generated service.
         
         Args:
-            service_requirements: Service description dict, or None to generate via ReAct
+            service_index: Index of service to use from available_services, or None to use next in order
             max_budget: Maximum budget in USDC (with 6 decimals)
             duration: Auction duration in seconds
             eligible_providers: List of provider agent IDs, or None to use from config
@@ -129,17 +167,42 @@ class Consumer:
         Returns:
             Auction ID
         """
+        # Ensure initialized
+        if not self.blockchain_handler._initialized:
+            await self.initialize()
+        
         logger.info("📝 Creating new auction...")
         
-        # Generate service requirements if not provided
-        if service_requirements is None:
-            logger.info("Generating service requirements via ReAct...")
-            service_requirements = await self.service_generator.generate_service()
+        # Check if services are available
+        if not self.available_services:
+            raise RuntimeError(
+                "No services available. Call load_services(pdf_dir) or initialize(pdf_dir) first."
+            )
         
-        # Upload service requirements to IPFS
-        logger.info("Uploading service requirements to IPFS...")
-        service_cid = await self.ipfs_client.upload_json(service_requirements)
-        logger.info(f"✓ Service CID: {service_cid}")
+        # Select service to use
+        if service_index is None:
+            # Use next service in order
+            if self.service_index >= len(self.available_services):
+                raise RuntimeError(
+                    f"All {len(self.available_services)} services have been used. "
+                    "Load more services or reset service_index."
+                )
+            idx = self.service_index
+            self.service_index += 1
+        else:
+            # Use specific index
+            if service_index < 0 or service_index >= len(self.available_services):
+                raise ValueError(
+                    f"Invalid service_index {service_index}. "
+                    f"Must be between 0 and {len(self.available_services) - 1}"
+                )
+            idx = service_index
+        
+        service_data = self.available_services[idx]
+        service_cid = service_data["service_cid"]
+        
+        logger.info(f"Using service: {service_data['title']}")
+        logger.info(f"Service CID: {service_cid}")
         
         # Use eligible providers from config if not specified
         if eligible_providers is None:
@@ -181,6 +244,11 @@ class Consumer:
     
     async def monitor_auctions(self):
         """Monitor active auctions and update their status."""
+        # Ensure initialized
+        if not self.blockchain_handler._initialized:
+            logger.warning("Blockchain handler not initialized, skipping monitoring")
+            return
+        
         for auction_id, tracker in list(self.active_auctions.items()):
             try:
                 # Get auction details from blockchain
@@ -213,7 +281,7 @@ class Consumer:
                 
                 # Check if service is completed
                 is_completed = auction_data.get('completed', False)
-                if is_completed and tracker.status == AuctionStatus.ENDED and not tracker.result:
+                if is_completed and tracker.status == AuctionStatus.ENDED and not tracker.result_path:
                     logger.info(f"✅ Service {auction_id} completed by provider")
                     tracker.status = AuctionStatus.COMPLETED
                     tracker.completed_at = datetime.now()
@@ -240,8 +308,8 @@ class Consumer:
         logger.info(f"📥 Retrieving result for auction {tracker.auction_id}...")
         
         # Result is stored in provider's local directory
-        # Path: agents/data/jobs/auction_{id}/result.json
-        result_path = Path(__file__).parent.parent / "data" / "jobs" / f"auction_{tracker.auction_id}" / "result.json"
+        # Path: {result_base_path}/auction_{id}/result.json
+        result_path = self.result_base_path / f"auction_{tracker.auction_id}" / "result.json"
         
         if not result_path.exists():
             logger.warning(f"Result file not found: {result_path}")
@@ -251,6 +319,11 @@ class Consumer:
         tracker.result_path = result_path
         logger.info(f"✓ Result retrieved from {result_path}")
         
+        # Load result data
+        import json
+        with open(result_path, 'r') as f:
+            tracker.result = json.load(f)
+        
         # Evaluate the result
         await self._evaluate_result(tracker)
     
@@ -258,24 +331,21 @@ class Consumer:
         """Evaluate the service result using ReAct evaluator."""
         logger.info(f"🔍 Evaluating result for auction {tracker.auction_id}...")
         
-        # Read result file
-        import json
-        with open(tracker.result_path, 'r') as f:
-            result = json.load(f)
-        
-        # Get original service requirements
+        # Get original service requirements from IPFS
         service_requirements = await self.ipfs_client.fetch_json(tracker.service_cid)
         
         # Evaluate using ReAct agent
         evaluation = await self.evaluator.evaluate(
             service_requirements=service_requirements,
-            result=result
+            result=tracker.result
         )
         
         tracker.evaluation = evaluation
         tracker.status = AuctionStatus.EVALUATED
         
         logger.info(f"✓ Evaluation complete: rating={evaluation['rating']}/100")
+        if evaluation.get('quality_scores'):
+            logger.info(f"  Quality scores: {evaluation['quality_scores']}")
         
         # Submit feedback
         await self._submit_feedback(tracker)
@@ -300,12 +370,21 @@ class Consumer:
                 tracker.error = "FeedbackAuthProvided event not found"
                 return
             
+            # Generate feedback text from quality scores
+            quality_scores = tracker.evaluation.get('quality_scores', {})
+            if quality_scores:
+                feedback_text = ", ".join(
+                    f"{k}: {v}" for k, v in quality_scores.items()
+                )
+            else:
+                feedback_text = f"Rating: {tracker.evaluation['rating']}/100"
+            
             # Submit feedback to reputation registry
             result = await self.blockchain_handler.submit_feedback(
                 auction_id=tracker.auction_id,
                 agent_id=tracker.winning_agent_id,
                 rating=tracker.evaluation['rating'],
-                feedback_text=tracker.evaluation.get('summary', ''),
+                feedback_text=feedback_text,
                 feedback_auth=feedback_auth
             )
             
