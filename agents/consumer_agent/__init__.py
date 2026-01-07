@@ -1,6 +1,6 @@
 """Consumer agent for the decentralized AI services marketplace."""
 
-from .consumer import Consumer, AuctionStatus, AuctionTracker
+from .consumer_orchestrator import Consumer, AuctionStatus, AuctionTracker
 from .service_generator import ServiceGenerator
 from .evaluator import ServiceEvaluator
 from .blockchain_handler import ConsumerBlockchainHandler
