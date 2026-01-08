@@ -81,6 +81,64 @@ class ConsumerBlockchainHandler:
             logger.error(f"Failed to initialize consumer blockchain handler: {e}")
             return False
     
+    async def approve_tokens(self, amount: int) -> bool:
+        """
+        Approve ReverseAuction contract to spend USDC tokens.
+        
+        Args:
+            amount: Amount of tokens to approve (in wei)
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            if not self._initialized:
+                await self.initialize()
+            
+            logger.info(f"Approving {amount} USDC for ReverseAuction contract...")
+            
+            # Load ERC20 ABI for USDC token
+            erc20_abi = [
+                {
+                    "inputs": [
+                        {"name": "spender", "type": "address"},
+                        {"name": "amount", "type": "uint256"}
+                    ],
+                    "name": "approve",
+                    "outputs": [{"name": "", "type": "bool"}],
+                    "stateMutability": "nonpayable",
+                    "type": "function"
+                }
+            ]
+            
+            # Load USDC contract
+            await self.client.load_contract(
+                "USDC",
+                self.config.payment_token_address,
+                erc20_abi
+            )
+            
+            # Send approve transaction
+            tx_hash = await self.client.send_transaction(
+                "USDC",
+                "approve",
+                self.config.reverse_auction_address,
+                amount
+            )
+            
+            # Wait for confirmation
+            receipt = await self.client.wait_for_transaction(tx_hash)
+            
+            if receipt['status'] != 1:
+                raise Exception("Approval transaction failed")
+            
+            logger.info(f"✅ Approved {amount} USDC, tx={tx_hash}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to approve tokens: {e}")
+            return False
+    
     async def create_auction(
         self,
         service_cid: str,
@@ -112,6 +170,11 @@ class ConsumerBlockchainHandler:
             
             logger.info(f"Creating auction: service={service_cid}, max_price={max_price}, "
                        f"duration={duration}s, eligible_agents={eligible_agent_ids}")
+            
+            # Approve tokens for escrow before creating auction
+            approval_success = await self.approve_tokens(max_price)
+            if not approval_success:
+                raise Exception("Failed to approve USDC tokens for auction")
             
             # Estimate gas
             estimated_gas = await self.client.estimate_gas(
