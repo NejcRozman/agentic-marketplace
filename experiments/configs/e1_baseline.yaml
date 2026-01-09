@@ -1,0 +1,117 @@
+# Baseline Experiment - Single Auction with Honest Agents
+# Research Question: RQ1 - System Viability
+# Description: Verify that the system can complete one full auction cycle successfully
+
+experiment:
+  id: "e1_baseline"
+  name: "Baseline - Single Auction"
+  description: "Test basic system functionality with 1 consumer and 3 honest providers completing 1 auction"
+  research_question: "RQ1"
+  duration_timeout: 600  # Maximum 10 minutes for entire experiment
+  
+blockchain:
+  network: "anvil"
+  rpc_url: "http://localhost:8545"
+  fork_network: "sepolia"  # Fork from Sepolia to get ERC-8004 contracts
+  infura_key_env: "INFURA_API_KEY"  # Read from environment
+  
+  contracts:
+    # Addresses of contracts (deployed by experiment or pre-existing)
+    reverse_auction: null  # null = deploy new, or specify address
+    identity_registry: "0x8004a6090Cd10A7288092483047B097295Fb8847"  # Sepolia ERC-8004
+    reputation_registry: "0x8004B8FD1A363aa02fDC07635C0c5F94f6Af5B7E"  # Sepolia ERC-8004
+    payment_token: null  # null = deploy mock USDC
+    
+  accounts:
+    # Use your personal account (proven to work with ERC-8004)
+    # Note: When forking Sepolia, Anvil's default accounts have issues with ERC-8004 registration
+    # Private keys loaded from environment variable for security
+    main_account: "${BLOCKCHAIN_PRIVATE_KEY}"
+    
+    # For simplicity: All agents use the same account
+    # ERC-8004 allows one address to own multiple agent NFTs
+    deployer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    consumer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    providers:
+      - "${BLOCKCHAIN_PRIVATE_KEY}"
+      - "${BLOCKCHAIN_PRIVATE_KEY}"
+      - "${BLOCKCHAIN_PRIVATE_KEY}"
+
+agents:
+  consumer:
+    count: 1
+    agent_id: null  # null = register new agent (required for fresh Anvil)
+    private_key: null  # null = use blockchain.accounts.consumer
+    eligible_providers: null  # null = experiment runner will set this after registering providers
+    
+    config:
+      check_interval: 10  # Check blockchain every 10 seconds
+      max_budget: 100000000  # 100 USDC (with 6 decimals)
+      auction_duration: 300  # 5 minutes (short for testing)
+      
+    behavior:
+      pdf_directory: "utils/files"  # Use existing test PDFs
+      service_complexity: "medium"
+      auto_create_auction: true  # Create auction immediately on start
+      auto_monitor: true  # Monitor auction automatically
+      
+  providers:
+    count: 3
+    agent_ids: [null, null, null]  # null = register new agents for each
+    private_keys: null  # null = use blockchain.accounts.providers
+    
+    config:
+      check_interval: 10  # Check blockchain every 10 seconds
+      
+    behavior:
+      strategy: "default"  # Use normal ReAct bidding logic
+      auto_bid: true  # Automatically bid on detected auctions
+      auto_execute: true  # Automatically execute won services
+      auto_complete: true  # Automatically complete on blockchain
+
+experiment_flow:
+  phases:
+    - name: "setup"
+      description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      timeout: 120  # 2 minutes to set up blockchain
+      
+    - name: "agents_start"
+      description: "Launch consumer and provider agents"
+      timeout: 30  # 30 seconds for agents to initialize
+      
+    - name: "experiment_run"
+      description: "Agents operate autonomously until target auctions completed"
+      stopping_criteria:
+        type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
+        target: 1  # Stop when 1 auction is completed
+        poll_interval: 10  # Check every 10 seconds
+        max_timeout: 600  # 10 minutes absolute maximum
+      
+  target_auctions: 1  # Number of auctions to complete before stopping
+  
+monitoring:
+  metrics:
+    - auction_created  # Did consumer create auction successfully?
+    - bids_received  # How many providers bid?
+    - auction_winner  # Which provider won?
+    - service_executed  # Did winner execute service?
+    - service_completed  # Was service marked complete on-chain?
+    - reputation_updated  # Was reputation updated?
+    - final_reputations  # All agent reputations at end
+    - gas_costs  # Total gas used
+    - timing  # Duration of each phase
+    
+  logs:
+    directory: "experiments/data/logs/e1_baseline"
+    format: "json"
+    level: "INFO"
+    
+  output:
+    directory: "experiments/data/metrics/e1_baseline"
+    format: "json"
+
+api_keys:
+  # These are read from environment variables
+  google_api_key_env: "GOOGLE_API_KEY"
+  pinata_api_key_env: "PINATA_API_KEY"
+  pinata_secret_env: "PINATA_SECRET_KEY"
