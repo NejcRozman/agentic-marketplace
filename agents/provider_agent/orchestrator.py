@@ -18,6 +18,7 @@ Workflow:
 
 import asyncio
 import logging
+import argparse
 import json
 from pathlib import Path
 from typing import Dict, Any, Optional, List
@@ -413,24 +414,61 @@ class Orchestrator:
         }
 
 
-async def main():
-    """Run the orchestrator."""
+async def main(args):
+    """Run the orchestrator with CLI arguments."""
+    # Override config from CLI arguments
+    if args.agent_id:
+        Config.agent_id = args.agent_id
+    if args.private_key:
+        Config.blockchain_private_key = args.private_key
+    if args.check_interval:
+        Config.check_interval = args.check_interval
+    
     orchestrator = Orchestrator()
     await orchestrator.initialize()
     
+    # Create status file path if provided
+    status_file = Path(args.status_file) if args.status_file else None
+    
     try:
-        await orchestrator.run()
+        # Write initial status
+        if status_file:
+            with open(status_file, 'w') as f:
+                json.dump(orchestrator.get_status(), f)
+        
+        # Start orchestrator (it has its own loop)
+        task = asyncio.create_task(orchestrator.run())
+        
+        # Periodically write status
+        while orchestrator.running:
+            if status_file:
+                with open(status_file, 'w') as f:
+                    json.dump(orchestrator.get_status(), f)
+            await asyncio.sleep(10)  # Update status every 10 seconds
+            
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")
     finally:
         orchestrator.stop()
+        if status_file:
+            with open(status_file, 'w') as f:
+                json.dump(orchestrator.get_status(), f)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Provider Agent Orchestrator")
+    parser.add_argument("--agent-id", type=int, help="Provider agent ID")
+    parser.add_argument("--private-key", type=str, help="Blockchain private key")
+    parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")
+    parser.add_argument("--status-file", type=str, help="Path to write status JSON file")
+    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    
+    args = parser.parse_args()
+    
     # Configure logging
     logging.basicConfig(
-        level=logging.INFO,
+        level=getattr(logging, args.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     
-    asyncio.run(main())
+    asyncio.run(main(args))

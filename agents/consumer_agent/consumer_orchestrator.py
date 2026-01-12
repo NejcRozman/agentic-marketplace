@@ -12,6 +12,8 @@ Responsibilities:
 
 import asyncio
 import logging
+import argparse
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -434,3 +436,79 @@ class Consumer:
             "completed_auctions": len(self.completed_auctions),
             "running": self.running
         }
+    
+    def write_status(self, status_file: Path):
+        """Write status to JSON file for external monitoring."""
+        try:
+            with open(status_file, 'w') as f:
+                json.dump(self.get_status(), f)
+        except Exception as e:
+            logger.error(f"Failed to write status file: {e}")
+
+
+async def main(args):
+    """Run the consumer orchestrator with CLI arguments."""
+    # Override config from CLI arguments
+    if args.agent_id:
+        config.agent_id = args.agent_id
+    if args.private_key:
+        config.blockchain_private_key = args.private_key
+    if args.eligible_providers:
+        config.eligible_providers = args.eligible_providers
+    if args.max_budget:
+        config.max_budget = args.max_budget
+    if args.auction_duration:
+        config.auction_duration = args.auction_duration
+    if args.check_interval:
+        config.check_interval = args.check_interval
+    
+    consumer = Consumer(config)
+    await consumer.initialize()
+    
+    # Create status file path if provided
+    status_file = Path(args.status_file) if args.status_file else None
+    
+    try:
+        # Write initial status
+        if status_file:
+            consumer.write_status(status_file)
+        
+        # Start monitoring loop
+        consumer.running = True
+        while consumer.running:
+            await consumer.monitor_auctions()
+            
+            # Update status file
+            if status_file:
+                consumer.write_status(status_file)
+            
+            await asyncio.sleep(consumer.check_interval)
+            
+    except KeyboardInterrupt:
+        logger.info("Received interrupt signal")
+    finally:
+        consumer.stop()
+        if status_file:
+            consumer.write_status(status_file)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Consumer Agent Orchestrator")
+    parser.add_argument("--agent-id", type=int, help="Consumer agent ID")
+    parser.add_argument("--private-key", type=str, help="Blockchain private key")
+    parser.add_argument("--eligible-providers", type=int, nargs="+", help="List of eligible provider agent IDs")
+    parser.add_argument("--max-budget", type=int, help="Maximum budget for auctions (in token units)")
+    parser.add_argument("--auction-duration", type=int, help="Auction duration in seconds")
+    parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")
+    parser.add_argument("--status-file", type=str, help="Path to write status JSON file")
+    parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    
+    args = parser.parse_args()
+    
+    # Configure logging
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    asyncio.run(main(args))
