@@ -10,8 +10,12 @@ from pathlib import Path
 import json
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from ..config import Config
-from ..infrastructure.ipfs_client import IPFSClient
+try:
+    from ..config import Config
+    from ..infrastructure.ipfs_client import IPFSClient
+except ImportError:
+    from config import Config
+    from infrastructure.ipfs_client import IPFSClient
 
 logger = logging.getLogger(__name__)
 

@@ -23,15 +23,27 @@ from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from ..infrastructure.blockchain_client import BlockchainClient
-from ..infrastructure.contract_abis import (
-    get_reverse_auction_abi,
-    get_identity_registry_abi,
-    get_reputation_registry_abi
-)
-from ..infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
-from ..infrastructure.ipfs_client import IPFSClient
-from ..config import config
+try:
+    from ..infrastructure.blockchain_client import BlockchainClient
+    from ..infrastructure.contract_abis import (
+        get_reverse_auction_abi,
+        get_identity_registry_abi,
+        get_reputation_registry_abi
+    )
+    from ..infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
+    from ..infrastructure.ipfs_client import IPFSClient
+    from ..config import config
+except ImportError:
+    from infrastructure.blockchain_client import BlockchainClient
+    from infrastructure.contract_abis import (
+        get_reverse_auction_abi,
+        get_identity_registry_abi,
+        get_reputation_registry_abi
+    )
+    from infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
+    from infrastructure.ipfs_client import IPFSClient
+    from config import Config
+    config = Config()
 
 logger = logging.getLogger(__name__)
 
@@ -151,19 +163,22 @@ class BlockchainHandler:
                 return {"error": str(e), "rating": 50, "feedback_count": 0}
         
         @tool
-        def estimate_cost(service_requirements: str) -> Dict[str, Any]:
-            """Estimate cost to deliver a service based on requirements.
+        def estimate_cost(complexity: str = "medium") -> Dict[str, Any]:
+            """Estimate cost to deliver a service based on complexity.
             
             Args:
-                service_requirements: JSON string of service requirements from IPFS
+                complexity: Service complexity level - 'low', 'medium', or 'high'
                 
             Returns:
                 Dictionary with estimated cost and confidence
             """
             try:
-                requirements = json.loads(service_requirements) if isinstance(service_requirements, str) else service_requirements
+                # Normalize complexity string
+                complexity = str(complexity).lower().strip()
+                if complexity not in ["low", "medium", "high"]:
+                    logger.warning(f"Invalid complexity '{complexity}', defaulting to 'medium'")
+                    complexity = "medium"
                 
-                complexity = requirements.get("complexity", "medium")
                 base_cost = 50  # Base cost in USDC
                 
                 multipliers = {"low": 0.7, "medium": 1.0, "high": 1.5}
@@ -543,17 +558,19 @@ class BlockchainHandler:
 Available tools:
 - get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
 - get_reputation(agent_id): Get reputation score for an agent  
-- estimate_cost(service_requirements): Estimate cost to deliver a service
+- estimate_cost(complexity): Estimate cost to deliver a service. Pass 'low', 'medium', or 'high' based on service complexity from IPFS data
 - place_bid(auction_id, bid_amount): Submit a bid for an auction
 
 BIDDING GUIDELINES:
 1. Analyze each auction before bidding
-2. Only bid if profitable (bid_amount > estimated_cost)
-3. Consider time remaining - urgent auctions may need immediate bids
-4. Check current winning bid - you need a better score to win
-5. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
-6. You can bid on multiple auctions if profitable
-7. If no auctions are profitable, don't bid
+2. Fetch service requirements from IPFS using get_ipfs_data
+3. Extract the 'complexity' field from service data and use it to estimate cost
+4. Only bid if profitable (bid_amount > estimated_cost)
+5. Consider time remaining - urgent auctions may need immediate bids
+6. Check current winning bid - you need a better score to win
+7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
+8. You can bid on multiple auctions if profitable
+9. If no auctions are profitable, don't bid
 
 Current eligible auctions:
 {auctions_context}

@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 from dataclasses import dataclass
 
-from ..config import config
+try:
+    from ..config import config
+except ImportError:
+    from config import Config
+    config = Config()
 
 logger = logging.getLogger(__name__)
 

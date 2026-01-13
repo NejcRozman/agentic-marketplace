@@ -20,10 +20,6 @@ Run with: python agents/tests/test_blockchain_handler.py
 
 import sys
 from pathlib import Path
-
-# Add project root to Python path so imports work
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-
 import unittest
 import asyncio
 import os

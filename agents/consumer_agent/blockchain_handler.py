@@ -4,9 +4,15 @@ import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
-from ..config import config
-from ..infrastructure.blockchain_client import BlockchainClient
-from ..infrastructure.ipfs_client import IPFSClient
+try:
+    from ..config import config
+    from ..infrastructure.blockchain_client import BlockchainClient
+    from ..infrastructure.ipfs_client import IPFSClient
+except ImportError:
+    from config import Config
+    config = Config()
+    from infrastructure.blockchain_client import BlockchainClient
+    from infrastructure.ipfs_client import IPFSClient
 
 logger = logging.getLogger(__name__)
 

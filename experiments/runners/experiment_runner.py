@@ -18,6 +18,7 @@ import logging
 import yaml
 import json
 import os
+import sys
 import re
 import signal
 import time
@@ -25,6 +26,13 @@ from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from dataclasses import dataclass
+from dotenv import load_dotenv
+
+# Load environment variables from agents/.env
+AGENTS_DIR = Path(__file__).parent.parent.parent / "agents"
+ENV_FILE = AGENTS_DIR / ".env"
+if ENV_FILE.exists():
+    load_dotenv(ENV_FILE)
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +124,21 @@ class ExperimentRunner:
         
         fork_url = f"https://{fork_network}.infura.io/v3/{infura_key}"
         
-        # Start Anvil
+        # Start Anvil with minimal accounts to reduce Infura requests
         log_file = self.log_dir / "anvil.log"
+        
+        # Use only one funded account - Anvil's first default key but with massive balance
+        # This avoids Anvil trying to fetch state for 10 default accounts from Sepolia
+        anvil_default_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+        
         with open(log_file, 'w') as f:
             process = subprocess.Popen(
-                ["anvil", "--fork-url", fork_url, "--host", "0.0.0.0"],
+                [
+                    "anvil", 
+                    "--fork-url", fork_url, 
+                    "--host", "0.0.0.0",
+                    "--accounts", "1",  # Only create 1 default account to minimize Infura requests
+                ],
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 preexec_fn=os.setsid  # Create new process group for clean shutdown
@@ -134,15 +152,58 @@ class ExperimentRunner:
         )
         self.processes.append(self.anvil_process)
         
-        # Wait for Anvil to be ready
+        # Wait for Anvil to be ready - check if RPC is accepting connections
         logger.info("Waiting for Anvil to initialize...")
-        await asyncio.sleep(5)
-        
-        # Verify Anvil is running
-        if self.anvil_process.process.poll() is not None:
-            raise RuntimeError("Anvil process terminated unexpectedly")
+        max_wait = 30  # 30 seconds max
+        for i in range(max_wait):
+            await asyncio.sleep(1)
+            
+            # Check if Anvil process is still running
+            if self.anvil_process.process.poll() is not None:
+                raise RuntimeError("Anvil process terminated unexpectedly")
+            
+            # Try to connect to RPC
+            try:
+                result = subprocess.run(
+                    ["curl", "-s", "-X", "POST", 
+                     "-H", "Content-Type: application/json",
+                     "--data", '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}',
+                     self.config['blockchain']['rpc_url']],
+                    capture_output=True,
+                    timeout=1
+                )
+                if result.returncode == 0 and b"result" in result.stdout:
+                    logger.info(f"✓ Anvil ready after {i+1} seconds")
+                    break
+            except:
+                pass
+        else:
+            raise RuntimeError("Anvil failed to start within 30 seconds")
         
         logger.info(f"✓ Anvil started (PID: {self.anvil_process.pid})")
+        
+        # Reset nonce for the personal account to 0
+        # This is needed because forked accounts carry over their nonce from Sepolia
+        logger.info("Resetting account nonce...")
+        personal_account = self.config['blockchain']['accounts']['main_account']
+        # Get address from private key
+        from eth_account import Account
+        account = Account.from_key(personal_account)
+        address = account.address
+        
+        # Reset nonce to 0 using anvil_setNonce
+        result = subprocess.run(
+            ["curl", "-s", "-X", "POST",
+             "-H", "Content-Type: application/json",
+             "--data", f'{{"jsonrpc":"2.0","method":"anvil_setNonce","params":["{address}","0x0"],"id":1}}',
+             self.config['blockchain']['rpc_url']],
+            capture_output=True
+        )
+        
+        if result.returncode == 0:
+            logger.info(f"✓ Reset nonce for {address}")
+        else:
+            logger.warning(f"Failed to reset nonce: {result.stderr.decode()}")
     
     def run_forge_script(self, script_name: str, env_vars: Dict[str, str]) -> str:
         """
@@ -169,8 +230,7 @@ class ExperimentRunner:
             [
                 "forge", "script", str(script_path),
                 "--rpc-url", self.config['blockchain']['rpc_url'],
-                "--broadcast",
-                "--silent"
+                "--broadcast"
             ],
             cwd=contracts_dir,
             env=env,
@@ -300,9 +360,9 @@ class ExperimentRunner:
             script = agents_dir / "provider_agent" / "orchestrator.py"
             status_file = self.log_dir / f"provider_{agent_id}_status.json"
         
-        # Build command
+        # Build command - use same Python interpreter as the runner (preserves venv)
         cmd = [
-            "python", str(script),
+            sys.executable, str(script),
             "--agent-id", str(agent_id),
             "--private-key", private_key,
             "--status-file", str(status_file),
@@ -319,12 +379,33 @@ class ExperimentRunner:
                 cmd.extend(["--auction-duration", str(additional_args['auction_duration'])])
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
+            # Auto-auction arguments
+            if 'auto_create_auction' in additional_args and additional_args['auto_create_auction']:
+                cmd.append("--auto-create-auction")
+            if 'num_auctions' in additional_args:
+                cmd.extend(["--num-auctions", str(additional_args['num_auctions'])])
+            if 'pdf_directory' in additional_args:
+                cmd.extend(["--pdf-directory", str(additional_args['pdf_directory'])])
+            if 'service_complexity' in additional_args:
+                cmd.extend(["--service-complexity", str(additional_args['service_complexity'])])
+            if 'auction_creation_delay' in additional_args:
+                cmd.extend(["--auction-creation-delay", str(additional_args['auction_creation_delay'])])
+            if 'inter_auction_delay' in additional_args:
+                cmd.extend(["--inter-auction-delay", str(additional_args['inter_auction_delay'])])
         elif agent_type == "provider" and additional_args:
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
         
         # Setup environment variables
         env = os.environ.copy()
+        
+        # Add project root to PYTHONPATH so agents can import from agents package
+        project_root = str(Path(__file__).parent.parent.parent)
+        if "PYTHONPATH" in env:
+            env["PYTHONPATH"] = f"{project_root}:{env['PYTHONPATH']}"
+        else:
+            env["PYTHONPATH"] = project_root
+        
         env.update({
             "BLOCKCHAIN_RPC_URL": self.config['blockchain']['rpc_url'],
             "BLOCKCHAIN_REVERSE_AUCTION_ADDRESS": self.reverse_auction_address,
@@ -376,6 +457,18 @@ class ExperimentRunner:
             'auction_duration': consumer_config['config']['auction_duration'],
             'check_interval': consumer_config['config']['check_interval']
         }
+        
+        # Add behavior config for auto-auction
+        if 'behavior' in consumer_config:
+            behavior = consumer_config['behavior']
+            consumer_args.update({
+                'auto_create_auction': behavior.get('auto_create_auction', False),
+                'num_auctions': behavior.get('num_auctions', 1),
+                'pdf_directory': behavior.get('pdf_directory', ''),
+                'service_complexity': behavior.get('service_complexity', 'medium'),
+                'auction_creation_delay': behavior.get('auction_creation_delay', 0),
+                'inter_auction_delay': behavior.get('inter_auction_delay', 30)
+            })
         
         self.spawn_agent_process(
             "consumer",

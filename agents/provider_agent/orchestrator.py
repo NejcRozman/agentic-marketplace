@@ -20,16 +20,19 @@ import asyncio
 import logging
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from .blockchain_handler import BlockchainHandler
-from .literature_review import LiteratureReviewAgent
-from ..infrastructure.ipfs_client import IPFSClient
-from ..config import Config
+from agents.provider_agent.blockchain_handler import BlockchainHandler
+from agents.provider_agent.literature_review import LiteratureReviewAgent
+from agents.infrastructure.ipfs_client import IPFSClient
+from agents.config import Config
+
+# No global config instance needed for provider
 
 logger = logging.getLogger(__name__)
 
@@ -436,15 +439,18 @@ async def main(args):
             with open(status_file, 'w') as f:
                 json.dump(orchestrator.get_status(), f)
         
-        # Start orchestrator (it has its own loop)
-        task = asyncio.create_task(orchestrator.run())
+        # Start orchestrator main loop
+        orchestrator_task = asyncio.create_task(orchestrator.run())
         
-        # Periodically write status
-        while orchestrator.running:
+        # Periodically write status while orchestrator is running
+        while not orchestrator_task.done():
             if status_file:
                 with open(status_file, 'w') as f:
                     json.dump(orchestrator.get_status(), f)
             await asyncio.sleep(10)  # Update status every 10 seconds
+        
+        # Await the orchestrator task to catch any exceptions
+        await orchestrator_task
             
     except KeyboardInterrupt:
         logger.info("Received interrupt signal")

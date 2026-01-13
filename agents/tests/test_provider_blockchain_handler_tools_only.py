@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 
 # Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from agents.provider_agent.blockchain_handler import BlockchainHandler
 from agents.infrastructure.blockchain_client import BlockchainClient
@@ -61,11 +60,11 @@ async def test_tools():
     # Test 3: Estimate cost
     print("\n3. Testing estimate_cost...")
     try:
-        # Get IPFS data first
+        # Get IPFS data first to check complexity
         ipfs_data = await tool_map["get_ipfs_data"].ainvoke({"cid": "Qmc2Xruh3gcKCxo8FiNXMox5jj3wQS12s5YQnxNkM542AS"})
-        import json
+        complexity = ipfs_data.get("complexity", "medium")
         result = await tool_map["estimate_cost"].ainvoke({
-            "service_requirements": json.dumps(ipfs_data)
+            "complexity": complexity
         })
         print(f"✅ Success: {result}")
     except Exception as e:

@@ -14,17 +14,21 @@ import asyncio
 import logging
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 
-from ..config import config, Config
-from ..infrastructure.ipfs_client import IPFSClient
-from .blockchain_handler import ConsumerBlockchainHandler
-from .service_generator import ServiceGenerator
-from .evaluator import ServiceEvaluator
+from agents.config import Config
+from agents.infrastructure.ipfs_client import IPFSClient
+from agents.consumer_agent.blockchain_handler import ConsumerBlockchainHandler
+from agents.consumer_agent.service_generator import ServiceGenerator
+from agents.consumer_agent.evaluator import ServiceEvaluator
+
+# Create config instance
+config = Config()
 
 logger = logging.getLogger(__name__)
 
@@ -461,14 +465,53 @@ async def main(args):
         config.auction_duration = args.auction_duration
     if args.check_interval:
         config.check_interval = args.check_interval
+    if args.auto_create_auction:
+        config.auto_create_auction = True
+    if args.num_auctions:
+        config.num_auctions = args.num_auctions
+    if args.pdf_directory:
+        config.pdf_directory = args.pdf_directory
+    if args.service_complexity:
+        config.service_complexity = args.service_complexity
+    if args.auction_creation_delay:
+        config.auction_creation_delay = args.auction_creation_delay
+    if args.inter_auction_delay:
+        config.inter_auction_delay = args.inter_auction_delay
     
     consumer = Consumer(config)
-    await consumer.initialize()
+    
+    # Initialize with PDF directory if auto-create is enabled
+    pdf_dir = Path(config.pdf_directory) if config.pdf_directory and config.auto_create_auction else None
+    await consumer.initialize(pdf_dir=pdf_dir, complexity=config.service_complexity)
     
     # Create status file path if provided
     status_file = Path(args.status_file) if args.status_file else None
     
+    # Track auction creation
+    auctions_created = 0
+    
     try:
+        # Auto-create first auction if configured
+        if config.auto_create_auction:
+            # Optional delay before first auction
+            if config.auction_creation_delay > 0:
+                logger.info(f"⏳ Waiting {config.auction_creation_delay}s before creating first auction...")
+                await asyncio.sleep(config.auction_creation_delay)
+            
+            # Create initial auction
+            logger.info("🎬 Creating initial auction...")
+            try:
+                auction_id = await consumer.create_auction(
+                    max_budget=config.max_budget,
+                    duration=config.auction_duration,
+                    eligible_providers=config.eligible_providers
+                )
+                auctions_created = 1
+                logger.info(f"✅ Created auction {auctions_created}/{config.num_auctions}: ID={auction_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to create initial auction: {e}")
+                raise
+        
         # Write initial status
         if status_file:
             consumer.write_status(status_file)
@@ -477,6 +520,37 @@ async def main(args):
         consumer.running = True
         while consumer.running:
             await consumer.monitor_auctions()
+            
+            # Sequential creation: Create next auction when previous completes
+            if config.auto_create_auction and auctions_created < config.num_auctions:
+                # Check if we should create next auction
+                completed_count = len([a for a in consumer.completed_auctions 
+                                     if a.status == AuctionStatus.COMPLETED])
+                
+                if completed_count >= auctions_created:
+                    logger.info(f"✅ Auction {auctions_created} completed. Creating next auction...")
+                    
+                    # Optional delay between auctions
+                    if config.inter_auction_delay > 0:
+                        logger.info(f"⏳ Waiting {config.inter_auction_delay}s before next auction...")
+                        await asyncio.sleep(config.inter_auction_delay)
+                    
+                    try:
+                        auction_id = await consumer.create_auction(
+                            max_budget=config.max_budget,
+                            duration=config.auction_duration,
+                            eligible_providers=config.eligible_providers
+                        )
+                        auctions_created += 1
+                        logger.info(f"✅ Created auction {auctions_created}/{config.num_auctions}: ID={auction_id}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to create auction {auctions_created + 1}: {e}")
+            
+            # Stop when all target auctions completed (if auto-create enabled)
+            if (config.auto_create_auction and 
+                len(consumer.completed_auctions) >= config.num_auctions):
+                logger.info(f"🎯 All {config.num_auctions} auctions completed!")
+                consumer.stop()
             
             # Update status file
             if status_file:
@@ -502,6 +576,14 @@ if __name__ == "__main__":
     parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")
     parser.add_argument("--status-file", type=str, help="Path to write status JSON file")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    
+    # Auto-auction arguments
+    parser.add_argument("--auto-create-auction", action="store_true", help="Automatically create auction(s) on startup")
+    parser.add_argument("--num-auctions", type=int, help="Number of auctions to create sequentially")
+    parser.add_argument("--pdf-directory", type=str, help="Directory containing PDFs for service generation")
+    parser.add_argument("--service-complexity", type=str, choices=["low", "medium", "high"], help="Service complexity level")
+    parser.add_argument("--auction-creation-delay", type=int, help="Seconds to wait before creating first auction")
+    parser.add_argument("--inter-auction-delay", type=int, help="Seconds to wait between sequential auctions")
     
     args = parser.parse_args()
     

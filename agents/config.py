@@ -8,8 +8,9 @@ from dotenv import load_dotenv
 AGENTS_DIR = Path(__file__).parent
 ENV_FILE_PATH = AGENTS_DIR / ".env"
 
-# Load environment variables from .env file (override existing env vars)
-load_dotenv(ENV_FILE_PATH, override=True)
+# Load environment variables from .env file (use as defaults, don't override existing)
+# This allows experiment runner to override contract addresses for each run
+load_dotenv(ENV_FILE_PATH, override=False)
 
 
 class Config:
@@ -46,6 +47,16 @@ class Config:
         eligible_str = os.getenv("ELIGIBLE_PROVIDERS", "")
         self.eligible_providers = [int(id.strip()) for id in eligible_str.split(",") if id.strip()]
         self.consumer_check_interval = int(os.getenv("CONSUMER_CHECK_INTERVAL", "15"))
+        
+        # Consumer Auto-Auction Configuration
+        self.auto_create_auction = os.getenv("AUTO_CREATE_AUCTION", "false").lower() == "true"
+        self.num_auctions = int(os.getenv("NUM_AUCTIONS", "1"))
+        self.auction_creation_delay = int(os.getenv("AUCTION_CREATION_DELAY", "0"))  # Delay before first auction
+        self.inter_auction_delay = int(os.getenv("INTER_AUCTION_DELAY", "30"))  # Delay between auctions
+        self.pdf_directory = os.getenv("PDF_DIRECTORY", "")
+        self.service_complexity = os.getenv("SERVICE_COMPLEXITY", "medium")
+        self.max_budget = int(os.getenv("MAX_BUDGET", "100000000"))  # 100 USDC with 6 decimals
+        self.auction_duration = int(os.getenv("AUCTION_DURATION", "1800"))  # 30 minutes
         
         # Agent workspace
         self.workspace_dir = os.getenv("WORKSPACE_DIR", "./workspaces")

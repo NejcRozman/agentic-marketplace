@@ -7,7 +7,11 @@ from web3 import Web3, AsyncWeb3
 from eth_account import Account
 from eth_utils import to_checksum_address
 
-from ..config import config
+try:
+    from ..config import config
+except ImportError:
+    from config import Config
+    config = Config()
 
 logger = logging.getLogger(__name__)
 

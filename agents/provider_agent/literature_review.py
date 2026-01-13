@@ -13,7 +13,11 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
 
-from ..config import config
+try:
+    from ..config import config
+except ImportError:
+    from config import Config
+    config = Config()
 
 logger = logging.getLogger(__name__)
 

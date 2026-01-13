@@ -16,7 +16,10 @@ from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-from ..config import Config
+try:
+    from ..config import Config
+except ImportError:
+    from config import Config
 
 logger = logging.getLogger(__name__)
 
