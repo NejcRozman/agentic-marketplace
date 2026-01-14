@@ -19,8 +19,9 @@ class Config:
     def __init__(self):
         """Load configuration from environment variables."""
         
-        # Google Gemini API
-        self.google_api_key = os.getenv("GOOGLE_API_KEY")
+        # LLM API (OpenRouter)
+        self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+        self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         
         # Pinata IPFS
         self.pinata_api_key = os.getenv("PINATA_API_KEY")
@@ -82,8 +83,8 @@ class Config:
         """
         errors = []
         
-        if not self.google_api_key:
-            errors.append("GOOGLE_API_KEY is required")
+        if not self.openrouter_api_key:
+            errors.append("OPENROUTER_API_KEY is required")
         
         if not self.private_key:
             errors.append("BLOCKCHAIN_PRIVATE_KEY is required for transactions")

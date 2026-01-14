@@ -59,6 +59,7 @@ async def test_tools():
     
     # Test 3: Estimate cost
     print("\n3. Testing estimate_cost...")
+    estimated_cost = None
     try:
         # Get IPFS data first to check complexity
         ipfs_data = await tool_map["get_ipfs_data"].ainvoke({"cid": "Qmc2Xruh3gcKCxo8FiNXMox5jj3wQS12s5YQnxNkM542AS"})
@@ -67,13 +68,69 @@ async def test_tools():
             "complexity": complexity
         })
         print(f"✅ Success: {result}")
+        # Extract cost for use in next test
+        if isinstance(result, dict) and "estimated_cost" in result:
+            estimated_cost = result["estimated_cost"]
+        elif isinstance(result, str) and "estimated_cost" in result.lower():
+            import re
+            match = re.search(r'(\d+)\s*USDC', result)
+            if match:
+                estimated_cost = int(match.group(1)) * 1_000_000  # Convert to micro USDC
     except Exception as e:
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
     
-    # Test 4: Place bid
-    print("\n4. Testing place_bid for auction 2...")
+    # Test 4: Validate bid profitability
+    print("\n4. Testing validate_bid_profitability...")
+    if estimated_cost:
+        # Test 4a: Profitable bid (higher than cost)
+        print("   4a. Testing profitable bid...")
+        try:
+            result = await tool_map["validate_bid_profitability"].ainvoke({
+                "estimated_cost": estimated_cost,
+                "proposed_bid": estimated_cost + 5_000_000  # 5 USDC profit
+            })
+            print(f"   ✅ Success: {result.get('verdict', result)}")
+            assert result.get("is_profitable") == True, "Expected profitable bid to be marked as profitable"
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Test 4b: Unprofitable bid (lower than cost)
+        print("   4b. Testing unprofitable bid...")
+        try:
+            result = await tool_map["validate_bid_profitability"].ainvoke({
+                "estimated_cost": estimated_cost,
+                "proposed_bid": estimated_cost - 2_000_000  # 2 USDC loss
+            })
+            print(f"   ✅ Success: {result.get('verdict', result)}")
+            assert result.get("is_profitable") == False, "Expected unprofitable bid to be marked as unprofitable"
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Test 4c: Marginally profitable bid
+        print("   4c. Testing marginally profitable bid...")
+        try:
+            result = await tool_map["validate_bid_profitability"].ainvoke({
+                "estimated_cost": estimated_cost,
+                "proposed_bid": estimated_cost + 500_000  # 0.5 USDC profit
+            })
+            print(f"   ✅ Success: {result.get('verdict', result)}")
+            assert result.get("is_profitable") == True, "Expected marginally profitable bid to be marked as profitable"
+            print(f"   Profit margin: {result.get('profit_margin_percent', 'N/A')}%")
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("   ⚠️  Skipped - no estimated cost available from previous test")
+    
+    # Test 5: Place bid
+    print("\n5. Testing place_bid for auction 2...")
     try:
         result = await tool_map["place_bid"].ainvoke({
             "auction_id": 2,

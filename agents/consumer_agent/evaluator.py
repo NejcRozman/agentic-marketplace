@@ -14,7 +14,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 try:
     from ..config import Config
@@ -198,9 +198,10 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
                 max_bucket_size=1
             )
             
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash",
-                google_api_key=self.config.google_api_key,
+            llm = ChatOpenAI(
+                model="xiaomi/mimo-v2-flash:free",
+                api_key=self.config.openrouter_api_key,
+                base_url=self.config.openrouter_base_url,
                 temperature=0.3,
                 rate_limiter=rate_limiter
             )

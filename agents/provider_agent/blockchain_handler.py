@@ -21,7 +21,7 @@ from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 try:
     from ..infrastructure.blockchain_client import BlockchainClient
@@ -191,6 +191,58 @@ class BlockchainHandler:
                 return {"error": str(e), "estimated_cost": 0, "confidence": 0}
         
         @tool
+        def validate_bid_profitability(estimated_cost: int, proposed_bid: int) -> Dict[str, Any]:
+            """Check if a proposed bid is profitable compared to estimated cost.
+            
+            CRITICAL: Always use this tool before placing a bid to ensure profitability.
+            
+            Args:
+                estimated_cost: Your estimated cost to deliver the service (in USDC with 6 decimals, e.g., 50000000 = 50 USDC)
+                proposed_bid: The bid amount you're considering (in USDC with 6 decimals, e.g., 55000000 = 55 USDC)
+            
+            Returns:
+                Profitability analysis with clear verdict - DO NOT bid if verdict is UNPROFITABLE
+            """
+            try:
+                profit = proposed_bid - estimated_cost
+                is_profitable = proposed_bid > estimated_cost
+                
+                if estimated_cost > 0:
+                    margin_percent = round((profit / estimated_cost) * 100, 2)
+                else:
+                    margin_percent = 0
+                
+                # Calculate suggested minimum bid
+                suggested_min_bid = estimated_cost + 1000000  # Add 1 USDC profit
+                
+                # Create clear verdict
+                if is_profitable:
+                    if margin_percent < 5:
+                        verdict = "⚠️ MARGINALLY PROFITABLE - Low profit margin, consider increasing bid"
+                    else:
+                        verdict = "✅ PROFITABLE - Proceed with bid"
+                else:
+                    verdict = "❌ UNPROFITABLE - You will LOSE money on this job. DO NOT BID."
+                
+                return {
+                    "is_profitable": is_profitable,
+                    "estimated_cost": estimated_cost,
+                    "proposed_bid": proposed_bid,
+                    "profit": profit,
+                    "profit_margin_percent": margin_percent,
+                    "verdict": verdict,
+                    "recommendation": f"Bid at least {suggested_min_bid} ({suggested_min_bid / 1e6} USDC) to ensure profit" if not is_profitable else f"Current bid yields {profit / 1e6} USDC profit ({margin_percent}% margin)",
+                    "math_check": f"{proposed_bid} (bid) - {estimated_cost} (cost) = {profit} (profit)"
+                }
+            except Exception as e:
+                logger.error(f"validate_bid_profitability failed: {e}")
+                return {
+                    "error": str(e),
+                    "verdict": "ERROR - Could not validate profitability",
+                    "recommendation": "Do not bid until validation succeeds"
+                }
+        
+        @tool
         def place_bid(auction_id: int, bid_amount: int) -> Dict[str, Any]:
             """Submit a bid for an auction on the blockchain.
             
@@ -239,9 +291,64 @@ class BlockchainHandler:
                     
             except Exception as e:
                 logger.error(f"Error placing bid: {e}")
-                return {"success": False, "error": str(e)}
+                
+                # Decode common smart contract errors for better agent understanding
+                error_msg = str(e)
+                
+                # BidScoreNotCompetitive - 0x29e8399d
+                if "0x29e8399d" in error_msg or "BidScoreNotCompetitive" in error_msg:
+                    return {
+                        "success": False,
+                        "error": "BidScoreNotCompetitive",
+                        "error_code": "0x29e8399d",
+                        "explanation": "Your bid score (combining bid amount and reputation) is not better than the current winning bid. In a reverse auction, LOWER bids win, but the bid score also factors in your reputation.",
+                        "suggestion": "Try a significantly lower bid amount (10-30% less) to improve your competitiveness. Check the current winning bid and aim to beat it by a meaningful margin.",
+                        "retry_recommended": True
+                    }
+                
+                # BidTooHigh - 0xc9b80cd4
+                elif "0xc9b80cd4" in error_msg or "BidTooHigh" in error_msg:
+                    return {
+                        "success": False,
+                        "error": "BidTooHigh",
+                        "error_code": "0xc9b80cd4",
+                        "explanation": "Your bid amount exceeds the maximum price set by the consumer for this auction.",
+                        "suggestion": "Bid below the max_price shown in the auction details.",
+                        "retry_recommended": True
+                    }
+                
+                # AuctionNotActive - 0x15e5e7f5
+                elif "0x15e5e7f5" in error_msg or "AuctionNotActive" in error_msg:
+                    return {
+                        "success": False,
+                        "error": "AuctionNotActive",
+                        "error_code": "0x15e5e7f5",
+                        "explanation": "The auction has already ended or been cancelled. You can no longer place bids.",
+                        "suggestion": "Look for other active auctions to bid on.",
+                        "retry_recommended": False
+                    }
+                
+                # AgentNotEligible - 0x5c427cd9
+                elif "0x5c427cd9" in error_msg or "AgentNotEligible" in error_msg:
+                    return {
+                        "success": False,
+                        "error": "AgentNotEligible",
+                        "error_code": "0x5c427cd9",
+                        "explanation": "You are not eligible to bid on this auction. The consumer may have restricted bidding to specific agents.",
+                        "suggestion": "This auction is not available to you. Look for other auctions without eligibility restrictions.",
+                        "retry_recommended": False
+                    }
+                
+                # Generic error
+                else:
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "explanation": "An unexpected error occurred while placing the bid.",
+                        "suggestion": "Review the error message and check if the auction is still active and you meet all requirements."
+                    }
         
-        return [get_ipfs_data, get_reputation, estimate_cost, place_bid]
+        return [get_ipfs_data, get_reputation, estimate_cost, validate_bid_profitability, place_bid]
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow for blockchain operations."""
@@ -559,18 +666,25 @@ Available tools:
 - get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
 - get_reputation(agent_id): Get reputation score for an agent  
 - estimate_cost(complexity): Estimate cost to deliver a service. Pass 'low', 'medium', or 'high' based on service complexity from IPFS data
+- validate_bid_profitability(estimated_cost, proposed_bid): MANDATORY tool to check if a bid is profitable before placing it
 - place_bid(auction_id, bid_amount): Submit a bid for an auction
 
 BIDDING GUIDELINES:
 1. Analyze each auction before bidding
 2. Fetch service requirements from IPFS using get_ipfs_data
 3. Extract the 'complexity' field from service data and use it to estimate cost
-4. Only bid if profitable (bid_amount > estimated_cost)
-5. Consider time remaining - urgent auctions may need immediate bids
-6. Check current winning bid - you need a better score to win
-7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
-8. You can bid on multiple auctions if profitable
-9. If no auctions are profitable, don't bid
+4. CRITICAL: ALWAYS use validate_bid_profitability to check if your proposed bid is profitable
+   - Pass your estimated_cost and proposed_bid to this tool
+   - Only proceed if verdict is PROFITABLE
+   - NEVER bid if verdict is UNPROFITABLE - you will lose money!
+5. Only bid if profitable (bid_amount > estimated_cost) as confirmed by validation
+6. Consider time remaining - urgent auctions may need immediate bids
+7. Check current winning bid - you need a better score to win
+8. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
+9. You can bid on multiple auctions if profitable
+10. If no auctions are profitable, don't bid
+
+IMPORTANT: The validate_bid_profitability tool will show you the math clearly. Trust its verdict.
 
 Current eligible auctions:
 {auctions_context}
@@ -583,9 +697,10 @@ Analyze these auctions and decide which to bid on."""
                 max_bucket_size=1
             )
             
-            llm = ChatGoogleGenerativeAI(
-                model="gemini-2.5-flash-lite",
-                google_api_key=self.config.google_api_key,
+            llm = ChatOpenAI(
+                model="xiaomi/mimo-v2-flash:free",
+                api_key=self.config.openrouter_api_key,
+                base_url=self.config.openrouter_base_url,
                 temperature=0.3,
                 rate_limiter=rate_limiter
             )

@@ -8,7 +8,7 @@ import logging
 from typing import Dict, Any, List, Set
 from pathlib import Path
 import json
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 
 try:
     from ..config import Config
@@ -33,14 +33,15 @@ class ServiceGenerator:
         self.ipfs_client = IPFSClient()
         self.processed_pdfs: Set[str] = set()  # Track processed PDFs in memory
         
-        # Initialize Gemini (same as evaluator)
-        self.model = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash-lite",
-            google_api_key=config.google_api_key,
+        # Initialize OpenRouter LLM
+        self.model = ChatOpenAI(
+            model="xiaomi/mimo-v2-flash:free",
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
             temperature=0.7
         )
         
-        logger.info("ServiceGenerator initialized with Gemini LLM")
+        logger.info("ServiceGenerator initialized with OpenRouter LLM")
     
     async def generate_services_from_pdfs(
         self,

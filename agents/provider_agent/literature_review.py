@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Annotated, Sequence, Literal, Optional, Type
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage
 from operator import add as add_messages
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
@@ -78,17 +78,19 @@ Maintain professional academic tone and provide detailed, well-structured respon
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         
         # Initialize LLM and embeddings
-        if not config.google_api_key:
-            raise ValueError("GOOGLE_API_KEY not found in environment variables")
+        if not config.openrouter_api_key:
+            raise ValueError("OPENROUTER_API_KEY not found in environment variables")
         
-        self.llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-pro",
-            temperature=0,
-            google_api_key=config.google_api_key
+        self.llm = ChatOpenAI(
+            model="xiaomi/mimo-v2-flash:free",
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
+            temperature=0
         )
-        self.embeddings = GoogleGenerativeAIEmbeddings(
-            model="models/text-embedding-001",
-            google_api_key=config.google_api_key
+        self.embeddings = OpenAIEmbeddings(
+            model="text-embedding-3-small",
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url
         )
         
         # RAG components (initialized when PDFs are loaded)

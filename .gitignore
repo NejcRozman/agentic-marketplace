@@ -73,3 +73,6 @@ tmp/
 utils/files/
 
 agents/data/
+
+# Agent workspaces (RAG databases)
+workspaces/
