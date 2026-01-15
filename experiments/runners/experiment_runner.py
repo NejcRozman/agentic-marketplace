@@ -28,6 +28,10 @@ from datetime import datetime
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
+# Add parent directory to path for absolute imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+from experiments.runners.metrics_collector import MetricsCollector
+
 # Load environment variables from agents/.env
 AGENTS_DIR = Path(__file__).parent.parent.parent / "agents"
 ENV_FILE = AGENTS_DIR / ".env"
@@ -76,6 +80,11 @@ class ExperimentRunner:
         self.start_time: Optional[datetime] = None
         self.consumer_status_file: Optional[Path] = None
         
+        # Metrics collection
+        self.metrics_collector: Optional[MetricsCollector] = None
+        self.transaction_hashes: List[str] = []  # Track all tx hashes
+        self.phase_timings: Dict[str, float] = {}  # Track phase durations
+        
     def load_config(self):
         """Load and validate experiment configuration from YAML."""
         logger.info(f"Loading configuration from {self.config_path}")
@@ -106,6 +115,13 @@ class ExperimentRunner:
         
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize MetricsCollector
+        self.metrics_collector = MetricsCollector(
+            experiment_id=self.experiment_id,
+            metrics_dir=self.metrics_dir,
+            logs_dir=self.log_dir
+        )
         
         logger.info(f"✓ Configuration loaded for experiment: {self.experiment_id}")
         logger.info(f"  Log directory: {self.log_dir}")
@@ -276,6 +292,45 @@ class ExperimentRunner:
         logger.info(f"✓ Contracts deployed:")
         logger.info(f"  Mock USDC: {self.payment_token_address}")
         logger.info(f"  ReverseAuction: {self.reverse_auction_address}")
+    
+    async def fund_consumer_account(self):
+        """Fund consumer account with ETH and USDC if using a separate account."""
+        logger.info("Checking if consumer needs funding...")
+        
+        consumer_pk = self.config['blockchain']['accounts']['consumer']
+        deployer_pk = self.config['blockchain']['accounts']['deployer']
+        
+        # Get consumer address
+        from eth_account import Account
+        consumer_address = Account.from_key(consumer_pk).address
+        deployer_address = Account.from_key(deployer_pk).address
+        
+        # Check if consumer and deployer are different accounts
+        if consumer_address.lower() == deployer_address.lower():
+            logger.info("Consumer and deployer are the same account - no funding needed")
+            return
+        
+        logger.info(f"Funding consumer account: {consumer_address}")
+        
+        # Get funding amounts from config
+        funding_config = self.config['blockchain']['accounts'].get('consumer_funding', {})
+        eth_amount = funding_config.get('eth_amount', 1000000000000000000)  # 1 ETH default
+        usdc_amount = funding_config.get('usdc_amount', 1000000000)  # 1000 USDC default
+        
+        env_vars = {
+            "DEPLOYER_PRIVATE_KEY": deployer_pk,
+            "CONSUMER_ADDRESS": consumer_address,
+            "USDC_ADDRESS": self.payment_token_address,
+            "FUND_AMOUNT_ETH": str(eth_amount),
+            "FUND_AMOUNT_USDC": str(usdc_amount)
+        }
+        
+        # Run FundConsumer script
+        output = self.run_forge_script("FundConsumer.s.sol", env_vars)
+        
+        logger.info(f"✓ Consumer account funded")
+        logger.info(f"  ETH: {eth_amount / 1e18} ETH")
+        logger.info(f"  USDC: {usdc_amount / 1e6} USDC")
     
     def register_agent(self, private_key: str) -> int:
         """
@@ -496,7 +551,7 @@ class ExperimentRunner:
         
         # Wait for agents to initialize
         logger.info("Waiting for agents to initialize...")
-        await asyncio.sleep(10)
+        await asyncio.sleep(3)
         
         logger.info("✓ All agents spawned")
     
@@ -544,37 +599,104 @@ class ExperimentRunner:
         logger.info("✓ Experiment monitoring complete")
     
     def collect_metrics(self):
-        """Collect final experiment metrics."""
-        logger.info("Collecting experiment metrics...")
+        """Collect comprehensive experiment metrics."""
+        logger.info("="*80)
+        logger.info("Collecting comprehensive experiment metrics...")
+        logger.info("="*80)
         
-        metrics = {
-            "experiment_id": self.experiment_id,
-            "start_time": self.start_time.isoformat() if self.start_time else None,
-            "end_time": datetime.now().isoformat(),
-            "contracts": {
-                "reverse_auction": self.reverse_auction_address,
-                "payment_token": self.payment_token_address
-            },
-            "agents": {
-                "consumer_id": self.consumer_agent_id,
-                "provider_ids": self.provider_agent_ids
-            }
-        }
+        if not self.metrics_collector:
+            logger.error("MetricsCollector not initialized!")
+            return
         
-        # Read final consumer status
-        if self.consumer_status_file and self.consumer_status_file.exists():
+        # Set basic info
+        self.metrics_collector.set_end_time(datetime.now())
+        self.metrics_collector.set_contracts(
+            reverse_auction=self.reverse_auction_address,
+            payment_token=self.payment_token_address,
+            identity_registry=self.config['blockchain']['contracts']['identity_registry'],
+            reputation_registry=self.config['blockchain']['contracts']['reputation_registry']
+        )
+        self.metrics_collector.set_agents(
+            consumer_id=self.consumer_agent_id,
+            provider_ids=self.provider_agent_ids
+        )
+        
+        # Collect all metrics
+        logger.info("📊 Collecting system completeness...")
+        completeness = self.metrics_collector.collect_system_completeness()
+        logger.info(f"   Auction created: {completeness.get('auction_created')}")
+        logger.info(f"   Bids received: {completeness.get('bids_received')}")
+        logger.info(f"   Winner selected: {completeness.get('winner_selected')}")
+        logger.info(f"   Service executed: {completeness.get('service_executed')}")
+        logger.info(f"   Feedback submitted: {completeness.get('feedback_submitted')}")
+        
+        logger.info("\n💰 Collecting auction details...")
+        auction = self.metrics_collector.collect_auction_details()
+        logger.info(f"   Auction ID: {auction.get('auction_id')}")
+        logger.info(f"   Bids: {len(auction.get('bids', []))}")
+        logger.info(f"   Winner: {auction.get('winner_id')}")
+        logger.info(f"   Winning bid: {auction.get('winning_bid')}")
+        logger.info(f"   Bid spread: {auction.get('bid_spread_percent')}%")
+        
+        logger.info("\n⭐ Collecting service quality...")
+        quality = self.metrics_collector.collect_service_quality()
+        logger.info(f"   Rating: {quality.get('rating')}/100")
+        logger.info(f"   Evaluation method: {quality.get('evaluation_method')}")
+        logger.info(f"   Prompts answered: {quality.get('prompts_answered')}/{quality.get('prompts_total')}")
+        
+        logger.info("\n🏆 Collecting reputation changes...")
+        winner_id = auction.get('winner_id')
+        if winner_id:
             try:
-                with open(self.consumer_status_file, 'r') as f:
-                    metrics['consumer_final_status'] = json.load(f)
+                from web3 import Web3
+                from agents.infrastructure.contract_abis import REPUTATION_REGISTRY_ABI
+                
+                w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
+                reputation_address = self.config['blockchain']['contracts']['reputation_registry']
+                reputation_contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(reputation_address),
+                    abi=REPUTATION_REGISTRY_ABI
+                )
+                
+                reputation = self.metrics_collector.collect_reputation(w3, reputation_contract, winner_id)
+                logger.info(f"   Winner reputation before: {reputation.get('winner_before')}")
+                logger.info(f"   Winner reputation after: {reputation.get('winner_after')}")
+                logger.info(f"   Reputation change: {reputation.get('reputation_change')}")
             except Exception as e:
-                logger.error(f"Failed to read consumer final status: {e}")
+                logger.error(f"   Failed to collect reputation: {e}")
         
-        # Write metrics
-        metrics_file = self.metrics_dir / "experiment_metrics.json"
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=2)
+        logger.info("\n⏱️  Collecting timing metrics...")
+        timing = self.metrics_collector.collect_timing(self.phase_timings)
+        logger.info(f"   Total cycle time: {timing.get('total_cycle_time')} seconds")
         
-        logger.info(f"✓ Metrics saved to {metrics_file}")
+        logger.info("\n⛽ Collecting blockchain metrics...")
+        if self.transaction_hashes:
+            try:
+                from web3 import Web3
+                w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
+                blockchain = self.metrics_collector.collect_blockchain_metrics(w3, self.transaction_hashes)
+                logger.info(f"   Total transactions: {blockchain.get('total_transactions')}")
+                logger.info(f"   Failed transactions: {blockchain.get('failed_transactions')}")
+                logger.info(f"   Total gas used: {blockchain.get('total_gas_used')}")
+            except Exception as e:
+                logger.error(f"   Failed to collect blockchain metrics: {e}")
+        
+        logger.info("\n⚠️  Collecting errors...")
+        errors = self.metrics_collector.collect_errors()
+        logger.info(f"   Total errors: {errors.get('total_errors')}")
+        logger.info(f"   Total warnings: {errors.get('total_warnings')}")
+        if errors.get('error_types'):
+            logger.info(f"   Error types: {errors.get('error_types')}")
+        
+        # Determine overall success
+        success = self.metrics_collector.determine_success()
+        logger.info(f"\n✅ Experiment success: {success}")
+        
+        # Save metrics
+        metrics_file = self.metrics_collector.save_metrics()
+        logger.info("="*80)
+        logger.info(f"📁 Comprehensive metrics saved to: {metrics_file}")
+        logger.info("="*80)
     
     def cleanup(self):
         """Shutdown all processes gracefully."""
@@ -612,23 +734,37 @@ class ExperimentRunner:
         """Run the complete experiment."""
         self.start_time = datetime.now()
         
+        # Initialize metrics collector start time
+        if self.metrics_collector:
+            self.metrics_collector.set_start_time(self.start_time)
+        
         try:
             # Load configuration
             self.load_config()
             
             # Phase 1: Setup blockchain
             logger.info("=== Phase 1: Setup Blockchain ===")
+            phase_start = datetime.now()
             await self.start_anvil()
             await self.deploy_contracts()
+            await self.fund_consumer_account()
             await self.register_agents()
+            self.phase_timings["setup_blockchain"] = (datetime.now() - phase_start).total_seconds()
+            logger.info(f"✓ Phase 1 completed in {self.phase_timings['setup_blockchain']:.1f}s")
             
             # Phase 2: Start agents
             logger.info("=== Phase 2: Start Agents ===")
+            phase_start = datetime.now()
             await self.spawn_agents()
+            self.phase_timings["start_agents"] = (datetime.now() - phase_start).total_seconds()
+            logger.info(f"✓ Phase 2 completed in {self.phase_timings['start_agents']:.1f}s")
             
             # Phase 3: Run experiment
             logger.info("=== Phase 3: Run Experiment ===")
+            phase_start = datetime.now()
             await self.monitor_experiment()
+            self.phase_timings["experiment_run"] = (datetime.now() - phase_start).total_seconds()
+            logger.info(f"✓ Phase 3 completed in {self.phase_timings['experiment_run']:.1f}s")
             
             # Collect metrics
             self.collect_metrics()

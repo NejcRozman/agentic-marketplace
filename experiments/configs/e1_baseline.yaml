@@ -7,7 +7,7 @@ experiment:
   name: "Baseline - Single Auction"
   description: "Test basic system functionality with 1 consumer and 3 honest providers completing 1 auction"
   research_question: "RQ1"
-  duration_timeout: 600  # Maximum 10 minutes for entire experiment
+  duration_timeout: 1800  # Maximum 30 minutes for entire experiment
   
 blockchain:
   network: "anvil"
@@ -28,14 +28,19 @@ blockchain:
     # Private keys loaded from environment variable for security
     main_account: "${BLOCKCHAIN_PRIVATE_KEY}"
     
-    # For simplicity: All agents use the same account
-    # ERC-8004 allows one address to own multiple agent NFTs
+    # Separate account for consumer to enable feedback (different address from providers)
+    # This account will be funded with ETH and USDC by the experiment runner
     deployer: "${BLOCKCHAIN_PRIVATE_KEY}"
-    consumer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    consumer: "${BLOCKCHAIN_CONSUMER_PRIVATE_KEY}"  # Set this to a different private key
     providers:
       - "${BLOCKCHAIN_PRIVATE_KEY}"
       - "${BLOCKCHAIN_PRIVATE_KEY}"
       - "${BLOCKCHAIN_PRIVATE_KEY}"
+    
+    # Funding configuration for consumer account
+    consumer_funding:
+      eth_amount: 1000000000000000000  # 1 ETH in wei
+      usdc_amount: 1000000000  # 1000 USDC (6 decimals)
 
 agents:
   consumer:
@@ -45,7 +50,7 @@ agents:
     eligible_providers: null  # null = experiment runner will set this after registering providers
     
     config:
-      check_interval: 10  # Check blockchain every 10 seconds
+      check_interval: 5  # Check blockchain every 5 seconds
       max_budget: 100000000  # 100 USDC (with 6 decimals)
       auction_duration: 300  # 5 minutes (short for testing)
       
@@ -61,7 +66,7 @@ agents:
     private_keys: null  # null = use blockchain.accounts.providers
     
     config:
-      check_interval: 10  # Check blockchain every 10 seconds
+      check_interval: 5  # Check blockchain every 5 seconds
       
     behavior:
       strategy: "default"  # Use normal ReAct bidding logic
@@ -84,8 +89,8 @@ experiment_flow:
       stopping_criteria:
         type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
         target: 1  # Stop when 1 auction is completed
-        poll_interval: 10  # Check every 10 seconds
-        max_timeout: 600  # 10 minutes absolute maximum
+        poll_interval: 5  # Check every 5 seconds
+        max_timeout: 1800  # 30 minutes absolute maximum
       
   target_auctions: 1  # Number of auctions to complete before stopping
   

@@ -110,7 +110,7 @@ class Orchestrator:
         
         # Runtime state
         self.running = False
-        self.check_interval = 30  # Check blockchain every 30 seconds
+        self.check_interval = 5  # Check blockchain every 5 seconds
         
         logger.info(f"Orchestrator initialized for agent {self.config.agent_id}")
     

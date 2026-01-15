@@ -74,5 +74,7 @@ utils/files/
 
 agents/data/
 
-# Agent workspaces (RAG databases)
+# Experiment files
+experiments/data/
 workspaces/
+EXPERIMENT_PLAN.md

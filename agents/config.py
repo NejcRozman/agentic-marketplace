@@ -47,7 +47,7 @@ class Config:
         self.consumer_agent_id = int(os.getenv("CONSUMER_AGENT_ID", "0"))  # Set to 0 if not a consumer
         eligible_str = os.getenv("ELIGIBLE_PROVIDERS", "")
         self.eligible_providers = [int(id.strip()) for id in eligible_str.split(",") if id.strip()]
-        self.consumer_check_interval = int(os.getenv("CONSUMER_CHECK_INTERVAL", "15"))
+        self.consumer_check_interval = int(os.getenv("CONSUMER_CHECK_INTERVAL", "5"))
         
         # Consumer Auto-Auction Configuration
         self.auto_create_auction = os.getenv("AUTO_CREATE_AUCTION", "false").lower() == "true"

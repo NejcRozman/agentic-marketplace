@@ -691,18 +691,12 @@ Current eligible auctions:
 
 Analyze these auctions and decide which to bid on."""
 
-            rate_limiter = InMemoryRateLimiter(
-                requests_per_second=0.1, 
-                check_every_n_seconds=0.1,
-                max_bucket_size=1
-            )
-            
+            # Create ReAct agent without rate limiting (use API defaults)
             llm = ChatOpenAI(
                 model="xiaomi/mimo-v2-flash:free",
                 api_key=self.config.openrouter_api_key,
                 base_url=self.config.openrouter_base_url,
-                temperature=0.3,
-                rate_limiter=rate_limiter
+                temperature=0.3
             )
             
             react_agent = create_agent(llm, self._tools)
