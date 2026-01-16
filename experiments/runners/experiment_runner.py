@@ -113,6 +113,13 @@ class ExperimentRunner:
         self.log_dir = base_dir / "logs" / self.experiment_id
         self.metrics_dir = base_dir / "metrics" / self.experiment_id
         
+        # Clean existing directories to ensure fresh start
+        import shutil
+        if self.log_dir.exists():
+            shutil.rmtree(self.log_dir)
+        if self.metrics_dir.exists():
+            shutil.rmtree(self.metrics_dir)
+        
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
         
@@ -621,76 +628,152 @@ class ExperimentRunner:
             provider_ids=self.provider_agent_ids
         )
         
-        # Collect all metrics
-        logger.info("📊 Collecting system completeness...")
-        completeness = self.metrics_collector.collect_system_completeness()
-        logger.info(f"   Auction created: {completeness.get('auction_created')}")
-        logger.info(f"   Bids received: {completeness.get('bids_received')}")
-        logger.info(f"   Winner selected: {completeness.get('winner_selected')}")
-        logger.info(f"   Service executed: {completeness.get('service_executed')}")
-        logger.info(f"   Feedback submitted: {completeness.get('feedback_submitted')}")
-        
-        logger.info("\n💰 Collecting auction details...")
-        auction = self.metrics_collector.collect_auction_details()
-        logger.info(f"   Auction ID: {auction.get('auction_id')}")
-        logger.info(f"   Bids: {len(auction.get('bids', []))}")
-        logger.info(f"   Winner: {auction.get('winner_id')}")
-        logger.info(f"   Winning bid: {auction.get('winning_bid')}")
-        logger.info(f"   Bid spread: {auction.get('bid_spread_percent')}%")
-        
-        logger.info("\n⭐ Collecting service quality...")
-        quality = self.metrics_collector.collect_service_quality()
-        logger.info(f"   Rating: {quality.get('rating')}/100")
-        logger.info(f"   Evaluation method: {quality.get('evaluation_method')}")
-        logger.info(f"   Prompts answered: {quality.get('prompts_answered')}/{quality.get('prompts_total')}")
-        
-        logger.info("\n🏆 Collecting reputation changes...")
-        winner_id = auction.get('winner_id')
-        if winner_id:
-            try:
-                from web3 import Web3
-                from agents.infrastructure.contract_abis import REPUTATION_REGISTRY_ABI
-                
-                w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
-                reputation_address = self.config['blockchain']['contracts']['reputation_registry']
-                reputation_contract = w3.eth.contract(
-                    address=Web3.to_checksum_address(reputation_address),
-                    abi=REPUTATION_REGISTRY_ABI
+        # Collect auction data from blockchain
+        logger.info("📊 Collecting auction data from blockchain...")
+        try:
+            from web3 import Web3
+            from agents.infrastructure.contract_abis import get_reverse_auction_abi, get_reputation_registry_abi
+            
+            w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
+            auction_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(self.reverse_auction_address),
+                abi=get_reverse_auction_abi()
+            )
+            
+            # Get auction count and collect each auction
+            auction_count = auction_contract.functions.auctionIdCounter().call()
+            logger.info(f"   Found {auction_count} auction(s) on-chain")
+            
+            summary = self.metrics_collector.metrics["summary"]
+            
+            # Get reputation contract for querying reputation changes
+            reputation_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(self.config['blockchain']['contracts']['reputation_registry']),
+                abi=get_reputation_registry_abi()
+            )
+            
+            for auction_id in range(1, auction_count + 1):  # IDs start at 1, not 0
+                logger.info(f"   Collecting auction {auction_id}...")
+                auction_data = self.metrics_collector.collect_auction_from_blockchain(
+                    w3, auction_contract, auction_id, reputation_contract
                 )
+                self.metrics_collector.metrics["auctions"].append(auction_data)
                 
-                reputation = self.metrics_collector.collect_reputation(w3, reputation_contract, winner_id)
-                logger.info(f"   Winner reputation before: {reputation.get('winner_before')}")
-                logger.info(f"   Winner reputation after: {reputation.get('winner_after')}")
-                logger.info(f"   Reputation change: {reputation.get('reputation_change')}")
-            except Exception as e:
-                logger.error(f"   Failed to collect reputation: {e}")
+                # Update summary counts
+                summary["total_auctions"] += 1
+                if auction_data["status"] == "completed":
+                    summary["completed_auctions"] += 1
+                elif auction_data["status"] == "failed":
+                    summary["failed_auctions"] += 1
+                summary["total_bids_attempted"] += len(auction_data["bids_attempted"])
+                summary["total_bids_on_chain"] += len(auction_data["bids_on_chain"])
+                
+                logger.info(f"      Status: {auction_data['status']}")
+                logger.info(f"      Bids attempted: {len(auction_data['bids_attempted'])}")
+                logger.info(f"      Bids on-chain: {len(auction_data['bids_on_chain'])}")
+                logger.info(f"      Winner: {auction_data['winner_id']}")
+                logger.info(f"      Quality rating: {auction_data['quality_rating']}/100")
+            
+            logger.info(f"\n📈 Summary:")
+            logger.info(f"   Completed auctions: {summary['completed_auctions']}/{summary['total_auctions']}")
+            logger.info(f"   Total bids attempted: {summary['total_bids_attempted']}")
+            logger.info(f"   Total bids on-chain: {summary['total_bids_on_chain']}")
+            if summary['total_bids_attempted'] > 0:
+                success_rate = summary['total_bids_on_chain'] / summary['total_bids_attempted']
+                logger.info(f"   Bid success rate: {success_rate:.1%}")
+            
+        except Exception as e:
+            logger.error(f"   Failed to collect auction data: {e}", exc_info=True)
         
+        # Collect reputation evolution
+        logger.info("\n🏆 Collecting reputation data...")
+        try:
+            from agents.infrastructure.contract_abis import get_reputation_registry_abi
+            
+            reputation_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(self.config['blockchain']['contracts']['reputation_registry']),
+                abi=get_reputation_registry_abi()
+            )
+            
+            for provider_id in self.provider_agent_ids:
+                try:
+                    reputation = reputation_contract.functions.getReputation(provider_id).call()
+                    self.metrics_collector.metrics["reputation_evolution"].append({
+                        "timestamp": datetime.now().isoformat(),
+                        "provider_id": provider_id,
+                        "reputation_score": reputation
+                    })
+                    logger.info(f"   Provider {provider_id}: {reputation}")
+                except Exception as e:
+                    logger.debug(f"   Could not get reputation for provider {provider_id}: {e}")
+                    
+        except Exception as e:
+            logger.error(f"   Failed to collect reputation: {e}")
+        
+        # Collect timing metrics
         logger.info("\n⏱️  Collecting timing metrics...")
-        timing = self.metrics_collector.collect_timing(self.phase_timings)
-        logger.info(f"   Total cycle time: {timing.get('total_cycle_time')} seconds")
+        timing = self.metrics_collector.metrics["timing"]
+        timing["phase_durations"] = self.phase_timings
         
+        total_time = sum(self.phase_timings.values())
+        logger.info(f"   Total experiment time: {total_time:.1f}s ({total_time/60:.1f} min)")
+        for phase, duration in self.phase_timings.items():
+            logger.info(f"   {phase}: {duration:.1f}s")
+        
+        # Collect timing data from auction data
+        auctions = self.metrics_collector.metrics["auctions"]
+        if auctions:
+            exec_times = [a["execution_duration_seconds"] for a in auctions if a["execution_duration_seconds"] > 0]
+            eval_times = [a["evaluation_duration_seconds"] for a in auctions if a["evaluation_duration_seconds"] > 0]
+            
+            timing["execution_times"] = exec_times
+            timing["evaluation_times"] = eval_times
+        
+        # Collect blockchain metrics
         logger.info("\n⛽ Collecting blockchain metrics...")
         if self.transaction_hashes:
             try:
-                from web3 import Web3
-                w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
-                blockchain = self.metrics_collector.collect_blockchain_metrics(w3, self.transaction_hashes)
-                logger.info(f"   Total transactions: {blockchain.get('total_transactions')}")
-                logger.info(f"   Failed transactions: {blockchain.get('failed_transactions')}")
-                logger.info(f"   Total gas used: {blockchain.get('total_gas_used')}")
+                blockchain = self.metrics_collector.metrics["blockchain"]
+                failed_count = 0
+                gas_used_list = []
+                
+                for tx_hash in self.transaction_hashes:
+                    try:
+                        receipt = w3.eth.get_transaction_receipt(tx_hash)
+                        gas_used_list.append(receipt['gasUsed'])
+                        if receipt['status'] == 0:
+                            failed_count += 1
+                    except Exception as e:
+                        logger.debug(f"Could not get receipt for {tx_hash}: {e}")
+                
+                blockchain["total_transactions"] = len(self.transaction_hashes)
+                blockchain["failed_transactions"] = failed_count
+                blockchain["gas_used_per_tx"] = gas_used_list
+                
+                total_gas = sum(gas_used_list)
+                avg_gas = total_gas / len(gas_used_list) if gas_used_list else 0
+                
+                logger.info(f"   Total transactions: {blockchain['total_transactions']}")
+                logger.info(f"   Failed transactions: {blockchain['failed_transactions']}")
+                logger.info(f"   Total gas used: {total_gas:,}")
+                logger.info(f"   Average gas per tx: {avg_gas:,.0f}")
             except Exception as e:
                 logger.error(f"   Failed to collect blockchain metrics: {e}")
         
+        # Collect errors
         logger.info("\n⚠️  Collecting errors...")
         errors = self.metrics_collector.collect_errors()
         logger.info(f"   Total errors: {errors.get('total_errors')}")
         logger.info(f"   Total warnings: {errors.get('total_warnings')}")
-        if errors.get('error_types'):
-            logger.info(f"   Error types: {errors.get('error_types')}")
+        
+        # Highlight critical issues
+        if errors.get('critical_issues'):
+            logger.warning(f"   ⚠️  {len(errors['critical_issues'])} critical issue(s) detected")
         
         # Determine overall success
-        success = self.metrics_collector.determine_success()
-        logger.info(f"\n✅ Experiment success: {success}")
+        success = len(auctions) > 0 and any(a["status"] == "completed" for a in auctions)
+        self.metrics_collector.metrics["success"] = success
+        logger.info(f"\n{'✅' if success else '❌'} Experiment success: {success}")
         
         # Save metrics
         metrics_file = self.metrics_collector.save_metrics()
@@ -734,13 +817,13 @@ class ExperimentRunner:
         """Run the complete experiment."""
         self.start_time = datetime.now()
         
-        # Initialize metrics collector start time
-        if self.metrics_collector:
-            self.metrics_collector.set_start_time(self.start_time)
-        
         try:
-            # Load configuration
+            # Load configuration (initializes metrics_collector)
             self.load_config()
+            
+            # Set start time after metrics_collector is initialized
+            if self.metrics_collector:
+                self.metrics_collector.set_start_time(self.start_time)
             
             # Phase 1: Setup blockchain
             logger.info("=== Phase 1: Setup Blockchain ===")

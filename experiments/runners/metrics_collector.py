@@ -13,6 +13,7 @@ Collects:
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -43,18 +44,43 @@ class MetricsCollector:
             "start_time": None,
             "end_time": None,
             "duration_seconds": 0,
-            "system_completeness": {},
-            "auctions": [],  # List of all auctions (for multi-auction experiments)
-            "auction_details": {},  # Legacy single auction support (E1)
-            "service_quality": {},
-            "reputation": {},
-            "reputation_evolution": [],  # Track reputation over time (E2+)
-            "provider_profitability": {},  # Revenue/costs per provider (E4+)
-            "market_dynamics": {},  # Price trends, equilibrium (E4+)
-            "strategy_performance": {},  # Win rates by strategy (E4+)
-            "timing": {},
-            "blockchain": {},
-            "errors": {}
+            
+            # Core data: Array of all auctions (primary data structure)
+            "auctions": [],  # List of auction objects with all details
+            
+            # Aggregated counts (not rates or averages - those are calculated during analysis)
+            "summary": {
+                "total_auctions": 0,
+                "completed_auctions": 0,
+                "failed_auctions": 0,
+                "total_bids_attempted": 0,
+                "total_bids_on_chain": 0
+            },
+            
+            # Reputation tracking over time
+            "reputation_evolution": [],  # [{timestamp, provider_id, reputation_score, auction_id}]
+            
+            # Timing data (raw data, not averages)
+            "timing": {
+                "phase_durations": {},
+                "execution_times": [],  # List of execution times per auction
+                "evaluation_times": []  # List of evaluation times per auction
+            },
+            
+            # Blockchain data (raw counts and gas, not averages)
+            "blockchain": {
+                "total_transactions": 0,
+                "failed_transactions": 0,
+                "gas_used_per_tx": []  # List of gas used per transaction
+            },
+            
+            # Errors and issues
+            "errors": {
+                "total_errors": 0,
+                "total_warnings": 0,
+                "critical_issues": [],
+                "bid_failures": []
+            }
         }
         
     def set_start_time(self, start_time: datetime):
@@ -82,7 +108,296 @@ class MetricsCollector:
             "provider_ids": provider_ids,
             "provider_count": len(provider_ids)
         }
+    
+    def collect_auction_from_blockchain(self, w3: Web3, auction_contract, auction_id: int, reputation_contract=None) -> Dict[str, Any]:
+        """
+        Collect complete auction data from blockchain and logs.
         
+        This is the primary data collection method that builds the auctions array.
+        Each auction object contains:
+        - Auction details (id, budget, duration, service_cid)
+        - All bid attempts (both successful and failed)
+        - Winner information
+        - Service execution details
+        - Quality evaluation
+        - Reputation changes
+        - Timing breakdown
+        
+        Args:
+            w3: Web3 instance
+            auction_contract: ReverseAuction contract instance
+            auction_id: ID of the auction to analyze
+            
+        Returns:
+            Complete auction data dictionary
+        """
+        auction_data = {
+            "auction_id": auction_id,
+            "timestamp_created": None,
+            "service_cid": None,
+            "budget": 0,
+            "duration": 0,
+            "creator_id": None,
+            
+            # Bidding data
+            "bids_attempted": [],  # All bids providers tried to place
+            "bids_on_chain": [],  # Only bids that succeeded on-chain
+            "bid_failures": [],  # Failed bid attempts with reasons
+            "winner_id": None,
+            "winning_bid_amount": 0,
+            "bid_count": 0,
+            
+            # Execution data
+            "service_executed": False,
+            "execution_start": None,
+            "execution_end": None,
+            "execution_duration_seconds": 0,
+            "prompts_answered": 0,
+            "prompts_total": 0,
+            
+            # Quality evaluation
+            "quality_rating": None,
+            "quality_method": "unknown",  # "tools", "fallback", or "failed"
+            "quality_details": {},
+            "evaluation_duration_seconds": 0,
+            
+            # Feedback and reputation
+            "feedback_submitted": False,
+            "feedback_rating": None,
+            "reputation_before": None,
+            "reputation_after": None,
+            "reputation_change": 0,
+            
+            # Timing
+            "timing": {
+                "creation_to_first_bid": 0,
+                "first_bid_to_close": 0,
+                "close_to_execution_start": 0,
+                "execution": 0,
+                "evaluation": 0,
+                "feedback_submission": 0,
+                "total_auction_cycle": 0
+            },
+            
+            # Status
+            "status": "unknown",  # "completed", "failed", "timeout"
+            "errors": []
+        }
+        
+        try:
+            # 1. Get on-chain auction data using getAuctionDetails() which properly returns full struct
+            # This handles the dynamic array (eligibleAgentIds) correctly
+            auction_info = auction_contract.functions.getAuctionDetails(auction_id).call()
+            # Auction struct: (id, buyer, serviceDescriptionCid, maxPrice, duration, startTime, eligibleAgentIds, winningAgentId, winningBid, isActive, isCompleted, escrowAmount, reputationWeight)
+            auction_data["creator_id"] = auction_info[1]  # buyer address
+            auction_data["service_cid"] = auction_info[2]  # serviceDescriptionCid
+            auction_data["budget"] = auction_info[3]  # maxPrice
+            auction_data["duration"] = auction_info[4]  # duration
+            auction_data["timestamp_created"] = auction_info[5]  # startTime
+            
+            # 2. Get on-chain bids
+            bid_count = auction_contract.functions.getBidCount(auction_id).call()
+            auction_data["bid_count"] = bid_count
+            
+            for i in range(bid_count):
+                # Bid struct: (provider, agentId, amount, timestamp, reputation, score)
+                bid_info = auction_contract.functions.auctionBids(auction_id, i).call()
+                auction_data["bids_on_chain"].append({
+                    "provider_address": bid_info[0],  # provider
+                    "agent_id": bid_info[1],  # agentId
+                    "amount": bid_info[2],  # amount
+                    "timestamp": bid_info[3]  # timestamp
+                })
+            
+            # 3. Get winner information from auction struct
+            # auction_info[7] = winningAgentId, auction_info[8] = winningBid
+            # auction_info[9] = isActive, auction_info[10] = isCompleted
+            winning_agent_id = auction_info[7]  # winningAgentId (0 if no bids)
+            winning_bid_from_struct = auction_info[8]  # winningBid from struct
+            
+            # Also get winningBid from separate mapping as it's more reliable
+            try:
+                winning_bid_from_mapping = auction_contract.functions.winningBid(auction_id).call()
+            except:
+                winning_bid_from_mapping = 0
+            
+            # Use mapping value if available, otherwise use struct value
+            winning_bid = winning_bid_from_mapping if winning_bid_from_mapping > 0 else winning_bid_from_struct
+            
+            # Convert to proper types (winningAgentId is uint256, winningBid is uint256)
+            auction_data["winner_id"] = int(winning_agent_id) if winning_agent_id else None
+            auction_data["winning_bid_amount"] = int(winning_bid) if winning_bid else 0
+            
+            is_active = auction_info[9]
+            is_completed = auction_info[10]
+            
+            # 4. Collect bid attempts from provider logs (includes failures)
+            for provider_id in self.metrics['agents']['provider_ids']:
+                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                if not provider_log:
+                    continue
+                
+                # Find all bid attempts for this auction - look for place_bid tool calls
+                # Format: place_bid({'auction_id': 1, 'bid_amount': 60000000})
+                bid_pattern = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^}}]*'bid_amount':\s*(\d+)"
+                for match in re.finditer(bid_pattern, provider_log):
+                    bid_amount = int(match.group(1))
+                    auction_data["bids_attempted"].append({
+                        "provider_id": provider_id,
+                        "amount": bid_amount
+                    })
+                
+                # Track bid failures
+                error_pattern = rf"Error placing bid.*auction.*{auction_id}"
+                for match in re.finditer(error_pattern, provider_log, re.IGNORECASE):
+                    context = provider_log[max(0, match.start()-200):match.end()+200]
+                    auction_data["bid_failures"].append({
+                        "provider_id": provider_id,
+                        "reason": context.strip(),
+                        "error_code": self._extract_error_code(context)
+                    })
+            
+            # 5. Collect execution data from winner's log and job directory
+            if auction_data["winner_id"]:
+                winner_log = self._load_log_file(f"provider_{auction_data['winner_id']}.log")
+                if winner_log:
+                    # Check for service execution markers (case-insensitive)
+                    if any(marker.lower() in winner_log.lower() for marker in [
+                        "result.json",
+                        "result saved",
+                        "literature review completed",
+                        "processing prompt"
+                    ]):
+                        auction_data["service_executed"] = True
+                    
+                    # Extract prompts answered by counting "Processing prompt:" occurrences
+                    prompt_count = winner_log.count("Processing prompt:")
+                    if prompt_count > 0:
+                        auction_data["prompts_answered"] = prompt_count
+                    
+                    # Set prompts_total to same as prompts_answered (actual execution count)
+                    # The service description in logs is often truncated, so use actual execution
+                    if prompt_count > 0:
+                        auction_data["prompts_total"] = prompt_count
+                    
+                    # Extract execution timing from log timestamps
+                    execution_start_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Found \d+ PDF|Building vector database|Processing prompt)', winner_log)
+                    execution_end_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Result saved to|Literature review completed)', winner_log)
+                    
+                    if execution_start_match:
+                        auction_data["execution_start"] = execution_start_match.group(1)
+                    if execution_end_match:
+                        auction_data["execution_end"] = execution_end_match.group(1)
+                    
+                    # Calculate execution duration
+                    if auction_data["execution_start"] and auction_data["execution_end"]:
+                        try:
+                            from datetime import datetime
+                            start = datetime.strptime(auction_data["execution_start"], "%Y-%m-%d %H:%M:%S")
+                            end = datetime.strptime(auction_data["execution_end"], "%Y-%m-%d %H:%M:%S")
+                            auction_data["execution_duration_seconds"] = int((end - start).total_seconds())
+                        except:
+                            pass
+            
+            # 6. Collect evaluation data from consumer log
+            # Use consumer agent ID, not the address
+            consumer_id = self.metrics['agents']['consumer_id']
+            consumer_log = self._load_log_file(f"consumer_{consumer_id}.log")
+            if consumer_log:
+                # Rating - look for overall_rating first, then fall back to other rating patterns
+                rating_match = re.search(r'"overall_rating":\s*(\d+)', consumer_log)
+                if not rating_match:
+                    rating_match = re.search(r'rating[=:]\s*(\d+).*?quality_scores', consumer_log, re.IGNORECASE | re.DOTALL)
+                if rating_match:
+                    auction_data["quality_rating"] = int(rating_match.group(1))
+                    auction_data["feedback_rating"] = auction_data["quality_rating"]
+                
+                # Evaluation method
+                if "fallback" in consumer_log.lower():
+                    auction_data["quality_method"] = "fallback"
+                elif "finalize_evaluation" in consumer_log or "quality_scores" in consumer_log:
+                    auction_data["quality_method"] = "tools"
+                    # Extract detailed scores if available
+                    scores_match = re.search(r"quality_scores.*?({[^}]+})", consumer_log)
+                    if scores_match:
+                        try:
+                            auction_data["quality_details"] = json.loads(scores_match.group(1).replace("'", '"'))
+                        except:
+                            pass
+                
+                # Feedback submission
+                if "Feedback submitted" in consumer_log or "submitFeedback" in consumer_log:
+                    auction_data["feedback_submitted"] = True
+            
+            # 7. Collect reputation data if winner exists and reputation contract provided
+            if auction_data["winner_id"] and reputation_contract:
+                try:
+                    # Get current (after) reputation from blockchain using getSummary
+                    # getSummary returns (feedbackCount, averageScore)
+                    feedback_count, average_score = reputation_contract.functions.getSummary(
+                        auction_data["winner_id"],
+                        [],  # No client address filter
+                        bytes(32),  # No tag1 filter
+                        bytes(32)   # No tag2 filter
+                    ).call()
+                    auction_data["reputation_after"] = int(average_score)
+                    
+                    # Try to find initial reputation from winner's log
+                    winner_log = self._load_log_file(f"provider_{auction_data['winner_id']}.log")
+                    if winner_log:
+                        # Look for get_reputation tool response: {"rating": 50, "feedback_count": 0}
+                        # Use DOTALL flag to handle multiline logs
+                        rep_before_match = re.search(r'get_reputation.*?"rating":\s*(\d+)', winner_log, re.IGNORECASE | re.DOTALL)
+                        if rep_before_match:
+                            auction_data["reputation_before"] = int(rep_before_match.group(1))
+                    
+                    # If not found in logs, calculate from reputation change
+                    # Reputation after = Before + (rating - 50), so Before = After - (rating - 50)
+                    if auction_data["reputation_before"] is None and auction_data["feedback_rating"]:
+                        expected_change = auction_data["feedback_rating"] - 50
+                        auction_data["reputation_before"] = auction_data["reputation_after"] - expected_change
+                    
+                    # Calculate change
+                    if auction_data["reputation_before"] is not None:
+                        auction_data["reputation_change"] = auction_data["reputation_after"] - auction_data["reputation_before"]
+                except Exception as e:
+                    logger.error(f"Failed to collect reputation for winner {auction_data['winner_id']}: {e}", exc_info=True)
+            
+            # 8. Determine status based on blockchain state and logs
+            if is_completed:
+                # Contract marks auction as completed (service delivered and feedback received)
+                auction_data["status"] = "completed"
+            elif auction_data["feedback_submitted"]:
+                # Feedback was submitted, so auction completed successfully
+                auction_data["status"] = "completed"
+            elif not is_active and auction_data["winner_id"] and auction_data["service_executed"]:
+                # Auction ended, has winner, service executed - check for feedback
+                auction_data["status"] = "completed" if auction_data["feedback_submitted"] else "incomplete"
+            elif not is_active and auction_data["winner_id"]:
+                # Auction ended with winner but service not executed yet
+                auction_data["status"] = "incomplete"
+            elif not is_active and (auction_data["winner_id"] == 0 or auction_data["winner_id"] is None):
+                # Auction ended but no bids/winner
+                auction_data["status"] = "failed"
+            elif len(auction_data["errors"]) > 0:
+                # Had errors during collection
+                auction_data["status"] = "error"
+            else:
+                # Still active or other state
+                auction_data["status"] = "incomplete"
+                
+        except Exception as e:
+            logger.error(f"Error collecting auction {auction_id}: {e}")
+            auction_data["errors"].append(str(e))
+            auction_data["status"] = "error"
+        
+        return auction_data
+    
+    def _extract_error_code(self, text: str) -> Optional[str]:
+        """Extract error code from error message."""
+        match = re.search(r"0x[0-9a-fA-F]+", text)
+        return match.group(0) if match else None
+
     def collect_system_completeness(self) -> Dict[str, Any]:
         """
         Determine which phases completed successfully.
@@ -415,16 +730,16 @@ class MetricsCollector:
     
     def collect_errors(self) -> Dict[str, Any]:
         """
-        Parse all log files for errors and warnings.
+        Parse all log files for errors and warnings, focusing on critical issues.
         
         Returns:
-            Dictionary with error counts and types
+            Dictionary with error counts and critical issues
         """
         errors = {
             "total_errors": 0,
             "total_warnings": 0,
-            "error_types": {},
-            "error_details": []
+            "critical_issues": [],  # Only blocking/important errors
+            "bid_failures": []  # Already collected in auction data, kept for reference
         }
         
         try:
@@ -433,22 +748,33 @@ class MetricsCollector:
                 content = log_file.read_text()
                 
                 # Count errors and warnings
-                error_lines = [line for line in content.split('\n') if 'ERROR' in line]
-                warning_lines = [line for line in content.split('\n') if 'WARNING' in line or 'WARN' in line]
+                error_lines = [line for line in content.split('\n') if ' ERROR ' in line]
+                warning_lines = [line for line in content.split('\n') if ' WARNING ' in line or ' WARN ' in line]
                 
                 errors["total_errors"] += len(error_lines)
                 errors["total_warnings"] += len(warning_lines)
                 
-                # Categorize errors
+                # Identify critical issues (not just failed bids)
                 for line in error_lines:
-                    error_type = self._categorize_error(line)
-                    errors["error_types"][error_type] = errors["error_types"].get(error_type, 0) + 1
+                    # Skip bid failures (already tracked in auction data)
+                    if "Error placing bid" in line:
+                        continue
                     
-                    # Store first 10 error details
-                    if len(errors["error_details"]) < 10:
-                        errors["error_details"].append({
+                    # Track critical errors only
+                    if any(keyword in line.lower() for keyword in [
+                        "failed to connect",
+                        "connection refused", 
+                        "timeout",
+                        "contract not found",
+                        "deployment failed",
+                        "transaction reverted",
+                        "insufficient funds",
+                        "failed to fetch"
+                    ]):
+                        errors["critical_issues"].append({
                             "file": log_file.name,
-                            "message": line[:200]  # Truncate long messages
+                            "message": line.strip()[:300],
+                            "category": self._categorize_error(line)
                         })
             
         except Exception as e:
