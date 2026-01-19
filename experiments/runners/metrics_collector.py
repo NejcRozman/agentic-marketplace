@@ -363,7 +363,10 @@ class MetricsCollector:
                 except Exception as e:
                     logger.error(f"Failed to collect reputation for winner {auction_data['winner_id']}: {e}", exc_info=True)
             
-            # 8. Determine status based on blockchain state and logs
+            # 8. Calculate timing metrics from raw timestamps
+            self._calculate_auction_timing(auction_data)
+            
+            # 9. Determine status based on blockchain state and logs
             if is_completed:
                 # Contract marks auction as completed (service delivered and feedback received)
                 auction_data["status"] = "completed"
@@ -393,10 +396,70 @@ class MetricsCollector:
         
         return auction_data
     
+    def _calculate_auction_timing(self, auction_data: Dict[str, Any]):
+        """Calculate timing metrics from raw timestamps."""
+        timing = auction_data["timing"]
+        
+        try:
+            # Creation to first bid
+            if auction_data["bids_on_chain"] and len(auction_data["bids_on_chain"]) > 0:
+                first_bid_ts = auction_data["bids_on_chain"][0]["timestamp"]
+                timing["creation_to_first_bid"] = first_bid_ts - auction_data["timestamp_created"]
+                
+                # First bid to auction close (last bid or auction end)
+                last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
+                auction_end_ts = auction_data["timestamp_created"] + auction_data["duration"]
+                timing["first_bid_to_close"] = auction_end_ts - first_bid_ts
+            
+            # Execution timing from log timestamps
+            if auction_data["execution_start"] and auction_data["execution_end"]:
+                from datetime import datetime
+                start = datetime.strptime(auction_data["execution_start"], "%Y-%m-%d %H:%M:%S")
+                end = datetime.strptime(auction_data["execution_end"], "%Y-%m-%d %H:%M:%S")
+                timing["execution"] = int((end - start).total_seconds())
+                
+                # Close to execution start
+                if auction_data["bids_on_chain"]:
+                    auction_end_ts = auction_data["timestamp_created"] + auction_data["duration"]
+                    execution_start_ts = int(start.timestamp())
+                    timing["close_to_execution_start"] = execution_start_ts - auction_end_ts
+            
+            # Calculate total cycle time
+            if timing["creation_to_first_bid"] and timing["execution"]:
+                timing["total_auction_cycle"] = (
+                    timing["creation_to_first_bid"] + 
+                    timing["first_bid_to_close"] + 
+                    timing["close_to_execution_start"] + 
+                    timing["execution"]
+                )
+        except Exception as e:
+            logger.warning(f"Error calculating timing metrics: {e}")
+    
     def _extract_error_code(self, text: str) -> Optional[str]:
         """Extract error code from error message."""
         match = re.search(r"0x[0-9a-fA-F]+", text)
         return match.group(0) if match else None
+
+    def _count_transactions_from_logs(self):
+        """Count blockchain transactions from all log files."""
+        try:
+            tx_count = 0
+            
+            # Check consumer log
+            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
+            if consumer_log:
+                tx_count += len(re.findall(r'Sent transaction: 0x[0-9a-fA-F]{64}', consumer_log))
+            
+            # Check all provider logs
+            for provider_id in self.metrics['agents']['provider_ids']:
+                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                if provider_log:
+                    tx_count += len(re.findall(r'Sent transaction: 0x[0-9a-fA-F]{64}', provider_log))
+            
+            self.metrics["blockchain"]["total_transactions"] = tx_count
+            logger.debug(f"Counted {tx_count} blockchain transactions from logs")
+        except Exception as e:
+            logger.warning(f"Error counting transactions: {e}")
 
     def collect_system_completeness(self) -> Dict[str, Any]:
         """
@@ -820,6 +883,7 @@ class MetricsCollector:
             Path to saved metrics file
         """
         self.calculate_duration()
+        self._count_transactions_from_logs()
         
         metrics_file = self.metrics_dir / "experiment_metrics.json"
         with open(metrics_file, 'w') as f:
@@ -1032,8 +1096,17 @@ class MetricsCollector:
                 # Query current reputation for all providers
                 for provider_id in self.metrics['agents']['provider_ids']:
                     try:
-                        reputation = reputation_contract.functions.getReputation(provider_id).call()
-                        snapshot["provider_reputations"][provider_id] = reputation
+                        # getSummary returns (feedbackCount, averageScore)
+                        feedback_count, average_score = reputation_contract.functions.getSummary(
+                            provider_id,
+                            [],  # No client address filter
+                            bytes(32),  # No tag1 filter
+                            bytes(32)   # No tag2 filter
+                        ).call()
+                        snapshot["provider_reputations"][provider_id] = {
+                            "score": int(average_score),
+                            "feedback_count": int(feedback_count)
+                        }
                     except Exception as e:
                         logger.warning(f"Could not get reputation for provider {provider_id}: {e}")
                 

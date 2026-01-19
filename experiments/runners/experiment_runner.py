@@ -562,6 +562,52 @@ class ExperimentRunner:
         
         logger.info("✓ All agents spawned")
     
+    async def snapshot_reputations(self, after_auction_id: int):
+        """Capture reputation snapshot after an auction completes.
+        
+        Args:
+            after_auction_id: The auction ID that just completed
+        """
+        try:
+            from web3 import Web3
+            from agents.infrastructure.contract_abis import get_reputation_registry_abi
+            
+            w3 = Web3(Web3.HTTPProvider(self.config['blockchain']['rpc_url']))
+            reputation_contract = w3.eth.contract(
+                address=Web3.to_checksum_address(self.config['blockchain']['contracts']['reputation_registry']),
+                abi=get_reputation_registry_abi()
+            )
+            
+            snapshot = {
+                "after_auction": after_auction_id,
+                "timestamp": datetime.now().isoformat(),
+                "reputations": {}
+            }
+            
+            for provider_id in self.provider_agent_ids:
+                try:
+                    # getSummary returns (feedbackCount, averageScore)
+                    feedback_count, average_score = reputation_contract.functions.getSummary(
+                        provider_id,
+                        [],  # No client address filter
+                        bytes(32),  # No tag1 filter
+                        bytes(32)   # No tag2 filter
+                    ).call()
+                    
+                    snapshot["reputations"][provider_id] = {
+                        "score": int(average_score),
+                        "feedback_count": int(feedback_count)
+                    }
+                    logger.info(f"   Provider {provider_id}: score={average_score}, feedback_count={feedback_count}")
+                except Exception as e:
+                    logger.warning(f"   Failed to get reputation for provider {provider_id}: {e}")
+            
+            if self.metrics_collector:
+                self.metrics_collector.metrics["reputation_evolution"].append(snapshot)
+                
+        except Exception as e:
+            logger.error(f"Failed to snapshot reputations: {e}", exc_info=True)
+    
     async def monitor_experiment(self):
         """Monitor experiment progress and check stopping criteria."""
         logger.info("Monitoring experiment progress...")
@@ -573,6 +619,10 @@ class ExperimentRunner:
         target = stopping_criteria['target']
         poll_interval = stopping_criteria['poll_interval']
         max_timeout = stopping_criteria['max_timeout']
+        
+        # Track reputation snapshots
+        reputation_snapshots_enabled = self.config['experiment_flow'].get('reputation_snapshots', {}).get('enabled', False)
+        last_completed_count = 0
         
         start_time = time.time()
         
@@ -593,6 +643,12 @@ class ExperimentRunner:
                         
                         completed = status.get('completed_auctions', 0)
                         logger.info(f"Completed auctions: {completed}/{target} (elapsed: {int(elapsed)}s)")
+                        
+                        # Take reputation snapshot when a new auction completes
+                        if reputation_snapshots_enabled and completed > last_completed_count:
+                            logger.info(f"📸 Taking reputation snapshot after auction {completed}...")
+                            await self.snapshot_reputations(completed)
+                            last_completed_count = completed
                         
                         if completed >= target:
                             logger.info(f"✓ Target reached: {completed} auctions completed")

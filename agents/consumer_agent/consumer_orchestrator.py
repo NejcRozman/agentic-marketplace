@@ -187,13 +187,8 @@ class Consumer:
         
         # Select service to use
         if service_index is None:
-            # Use next service in order
-            if self.service_index >= len(self.available_services):
-                raise RuntimeError(
-                    f"All {len(self.available_services)} services have been used. "
-                    "Load more services or reset service_index."
-                )
-            idx = self.service_index
+            # Use next service in order (cycling through available services)
+            idx = self.service_index % len(self.available_services)
             self.service_index += 1
         else:
             # Use specific index
