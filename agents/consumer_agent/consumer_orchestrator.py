@@ -397,7 +397,8 @@ class Consumer:
             tracker.feedback_submitted = True
             logger.info(f"✓ Feedback submitted: tx={result['tx_hash']}")
             
-            # Move to completed
+            # Mark as fully completed and move to completed list
+            tracker.status = AuctionStatus.COMPLETED
             self.completed_auctions.append(tracker)
             del self.active_auctions[tracker.auction_id]
             
@@ -521,6 +522,8 @@ async def main(args):
                 # Check if we should create next auction
                 completed_count = len([a for a in consumer.completed_auctions 
                                      if a.status == AuctionStatus.COMPLETED])
+                
+                logger.debug(f"Status check: completed={completed_count}, created={auctions_created}, target={config.num_auctions}")
                 
                 if completed_count >= auctions_created:
                     logger.info(f"✅ Auction {auctions_created} completed. Creating next auction...")
