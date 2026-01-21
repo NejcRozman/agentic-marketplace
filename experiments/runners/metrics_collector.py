@@ -304,21 +304,25 @@ class MetricsCollector:
             consumer_id = self.metrics['agents']['consumer_id']
             consumer_log = self._load_log_file(f"consumer_{consumer_id}.log")
             if consumer_log:
+                # Extract auction-specific section to avoid reusing first auction's data
+                auction_section = self._extract_auction_section(consumer_log, auction_id)
+                search_log = auction_section if auction_section else consumer_log
+                
                 # Rating - look for overall_rating first, then fall back to other rating patterns
-                rating_match = re.search(r'"overall_rating":\s*(\d+)', consumer_log)
+                rating_match = re.search(r'"overall_rating":\s*(\d+)', search_log)
                 if not rating_match:
-                    rating_match = re.search(r'rating[=:]\s*(\d+).*?quality_scores', consumer_log, re.IGNORECASE | re.DOTALL)
+                    rating_match = re.search(r'rating[=:]\s*(\d+).*?quality_scores', search_log, re.IGNORECASE | re.DOTALL)
                 if rating_match:
                     auction_data["quality_rating"] = int(rating_match.group(1))
                     auction_data["feedback_rating"] = auction_data["quality_rating"]
                 
                 # Evaluation method
-                if "fallback" in consumer_log.lower():
+                if "fallback" in search_log.lower():
                     auction_data["quality_method"] = "fallback"
-                elif "finalize_evaluation" in consumer_log or "quality_scores" in consumer_log:
+                elif "finalize_evaluation" in search_log or "quality_scores" in search_log:
                     auction_data["quality_method"] = "tools"
                     # Extract detailed scores if available
-                    scores_match = re.search(r"quality_scores.*?({[^}]+})", consumer_log)
+                    scores_match = re.search(r"quality_scores.*?({[^}]+})", search_log)
                     if scores_match:
                         try:
                             auction_data["quality_details"] = json.loads(scores_match.group(1).replace("'", '"'))
@@ -326,7 +330,7 @@ class MetricsCollector:
                             pass
                 
                 # Feedback submission
-                if "Feedback submitted" in consumer_log or "submitFeedback" in consumer_log:
+                if "Feedback submitted" in search_log or "submitFeedback" in search_log:
                     auction_data["feedback_submitted"] = True
             
             # 7. Collect reputation data if winner exists and reputation contract provided
@@ -1054,19 +1058,39 @@ class MetricsCollector:
         """Extract log section relevant to specific auction."""
         lines = log.split('\n')
         relevant_lines = []
-        in_auction = False
+        start_idx = None
+        end_idx = None
         
-        for line in lines:
-            if f"auction {auction_id}" in line.lower() or f"auction={auction_id}" in line.lower():
-                in_auction = True
-                relevant_lines.append(line)
-            elif in_auction:
-                relevant_lines.append(line)
-                # Stop at next auction or after 50 lines
-                if "auction" in line.lower() and str(auction_id) not in line:
+        # Find the start of this auction's section
+        for i, line in enumerate(lines):
+            # Look for evaluation start marker
+            if f"Evaluating result for auction {auction_id}" in line:
+                start_idx = i
+                break
+            # Fallback to auction creation if evaluation not found
+            elif start_idx is None and (f"Auction {auction_id} created" in line or f"Created auction {auction_id}" in line):
+                start_idx = i
+        
+        # Find the end of this auction's section
+        if start_idx is not None:
+            for i in range(start_idx, len(lines)):
+                line = lines[i]
+                # Stop when we see next auction creation or evaluation
+                if i > start_idx and (f"Evaluating result for auction {auction_id + 1}" in line or 
+                                     f"Auction {auction_id + 1} created" in line or
+                                     f"Creating next auction" in line):
+                    end_idx = i
                     break
-                if len(relevant_lines) > 50:
+                # Also stop after feedback submission for this auction
+                if f"Feedback submitted" in line and f"auction {auction_id}" in line:
+                    end_idx = min(len(lines), i + 5)  # Include a few more lines
                     break
+        
+        if start_idx is not None and end_idx is not None:
+            relevant_lines = lines[start_idx:end_idx]
+        elif start_idx is not None:
+            # If no end found, take from start to end of file (last auction)
+            relevant_lines = lines[start_idx:]
         
         return '\n'.join(relevant_lines) if relevant_lines else None
     
