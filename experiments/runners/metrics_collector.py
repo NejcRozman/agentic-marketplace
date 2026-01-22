@@ -194,6 +194,7 @@ class MetricsCollector:
             auction_data["budget"] = auction_info[3]  # maxPrice
             auction_data["duration"] = auction_info[4]  # duration
             auction_data["timestamp_created"] = auction_info[5]  # startTime
+            auction_data["eligible_agent_ids"] = list(auction_info[6])  # eligibleAgentIds array
             
             # 2. Get on-chain bids
             bid_count = auction_contract.functions.getBidCount(auction_id).call()

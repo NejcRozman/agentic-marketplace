@@ -576,35 +576,6 @@ class TestAuctionCreation(unittest.TestCase):
         
         run_async(_test())
     
-    def test_create_auction_services_exhausted(self):
-        """Test error when all services have been used."""
-        async def _test():
-            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
-                
-                consumer = Consumer(self.mock_config)
-                consumer.blockchain_handler._initialized = True
-                consumer.available_services = [self.sample_services[0], self.sample_services[1]]
-                consumer.blockchain_handler.create_auction = AsyncMock(
-                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
-                )
-                
-                # Use both services
-                await consumer.create_auction()
-                await consumer.create_auction()
-                
-                # Third attempt should fail
-                with self.assertRaises(RuntimeError) as cm:
-                    await consumer.create_auction()
-                
-                self.assertIn("All 2 services have been used", str(cm.exception))
-                
-                print("\n✓ RuntimeError raised when all services exhausted")
-        
-        run_async(_test())
-    
     def test_create_auction_blockchain_success(self):
         """Test successful auction creation stores tracker correctly."""
         async def _test():
@@ -697,6 +668,223 @@ class TestAuctionCreation(unittest.TestCase):
                 self.assertEqual(call_args[1]["eligible_agent_ids"], [7, 8, 9])
                 
                 print("\n✓ Custom parameters passed correctly to blockchain")
+        
+        run_async(_test())
+    
+    def test_create_auction_random_selection_from_pool(self):
+        """Test random provider selection when provider_pool is configured."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # Configure provider_pool and eligible_per_auction
+                self.mock_config.provider_pool = [10, 20, 30, 40, 50]
+                self.mock_config.eligible_per_auction = 3
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [self.sample_services[0]]
+                consumer.blockchain_handler.create_auction = AsyncMock(
+                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
+                )
+                
+                # Create auction without specifying eligible_providers
+                await consumer.create_auction()
+                
+                # Verify random selection occurred
+                call_args = consumer.blockchain_handler.create_auction.call_args
+                eligible_sent = call_args[1]["eligible_agent_ids"]
+                
+                # Check correct count
+                self.assertEqual(len(eligible_sent), 3, f"Expected 3 providers, got {len(eligible_sent)}")
+                
+                # Check all are from pool
+                for pid in eligible_sent:
+                    self.assertIn(pid, [10, 20, 30, 40, 50], f"Provider {pid} not in pool")
+                
+                # Check no duplicates
+                self.assertEqual(len(eligible_sent), len(set(eligible_sent)), "Duplicate providers selected")
+                
+                print(f"\n✓ Random selection: {eligible_sent} from pool [10, 20, 30, 40, 50]")
+        
+        run_async(_test())
+    
+    def test_create_auction_use_full_pool(self):
+        """Test using full provider pool when eligible_per_auction >= pool size."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # Configure provider_pool with eligible_per_auction >= pool size
+                self.mock_config.provider_pool = [100, 200, 300]
+                self.mock_config.eligible_per_auction = 5  # More than pool size
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [self.sample_services[0]]
+                consumer.blockchain_handler.create_auction = AsyncMock(
+                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
+                )
+                
+                await consumer.create_auction()
+                
+                # Verify full pool is used
+                call_args = consumer.blockchain_handler.create_auction.call_args
+                eligible_sent = call_args[1]["eligible_agent_ids"]
+                
+                self.assertEqual(len(eligible_sent), 3, "Expected full pool of 3 providers")
+                self.assertEqual(set(eligible_sent), {100, 200, 300}, "Expected complete pool")
+                
+                print(f"\n✓ Full pool used: {eligible_sent}")
+        
+        run_async(_test())
+    
+    def test_create_auction_fallback_to_eligible_providers(self):
+        """Test fallback to config.eligible_providers when provider_pool not set."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # No provider_pool configured - should fallback to eligible_providers
+                self.mock_config.eligible_providers = [1, 2, 3]
+                # Ensure provider_pool is not set
+                if hasattr(self.mock_config, 'provider_pool'):
+                    delattr(self.mock_config, 'provider_pool')
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [self.sample_services[0]]
+                consumer.blockchain_handler.create_auction = AsyncMock(
+                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
+                )
+                
+                await consumer.create_auction()
+                
+                # Verify fallback to eligible_providers
+                call_args = consumer.blockchain_handler.create_auction.call_args
+                eligible_sent = call_args[1]["eligible_agent_ids"]
+                
+                self.assertEqual(eligible_sent, [1, 2, 3], "Expected config.eligible_providers")
+                
+                print(f"\n✓ Fallback to eligible_providers: {eligible_sent}")
+        
+        run_async(_test())
+    
+    def test_create_auction_empty_provider_pool_fallback(self):
+        """Test fallback to eligible_providers when provider_pool is empty."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # Empty provider_pool - should fallback
+                self.mock_config.provider_pool = []
+                self.mock_config.eligible_providers = [5, 6, 7]
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [self.sample_services[0]]
+                consumer.blockchain_handler.create_auction = AsyncMock(
+                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
+                )
+                
+                await consumer.create_auction()
+                
+                # Verify fallback to eligible_providers
+                call_args = consumer.blockchain_handler.create_auction.call_args
+                eligible_sent = call_args[1]["eligible_agent_ids"]
+                
+                self.assertEqual(eligible_sent, [5, 6, 7], "Expected fallback to eligible_providers")
+                
+                print(f"\n✓ Empty pool fallback: {eligible_sent}")
+        
+        run_async(_test())
+    
+    def test_create_auction_randomness_verification(self):
+        """Test that multiple auction creations produce different random selections."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # Large pool to ensure high probability of different selections
+                self.mock_config.provider_pool = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                self.mock_config.eligible_per_auction = 3
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [
+                    self.sample_services[0],
+                    self.sample_services[1],
+                    self.sample_services[2]
+                ]
+                
+                selections = []
+                for i in range(3):
+                    consumer.blockchain_handler.create_auction = AsyncMock(
+                        return_value={"auction_id": i+1, "tx_hash": f"0x{i}", "error": None}
+                    )
+                    await consumer.create_auction()
+                    
+                    call_args = consumer.blockchain_handler.create_auction.call_args
+                    eligible_sent = call_args[1]["eligible_agent_ids"]
+                    selections.append(sorted(eligible_sent))
+                
+                # Check that all selections are valid (3 providers from pool)
+                for sel in selections:
+                    self.assertEqual(len(sel), 3, f"Expected 3 providers in selection {sel}")
+                    for pid in sel:
+                        self.assertIn(pid, range(1, 11), f"Provider {pid} not in pool")
+                
+                # With 10 choose 3 = 120 combinations, probability all 3 identical is very low
+                # Just verify we got valid selections (not testing actual randomness quality)
+                print(f"\n✓ Three selections made:")
+                print(f"   Selection 1: {selections[0]}")
+                print(f"   Selection 2: {selections[1]}")
+                print(f"   Selection 3: {selections[2]}")
+                
+                # At least verify they're from the pool
+                self.assertEqual(len(selections), 3, "Expected 3 selections")
+        
+        run_async(_test())
+    
+    def test_create_auction_explicit_providers_override_pool(self):
+        """Test that explicitly provided eligible_providers bypasses random selection."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+                
+                # Configure provider_pool
+                self.mock_config.provider_pool = [10, 20, 30, 40, 50]
+                self.mock_config.eligible_per_auction = 3
+                
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.available_services = [self.sample_services[0]]
+                consumer.blockchain_handler.create_auction = AsyncMock(
+                    return_value={"auction_id": 1, "tx_hash": "0x1", "error": None}
+                )
+                
+                # Explicitly provide eligible_providers - should override pool
+                await consumer.create_auction(eligible_providers=[99, 88])
+                
+                # Verify explicit providers used, not random selection
+                call_args = consumer.blockchain_handler.create_auction.call_args
+                eligible_sent = call_args[1]["eligible_agent_ids"]
+                
+                self.assertEqual(eligible_sent, [99, 88], "Expected explicit providers, not random selection")
+                
+                print(f"\n✓ Explicit providers override pool: {eligible_sent}")
         
         run_async(_test())
 

@@ -196,43 +196,89 @@ class BlockchainHandler:
             
             CRITICAL: Always use this tool before placing a bid to ensure profitability.
             
+            IMPORTANT: Loss-leading strategy for reputation building:
+            - If you have LOW reputation (< 3 feedback), accepting UNPROFITABLE bids 
+              can be a strategic investment to build your reputation
+            - Once you build reputation, you gain competitive advantage in future auctions
+            - Consider: Would you rather make 0 profit with 0 reputation, or lose some money 
+              now to build reputation and win more profitable jobs later?
+            
             Args:
                 estimated_cost: Your estimated cost to deliver the service (in USDC with 6 decimals, e.g., 50000000 = 50 USDC)
                 proposed_bid: The bid amount you're considering (in USDC with 6 decimals, e.g., 55000000 = 55 USDC)
             
             Returns:
-                Profitability analysis with clear verdict - DO NOT bid if verdict is UNPROFITABLE
+                Profitability analysis with verdict and strategic recommendation considering reputation
             """
             try:
+                # Get current reputation - call the function directly, not as a tool
+                rep_result = get_reputation.func(handler.agent_id)
+                feedback_count = rep_result.get("feedback_count", 0)
+                current_rating = rep_result.get("rating", 50)
+                
                 profit = proposed_bid - estimated_cost
                 is_profitable = proposed_bid > estimated_cost
                 
                 if estimated_cost > 0:
                     margin_percent = round((profit / estimated_cost) * 100, 2)
+                    loss_percent = -margin_percent if not is_profitable else 0
                 else:
                     margin_percent = 0
+                    loss_percent = 0
                 
                 # Calculate suggested minimum bid
                 suggested_min_bid = estimated_cost + 1000000  # Add 1 USDC profit
                 
-                # Create clear verdict
+                # Strategic analysis based on reputation
+                is_newcomer = feedback_count < 3
+                has_low_reputation = current_rating < 70 and feedback_count > 0
+                
+                # Create clear verdict with strategic context
                 if is_profitable:
                     if margin_percent < 5:
-                        verdict = "⚠️ MARGINALLY PROFITABLE - Low profit margin, consider increasing bid"
+                        verdict = "⚠️ MARGINALLY PROFITABLE - Low profit margin"
                     else:
-                        verdict = "✅ PROFITABLE - Proceed with bid"
+                        verdict = "✅ PROFITABLE - Good margin"
+                    strategic_note = "Direct profit. No reputation investment needed."
                 else:
-                    verdict = "❌ UNPROFITABLE - You will LOSE money on this job. DO NOT BID."
+                    # Unprofitable - provide strategic analysis
+                    if is_newcomer:
+                        if loss_percent <= 30:
+                            verdict = "💡 STRATEGIC LOSS-LEADING - Acceptable for reputation building"
+                            strategic_note = f"You have {feedback_count} reviews. Investing {abs(profit/1e6):.1f} USDC (loss) to build reputation could win future profitable auctions. CONSIDER ACCEPTING."
+                        elif loss_percent <= 50:
+                            verdict = "⚠️ RISKY LOSS-LEADING - High loss for reputation building"
+                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC is significant. Only accept if you believe reputation will unlock much higher-paying jobs."
+                        else:
+                            verdict = "❌ UNPROFITABLE - Loss too large even for reputation building"
+                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC ({loss_percent:.1f}%) is excessive. Not worth it even for reputation."
+                    elif has_low_reputation:
+                        if loss_percent <= 20:
+                            verdict = "💡 REPUTATION RECOVERY - Small loss may help improve low rating"
+                            strategic_note = f"Your rating is {current_rating}/100. Small loss of {abs(profit/1e6):.1f} USDC could help recover reputation."
+                        else:
+                            verdict = "❌ UNPROFITABLE - Loss too large for recovery strategy"
+                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC is too much for reputation recovery."
+                    else:
+                        verdict = "❌ UNPROFITABLE - You have good reputation, don't accept losses"
+                        strategic_note = f"With {feedback_count} reviews at {current_rating}/100 rating, you should not accept unprofitable jobs."
                 
                 return {
                     "is_profitable": is_profitable,
                     "estimated_cost": estimated_cost,
                     "proposed_bid": proposed_bid,
                     "profit": profit,
-                    "profit_margin_percent": margin_percent,
+                    "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
                     "verdict": verdict,
-                    "recommendation": f"Bid at least {suggested_min_bid} ({suggested_min_bid / 1e6} USDC) to ensure profit" if not is_profitable else f"Current bid yields {profit / 1e6} USDC profit ({margin_percent}% margin)",
-                    "math_check": f"{proposed_bid} (bid) - {estimated_cost} (cost) = {profit} (profit)"
+                    "strategic_note": strategic_note,
+                    "reputation_context": {
+                        "feedback_count": feedback_count,
+                        "current_rating": current_rating,
+                        "is_newcomer": is_newcomer,
+                        "has_low_reputation": has_low_reputation
+                    },
+                    "recommendation": f"Bid at least {suggested_min_bid/1e6:.1f} USDC to ensure profit" if is_profitable else f"Current bid results in {abs(profit/1e6):.1f} USDC loss. {strategic_note}",
+                    "math_check": f"{proposed_bid/1e6:.1f} (bid) - {estimated_cost/1e6:.1f} (cost) = {profit/1e6:.1f} USDC ({'profit' if profit >= 0 else 'LOSS'})"
                 }
             except Exception as e:
                 logger.error(f"validate_bid_profitability failed: {e}")

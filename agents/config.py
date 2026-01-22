@@ -49,6 +49,12 @@ class Config:
         self.eligible_providers = [int(id.strip()) for id in eligible_str.split(",") if id.strip()]
         self.consumer_check_interval = int(os.getenv("CONSUMER_CHECK_INTERVAL", "5"))
         
+        # Random provider selection configuration
+        pool_str = os.getenv("PROVIDER_POOL", "")
+        self.provider_pool = [int(id.strip()) for id in pool_str.split(",") if id.strip()]
+        eligible_per_auction_str = os.getenv("ELIGIBLE_PER_AUCTION", "")
+        self.eligible_per_auction = int(eligible_per_auction_str) if eligible_per_auction_str else None
+        
         # Consumer Auto-Auction Configuration
         self.auto_create_auction = os.getenv("AUTO_CREATE_AUCTION", "false").lower() == "true"
         self.num_auctions = int(os.getenv("NUM_AUCTIONS", "1"))

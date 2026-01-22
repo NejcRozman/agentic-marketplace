@@ -15,6 +15,7 @@ import logging
 import argparse
 import json
 import sys
+import random
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
@@ -207,7 +208,24 @@ class Consumer:
         
         # Use eligible providers from config if not specified
         if eligible_providers is None:
-            eligible_providers = self.config.eligible_providers
+            # Check if random provider selection is enabled
+            if hasattr(self.config, 'provider_pool') and self.config.provider_pool:
+                # Randomly select from provider pool
+                pool = self.config.provider_pool
+                count = getattr(self.config, 'eligible_per_auction', len(pool))
+                
+                if count >= len(pool):
+                    eligible_providers = pool
+                    logger.info(f"Using all {len(pool)} providers from pool")
+                else:
+                    eligible_providers = random.sample(pool, count)
+                    logger.info(f"Randomly selected {count} providers from pool of {len(pool)}: {eligible_providers}")
+            else:
+                # Use static eligible_providers from config
+                eligible_providers = self.config.eligible_providers
+                logger.info(f"Using static eligible providers: {eligible_providers}")
+        else:
+            logger.info(f"Using explicitly provided eligible providers: {eligible_providers}")
         
         # Create auction on blockchain
         logger.info(f"Creating auction on blockchain (budget: {max_budget}, duration: {duration}s)...")
@@ -455,6 +473,10 @@ async def main(args):
         config.blockchain_private_key = args.private_key
     if args.eligible_providers:
         config.eligible_providers = args.eligible_providers
+    if args.provider_pool:
+        config.provider_pool = args.provider_pool
+    if args.eligible_per_auction:
+        config.eligible_per_auction = args.eligible_per_auction
     if args.max_budget:
         config.max_budget = args.max_budget
     if args.auction_duration:
@@ -499,8 +521,7 @@ async def main(args):
             try:
                 auction_id = await consumer.create_auction(
                     max_budget=config.max_budget,
-                    duration=config.auction_duration,
-                    eligible_providers=config.eligible_providers
+                    duration=config.auction_duration
                 )
                 auctions_created = 1
                 logger.info(f"✅ Created auction {auctions_created}/{config.num_auctions}: ID={auction_id}")
@@ -536,8 +557,7 @@ async def main(args):
                     try:
                         auction_id = await consumer.create_auction(
                             max_budget=config.max_budget,
-                            duration=config.auction_duration,
-                            eligible_providers=config.eligible_providers
+                            duration=config.auction_duration
                         )
                         auctions_created += 1
                         logger.info(f"✅ Created auction {auctions_created}/{config.num_auctions}: ID={auction_id}")
@@ -569,6 +589,8 @@ if __name__ == "__main__":
     parser.add_argument("--agent-id", type=int, help="Consumer agent ID")
     parser.add_argument("--private-key", type=str, help="Blockchain private key")
     parser.add_argument("--eligible-providers", type=int, nargs="+", help="List of eligible provider agent IDs")
+    parser.add_argument("--provider-pool", type=int, nargs="+", help="Provider pool for random selection")
+    parser.add_argument("--eligible-per-auction", type=int, help="Number of providers to randomly select per auction")
     parser.add_argument("--max-budget", type=int, help="Maximum budget for auctions (in token units)")
     parser.add_argument("--auction-duration", type=int, help="Auction duration in seconds")
     parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")

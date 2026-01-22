@@ -134,6 +134,52 @@ class ExperimentRunner:
         logger.info(f"  Log directory: {self.log_dir}")
         logger.info(f"  Metrics directory: {self.metrics_dir}")
     
+    def cleanup_orphaned_processes(self):
+        """Kill any orphaned agent processes from previous interrupted runs."""
+        logger.info("Checking for orphaned processes...")
+        
+        # Kill orphaned consumer processes
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "consumer_orchestrator.py"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info("✓ Killed orphaned consumer processes")
+            elif result.returncode == 1:
+                logger.debug("No orphaned consumer processes found")
+        except Exception as e:
+            logger.warning(f"Failed to check for consumer processes: {e}")
+        
+        # Kill orphaned provider processes
+        try:
+            result = subprocess.run(
+                ["pkill", "-f", "provider_agent/orchestrator.py"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info("✓ Killed orphaned provider processes")
+            elif result.returncode == 1:
+                logger.debug("No orphaned provider processes found")
+        except Exception as e:
+            logger.warning(f"Failed to check for provider processes: {e}")
+        
+        # Kill orphaned Anvil processes
+        try:
+            result = subprocess.run(
+                ["pkill", "anvil"],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                logger.info("✓ Killed orphaned Anvil processes")
+            elif result.returncode == 1:
+                logger.debug("No orphaned Anvil processes found")
+        except Exception as e:
+            logger.warning(f"Failed to check for Anvil processes: {e}")
+    
     async def start_anvil(self):
         """Start Anvil blockchain with Sepolia fork."""
         logger.info("Starting Anvil blockchain...")
@@ -435,6 +481,10 @@ class ExperimentRunner:
         if agent_type == "consumer" and additional_args:
             if 'eligible_providers' in additional_args:
                 cmd.extend(["--eligible-providers"] + [str(pid) for pid in additional_args['eligible_providers']])
+            if 'provider_pool' in additional_args:
+                cmd.extend(["--provider-pool"] + [str(pid) for pid in additional_args['provider_pool']])
+            if 'eligible_per_auction' in additional_args:
+                cmd.extend(["--eligible-per-auction", str(additional_args['eligible_per_auction'])])
             if 'max_budget' in additional_args:
                 cmd.extend(["--max-budget", str(additional_args['max_budget'])])
             if 'auction_duration' in additional_args:
@@ -531,6 +581,18 @@ class ExperimentRunner:
                 'auction_creation_delay': behavior.get('auction_creation_delay', 0),
                 'inter_auction_delay': behavior.get('inter_auction_delay', 30)
             })
+            
+            # Add random provider selection if configured
+            # If eligible_per_auction is set, use registered provider_agent_ids as pool
+            if 'eligible_per_auction' in behavior:
+                consumer_args['provider_pool'] = self.provider_agent_ids
+                consumer_args['eligible_per_auction'] = behavior['eligible_per_auction']
+                logger.info(f"Random provider selection enabled: {behavior['eligible_per_auction']} from pool of {len(self.provider_agent_ids)}")
+            elif 'provider_pool' in behavior:
+                # Fallback: use explicit provider_pool if specified (for backwards compatibility)
+                consumer_args['provider_pool'] = behavior['provider_pool']
+                if 'eligible_per_auction' in behavior:
+                    consumer_args['eligible_per_auction'] = behavior['eligible_per_auction']
         
         self.spawn_agent_process(
             "consumer",
@@ -594,6 +656,10 @@ class ExperimentRunner:
                         bytes(32)   # No tag2 filter
                     ).call()
                     
+                    # Default to 50 if no feedback (matches provider agent logic)
+                    if feedback_count == 0:
+                        average_score = 50
+                    
                     snapshot["reputations"][provider_id] = {
                         "score": int(average_score),
                         "feedback_count": int(feedback_count)
@@ -616,9 +682,13 @@ class ExperimentRunner:
         stopping_criteria = flow['phases'][2]['stopping_criteria']
         
         criteria_type = stopping_criteria['type']
-        target = stopping_criteria['target']
+        # Use consumer's num_auctions as the target (single source of truth)
+        # Fall back to stopping_criteria['target'] for backwards compatibility
+        target = self.config['agents']['consumer']['behavior'].get('num_auctions', stopping_criteria.get('target', 1))
         poll_interval = stopping_criteria['poll_interval']
         max_timeout = stopping_criteria['max_timeout']
+        
+        logger.info(f"Stopping criteria: {criteria_type}, target={target} auctions")
         
         # Track reputation snapshots
         reputation_snapshots_enabled = self.config['experiment_flow'].get('reputation_snapshots', {}).get('enabled', False)
@@ -876,6 +946,9 @@ class ExperimentRunner:
         try:
             # Load configuration (initializes metrics_collector)
             self.load_config()
+            
+            # Kill any orphaned processes from previous runs
+            self.cleanup_orphaned_processes()
             
             # Set start time after metrics_collector is initialized
             if self.metrics_collector:
