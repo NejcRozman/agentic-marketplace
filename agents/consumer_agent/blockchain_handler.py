@@ -151,7 +151,7 @@ class ConsumerBlockchainHandler:
         max_price: int,
         duration: int,
         eligible_agent_ids: Optional[List[int]] = None,
-        reputation_weight: int = 50
+        reputation_weight: int = 30
     ) -> Dict[str, Any]:
         """
         Create a new reverse auction.

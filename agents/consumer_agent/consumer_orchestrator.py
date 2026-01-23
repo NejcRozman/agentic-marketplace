@@ -234,7 +234,8 @@ class Consumer:
             service_cid=service_cid,
             max_price=max_budget,
             duration=duration,
-            eligible_agent_ids=eligible_providers
+            eligible_agent_ids=eligible_providers,
+            reputation_weight=self.config.reputation_weight
         )
         
         if result['error']:
@@ -481,6 +482,8 @@ async def main(args):
         config.max_budget = args.max_budget
     if args.auction_duration:
         config.auction_duration = args.auction_duration
+    if args.reputation_weight:
+        config.reputation_weight = args.reputation_weight
     if args.check_interval:
         config.check_interval = args.check_interval
     if args.auto_create_auction:
@@ -593,6 +596,7 @@ if __name__ == "__main__":
     parser.add_argument("--eligible-per-auction", type=int, help="Number of providers to randomly select per auction")
     parser.add_argument("--max-budget", type=int, help="Maximum budget for auctions (in token units)")
     parser.add_argument("--auction-duration", type=int, help="Auction duration in seconds")
+    parser.add_argument("--reputation-weight", type=int, help="Weight of reputation in bid scoring (0-100)")
     parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")
     parser.add_argument("--status-file", type=str, help="Path to write status JSON file")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])

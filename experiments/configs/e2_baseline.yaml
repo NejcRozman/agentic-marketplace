@@ -52,6 +52,7 @@ agents:
       check_interval: 5  # Check blockchain every 5 seconds
       max_budget: 100000000  # 100 USDC per auction (with 6 decimals)
       auction_duration: 300  # 5 minutes per auction
+      reputation_weight: 30  # 0-100: weight of reputation vs price (30 = 30% reputation, 70% price)
       
     behavior:
       pdf_directory: "utils/files"  # Use existing test PDFs

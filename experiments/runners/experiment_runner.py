@@ -489,6 +489,8 @@ class ExperimentRunner:
                 cmd.extend(["--max-budget", str(additional_args['max_budget'])])
             if 'auction_duration' in additional_args:
                 cmd.extend(["--auction-duration", str(additional_args['auction_duration'])])
+            if 'reputation_weight' in additional_args:
+                cmd.extend(["--reputation-weight", str(additional_args['reputation_weight'])])
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
             # Auto-auction arguments
@@ -567,6 +569,7 @@ class ExperimentRunner:
             'eligible_providers': self.provider_agent_ids,
             'max_budget': consumer_config['config']['max_budget'],
             'auction_duration': consumer_config['config']['auction_duration'],
+            'reputation_weight': consumer_config['config'].get('reputation_weight', 30),
             'check_interval': consumer_config['config']['check_interval']
         }
         
@@ -686,9 +689,10 @@ class ExperimentRunner:
         # Fall back to stopping_criteria['target'] for backwards compatibility
         target = self.config['agents']['consumer']['behavior'].get('num_auctions', stopping_criteria.get('target', 1))
         poll_interval = stopping_criteria['poll_interval']
-        max_timeout = stopping_criteria['max_timeout']
+    
+        max_timeout = self.config['experiment'].get('duration_timeout', stopping_criteria.get('max_timeout', 7200))
         
-        logger.info(f"Stopping criteria: {criteria_type}, target={target} auctions")
+        logger.info(f"Stopping criteria: {criteria_type}, target={target} auctions, max_timeout={max_timeout}s ({max_timeout/3600:.1f}h)")
         
         # Track reputation snapshots
         reputation_snapshots_enabled = self.config['experiment_flow'].get('reputation_snapshots', {}).get('enabled', False)
@@ -700,7 +704,7 @@ class ExperimentRunner:
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed > max_timeout:
-                logger.info(f"Maximum timeout reached ({max_timeout}s)")
+                logger.info(f"Maximum timeout reached ({max_timeout}s = {max_timeout/3600:.1f}h)")
                 break
             
             # Check stopping criteria

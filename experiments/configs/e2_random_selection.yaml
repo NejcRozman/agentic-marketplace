@@ -1,6 +1,6 @@
 # E2 Random Selection - Heterogeneous Market Exposure
 # Research Question: RQ2, RQ3 - Quality-Cost Trade-off & Reputation with Unequal Market Access
-# Description: 5 sequential auctions where consumer randomly selects 3 providers from pool of 5 per auction
+# Description: X sequential auctions where consumer randomly selects Y providers from pool of Z per auction
 
 experiment:
   id: "e2_random_selection"
@@ -8,7 +8,6 @@ experiment:
   description: |
     Tests system behavior when consumers randomly select subset of providers for each auction.
     Models realistic scenarios where buyers have limited attention and create heterogeneous market exposure.
-    Design: 5 providers in pool, consumer randomly selects 3 per auction.
   research_question: "RQ2, RQ3"
   duration_timeout: 21600  # Maximum 6 hours for entire experiment
   
@@ -47,6 +46,7 @@ agents:
       check_interval: 5  # Check blockchain every 5 seconds
       max_budget: 100000000  # 100 USDC per auction (with 6 decimals)
       auction_duration: 60  # 1 minute per auction
+      reputation_weight: 30  # 0-100: weight of reputation vs price (30 = 30% reputation, 70% price)
       
     behavior:
       pdf_directory: "utils/files"  # Use existing test PDFs
@@ -76,7 +76,7 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
-      timeout: 120  # 2 minutes to set up blockchain
+      timeout: 60  # 1 minute to set up blockchain
       
     - name: "agents_start"
       description: "Launch consumer and provider agents"
@@ -87,8 +87,7 @@ experiment_flow:
       stopping_criteria:
         type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
         poll_interval: 5  # Check every 5 seconds
-        max_timeout: 7200  # 2 hours absolute maximum
-  
+        
   # Reputation tracking configuration
   reputation_snapshots:
     enabled: true  # Take reputation snapshots after each auction

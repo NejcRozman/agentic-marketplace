@@ -134,6 +134,7 @@ class MetricsCollector:
         auction_data = {
             "auction_id": auction_id,
             "timestamp_created": None,
+            "timestamp_ended": None,  # Actual auction end time from AuctionEnded event
             "service_cid": None,
             "budget": 0,
             "duration": 0,
@@ -232,15 +233,44 @@ class MetricsCollector:
             is_active = auction_info[9]
             is_completed = auction_info[10]
             
+            # 3a. Get actual auction end timestamp from AuctionEnded event
+            # This is the GROUND TRUTH for when the auction actually closed
+            try:
+                # Query AuctionEnded events for this auction
+                event_filter = auction_contract.events.AuctionEnded.create_filter(
+                    from_block=0,
+                    argument_filters={'auctionId': auction_id}
+                )
+                events = event_filter.get_all_entries()
+                if events:
+                    # Get block timestamp for the AuctionEnded event
+                    block = w3.eth.get_block(events[0]['blockNumber'])
+                    auction_data["timestamp_ended"] = block['timestamp']
+                else:
+                    # Fallback: use theoretical end time if event not found
+                    auction_data["timestamp_ended"] = auction_data["timestamp_created"] + auction_data["duration"]
+            except Exception as e:
+                logger.warning(f"Could not fetch AuctionEnded event for auction {auction_id}: {e}")
+                # Fallback: use theoretical end time
+                auction_data["timestamp_ended"] = auction_data["timestamp_created"] + auction_data["duration"]
+            
             # 4. Collect bid attempts from provider logs (includes failures)
+            # IMPORTANT: Only collect bids from eligible providers to avoid phantom data
+            eligible_provider_ids = auction_data.get("eligible_agent_ids", [])
+            
             for provider_id in self.metrics['agents']['provider_ids']:
+                # Skip providers that weren't eligible for this auction
+                if eligible_provider_ids and provider_id not in eligible_provider_ids:
+                    continue
+                
                 provider_log = self._load_log_file(f"provider_{provider_id}.log")
                 if not provider_log:
                     continue
                 
                 # Find all bid attempts for this auction - look for place_bid tool calls
                 # Format: place_bid({'auction_id': 1, 'bid_amount': 60000000})
-                bid_pattern = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^}}]*'bid_amount':\s*(\d+)"
+                # CRITICAL: Use word boundary after auction_id to avoid matching 1 with 10-19, 2 with 20-29, etc.
+                bid_pattern = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^\d][^}}]*'bid_amount':\s*(\d+)"
                 for match in re.finditer(bid_pattern, provider_log):
                     bid_amount = int(match.group(1))
                     auction_data["bids_attempted"].append({
@@ -248,8 +278,9 @@ class MetricsCollector:
                         "amount": bid_amount
                     })
                 
-                # Track bid failures
-                error_pattern = rf"Error placing bid.*auction.*{auction_id}"
+                # Track bid failures (only for eligible providers)
+                # CRITICAL: Use word boundary after auction_id
+                error_pattern = rf"Error placing bid.*auction.*{auction_id}\b"
                 for match in re.finditer(error_pattern, provider_log, re.IGNORECASE):
                     context = provider_log[max(0, match.start()-200):match.end()+200]
                     auction_data["bid_failures"].append({
@@ -262,8 +293,14 @@ class MetricsCollector:
             if auction_data["winner_id"]:
                 winner_log = self._load_log_file(f"provider_{auction_data['winner_id']}.log")
                 if winner_log:
+                    # Extract auction-specific section to avoid cross-contamination
+                    winner_section = self._extract_provider_auction_section(winner_log, auction_id)
+                    if not winner_section:
+                        # Fallback to full log if section extraction fails
+                        winner_section = winner_log
+                    
                     # Check for service execution markers (case-insensitive)
-                    if any(marker.lower() in winner_log.lower() for marker in [
+                    if any(marker.lower() in winner_section.lower() for marker in [
                         "result.json",
                         "result saved",
                         "literature review completed",
@@ -272,7 +309,7 @@ class MetricsCollector:
                         auction_data["service_executed"] = True
                     
                     # Extract prompts answered by counting "Processing prompt:" occurrences
-                    prompt_count = winner_log.count("Processing prompt:")
+                    prompt_count = winner_section.count("Processing prompt:")
                     if prompt_count > 0:
                         auction_data["prompts_answered"] = prompt_count
                     
@@ -281,9 +318,9 @@ class MetricsCollector:
                     if prompt_count > 0:
                         auction_data["prompts_total"] = prompt_count
                     
-                    # Extract execution timing from log timestamps
-                    execution_start_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Found \d+ PDF|Building vector database|Processing prompt)', winner_log)
-                    execution_end_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Result saved to|Literature review completed)', winner_log)
+                    # Extract execution timing from log timestamps (within auction-specific section)
+                    execution_start_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Found \d+ PDF|Building vector database|Processing prompt)', winner_section)
+                    execution_end_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Result saved to|Literature review completed)', winner_section)
                     
                     if execution_start_match:
                         auction_data["execution_start"] = execution_start_match.group(1)
@@ -399,6 +436,9 @@ class MetricsCollector:
             auction_data["errors"].append(str(e))
             auction_data["status"] = "error"
         
+        # Validate data integrity: blockchain is ground truth
+        self._validate_auction_data(auction_data)
+        
         return auction_data
     
     def _calculate_auction_timing(self, auction_data: Dict[str, Any]):
@@ -411,10 +451,14 @@ class MetricsCollector:
                 first_bid_ts = auction_data["bids_on_chain"][0]["timestamp"]
                 timing["creation_to_first_bid"] = first_bid_ts - auction_data["timestamp_created"]
                 
-                # First bid to auction close (last bid or auction end)
-                last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
-                auction_end_ts = auction_data["timestamp_created"] + auction_data["duration"]
-                timing["first_bid_to_close"] = auction_end_ts - first_bid_ts
+                # First bid to auction close
+                # Use actual auction end timestamp from AuctionEnded event
+                if auction_data.get("timestamp_ended"):
+                    timing["first_bid_to_close"] = auction_data["timestamp_ended"] - first_bid_ts
+                else:
+                    # Fallback: use last bid timestamp as proxy
+                    last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
+                    timing["first_bid_to_close"] = last_bid_ts - first_bid_ts
             
             # Execution timing from log timestamps
             if auction_data["execution_start"] and auction_data["execution_end"]:
@@ -424,13 +468,23 @@ class MetricsCollector:
                 timing["execution"] = int((end - start).total_seconds())
                 
                 # Close to execution start
-                if auction_data["bids_on_chain"]:
-                    auction_end_ts = auction_data["timestamp_created"] + auction_data["duration"]
+                # Use actual auction end timestamp for accurate measurement
+                if auction_data.get("timestamp_ended"):
                     execution_start_ts = int(start.timestamp())
-                    timing["close_to_execution_start"] = execution_start_ts - auction_end_ts
+                    timing["close_to_execution_start"] = execution_start_ts - auction_data["timestamp_ended"]
+                    
+                    # Note: This CAN be negative if execution started before AuctionEnded event
+                    # This happens when provider starts work while auction is still active
+                    # or if there's clock skew between blockchain and local system
+                elif auction_data["bids_on_chain"]:
+                    # Fallback: use last bid time as proxy
+                    last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
+                    execution_start_ts = int(start.timestamp())
+                    timing["close_to_execution_start"] = execution_start_ts - last_bid_ts
             
             # Calculate total cycle time
-            if timing["creation_to_first_bid"] and timing["execution"]:
+            # Only calculate if all components are present (some may be 0 or negative)
+            if timing["creation_to_first_bid"] > 0 and timing["execution"] > 0:
                 timing["total_auction_cycle"] = (
                     timing["creation_to_first_bid"] + 
                     timing["first_bid_to_close"] + 
@@ -444,6 +498,108 @@ class MetricsCollector:
         """Extract error code from error message."""
         match = re.search(r"0x[0-9a-fA-F]+", text)
         return match.group(0) if match else None
+    
+    def _validate_auction_data(self, auction_data: Dict[str, Any]):
+        """
+        Validate auction data integrity using blockchain as ground truth.
+        
+        This method performs critical sanity checks to catch data collection bugs:
+        1. All bids_attempted providers must be in eligible_agent_ids
+        2. All bids_on_chain providers must be in eligible_agent_ids
+        3. Number of on-chain bids should match bid_count from contract
+        4. Winner must be in bids_on_chain
+        5. bids_attempted count should be >= bids_on_chain count
+        
+        Logs warnings for any inconsistencies found.
+        """
+        auction_id = auction_data["auction_id"]
+        eligible = set(auction_data.get("eligible_agent_ids", []))
+        
+        # Validation 1: All attempted bids must be from eligible providers
+        for bid in auction_data["bids_attempted"]:
+            provider_id = bid.get("provider_id")
+            if provider_id not in eligible:
+                logger.error(
+                    f"VALIDATION ERROR: Auction {auction_id} - "
+                    f"Provider {provider_id} in bids_attempted but not in eligible_agent_ids {eligible}. "
+                    f"This indicates a regex bug or incorrect eligibility filtering."
+                )
+                auction_data["errors"].append(f"Invalid bid attempt from ineligible provider {provider_id}")
+        
+        # Validation 2: All on-chain bids must be from eligible providers
+        for bid in auction_data["bids_on_chain"]:
+            agent_id = bid.get("agent_id")
+            if agent_id and agent_id not in eligible:
+                logger.error(
+                    f"VALIDATION ERROR: Auction {auction_id} - "
+                    f"Provider {agent_id} has on-chain bid but not in eligible_agent_ids {eligible}. "
+                    f"This indicates a blockchain state inconsistency."
+                )
+                auction_data["errors"].append(f"On-chain bid from ineligible provider {agent_id}")
+        
+        # Validation 3: On-chain bid count consistency
+        if len(auction_data["bids_on_chain"]) != auction_data["bid_count"]:
+            logger.warning(
+                f"VALIDATION WARNING: Auction {auction_id} - "
+                f"Collected {len(auction_data['bids_on_chain'])} on-chain bids but "
+                f"contract reports bid_count={auction_data['bid_count']}"
+            )
+        
+        # Validation 4: Winner must have an on-chain bid
+        if auction_data["winner_id"]:
+            winner_bid = next(
+                (b for b in auction_data["bids_on_chain"] if b.get("agent_id") == auction_data["winner_id"]),
+                None
+            )
+            if not winner_bid:
+                logger.warning(
+                    f"VALIDATION WARNING: Auction {auction_id} - "
+                    f"Winner {auction_data['winner_id']} has no on-chain bid recorded"
+                )
+        
+        # Validation 5: Attempted bids should be >= on-chain bids
+        attempted_count = len(auction_data["bids_attempted"])
+        onchain_count = len(auction_data["bids_on_chain"])
+        if attempted_count < onchain_count:
+            logger.warning(
+                f"VALIDATION WARNING: Auction {auction_id} - "
+                f"Only {attempted_count} bids attempted but {onchain_count} made it on-chain. "
+                f"This suggests incomplete log parsing."
+            )
+        
+        # Validation 6: Sanity check for excessive bid attempts (likely a bug)
+        if attempted_count > onchain_count * 10:
+            logger.error(
+                f"VALIDATION ERROR: Auction {auction_id} - "
+                f"{attempted_count} bids attempted but only {onchain_count} on-chain. "
+                f"Ratio of {attempted_count/max(onchain_count,1):.1f}x suggests phantom data from regex bug."
+            )
+            auction_data["errors"].append(
+                f"Excessive bid attempts: {attempted_count} attempted vs {onchain_count} on-chain"
+            )
+        
+        # Validation 7: Check for unreasonable negative timing values
+        timing = auction_data.get("timing", {})
+        close_to_exec = timing.get("close_to_execution_start", 0)
+        
+        # Small negative values (< 60s) are acceptable due to clock skew or early execution detection
+        # Large negative values (> 60s) indicate a timing calculation bug
+        if close_to_exec < -60:
+            logger.warning(
+                f"VALIDATION WARNING: Auction {auction_id} - "
+                f"Execution started {abs(close_to_exec)}s before auction end. "
+                f"This may indicate clock skew or incorrect timestamp parsing."
+            )
+        
+        # Total cycle time should always be positive
+        total_cycle = timing.get("total_auction_cycle", 0)
+        if total_cycle < 0:
+            logger.error(
+                f"VALIDATION ERROR: Auction {auction_id} - "
+                f"Negative total_auction_cycle ({total_cycle}s). "
+                f"This indicates a timing calculation bug."
+            )
+            auction_data["errors"].append(f"Negative total cycle time: {total_cycle}s")
 
     def _count_transactions_from_logs(self):
         """Count blockchain transactions from all log files."""
@@ -453,13 +609,14 @@ class MetricsCollector:
             # Check consumer log
             consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
             if consumer_log:
-                tx_count += len(re.findall(r'Sent transaction: 0x[0-9a-fA-F]{64}', consumer_log))
+                # Match both formats: with and without 0x prefix
+                tx_count += len(re.findall(r'Sent transaction: (?:0x)?[0-9a-fA-F]{64}', consumer_log))
             
             # Check all provider logs
             for provider_id in self.metrics['agents']['provider_ids']:
                 provider_log = self._load_log_file(f"provider_{provider_id}.log")
                 if provider_log:
-                    tx_count += len(re.findall(r'Sent transaction: 0x[0-9a-fA-F]{64}', provider_log))
+                    tx_count += len(re.findall(r'Sent transaction: (?:0x)?[0-9a-fA-F]{64}', provider_log))
             
             self.metrics["blockchain"]["total_transactions"] = tx_count
             logger.debug(f"Counted {tx_count} blockchain transactions from logs")
@@ -1029,7 +1186,8 @@ class MetricsCollector:
                 provider_log = self._load_log_file(f"provider_{provider_id}.log")
                 if provider_log:
                     # Find bid for this specific auction
-                    bid_pattern = rf"auction\s*{auction_id}.*bid[=:]?\s*(\d+)"
+                    # CRITICAL: Use word boundary after auction_id
+                    bid_pattern = rf"auction\s*{auction_id}\b.*bid[=:]?\s*(\d+)"
                     bid_match = re.search(bid_pattern, provider_log, re.IGNORECASE)
                     if bid_match:
                         auction["bids"].append({
@@ -1045,7 +1203,8 @@ class MetricsCollector:
                     auction["winner_id"] = winner["agent_id"]
             
             # Extract rating for this auction
-            rating_pattern = rf"auction\s*{auction_id}.*rating[=:]?\s*(\d+)"
+            # CRITICAL: Use word boundary after auction_id
+            rating_pattern = rf"auction\s*{auction_id}\b.*rating[=:]?\s*(\d+)"
             rating_match = re.search(rating_pattern, auction_section or consumer_log, re.IGNORECASE)
             if rating_match:
                 auction["rating"] = int(rating_match.group(1))
@@ -1062,14 +1221,22 @@ class MetricsCollector:
         start_idx = None
         end_idx = None
         
+        # Use regex patterns with word boundaries to avoid partial matches
+        import re
+        eval_pattern = re.compile(rf"Evaluating result for auction {auction_id}\b")
+        created_pattern = re.compile(rf"(?:Auction|Created auction) {auction_id}\b")
+        next_eval_pattern = re.compile(rf"Evaluating result for auction {auction_id + 1}\b")
+        next_created_pattern = re.compile(rf"Auction {auction_id + 1}\b")
+        feedback_pattern = re.compile(rf"Feedback submitted.*auction {auction_id}\b")
+        
         # Find the start of this auction's section
         for i, line in enumerate(lines):
             # Look for evaluation start marker
-            if f"Evaluating result for auction {auction_id}" in line:
+            if eval_pattern.search(line):
                 start_idx = i
                 break
             # Fallback to auction creation if evaluation not found
-            elif start_idx is None and (f"Auction {auction_id} created" in line or f"Created auction {auction_id}" in line):
+            elif start_idx is None and created_pattern.search(line):
                 start_idx = i
         
         # Find the end of this auction's section
@@ -1077,13 +1244,13 @@ class MetricsCollector:
             for i in range(start_idx, len(lines)):
                 line = lines[i]
                 # Stop when we see next auction creation or evaluation
-                if i > start_idx and (f"Evaluating result for auction {auction_id + 1}" in line or 
-                                     f"Auction {auction_id + 1} created" in line or
-                                     f"Creating next auction" in line):
+                if i > start_idx and (next_eval_pattern.search(line) or 
+                                     next_created_pattern.search(line) or
+                                     "Creating next auction" in line):
                     end_idx = i
                     break
                 # Also stop after feedback submission for this auction
-                if f"Feedback submitted" in line and f"auction {auction_id}" in line:
+                if feedback_pattern.search(line):
                     end_idx = min(len(lines), i + 5)  # Include a few more lines
                     break
         
@@ -1091,6 +1258,49 @@ class MetricsCollector:
             relevant_lines = lines[start_idx:end_idx]
         elif start_idx is not None:
             # If no end found, take from start to end of file (last auction)
+            relevant_lines = lines[start_idx:]
+        
+        return '\n'.join(relevant_lines) if relevant_lines else None
+    
+    def _extract_provider_auction_section(self, log: str, auction_id: int) -> Optional[str]:
+        """Extract provider log section for a specific auction execution."""
+        lines = log.split('\n')
+        relevant_lines = []
+        start_idx = None
+        end_idx = None
+        
+        import re
+        # Look for "Won auction X" or "Executing service for job X"
+        won_pattern = re.compile(rf"Won auction {auction_id}\b", re.IGNORECASE)
+        executing_pattern = re.compile(rf"Executing service for job {auction_id}\b", re.IGNORECASE)
+        # Look for completion or next auction
+        completed_pattern = re.compile(rf"Literature review completed", re.IGNORECASE)
+        next_won_pattern = re.compile(rf"Won auction {auction_id + 1}\b", re.IGNORECASE)
+        
+        # Find the start (when won the auction)
+        for i, line in enumerate(lines):
+            if won_pattern.search(line) or executing_pattern.search(line):
+                start_idx = i
+                break
+        
+        # Find the end (completion or next auction win)
+        if start_idx is not None:
+            for i in range(start_idx + 1, len(lines)):
+                line = lines[i]
+                # Stop at completion of current auction
+                if completed_pattern.search(line):
+                    # Include this line and a few more for context
+                    end_idx = min(len(lines), i + 5)
+                    break
+                # Stop if we see next auction
+                if next_won_pattern.search(line):
+                    end_idx = i
+                    break
+        
+        if start_idx is not None and end_idx is not None:
+            relevant_lines = lines[start_idx:end_idx]
+        elif start_idx is not None:
+            # If no end found, take from start to end (last auction)
             relevant_lines = lines[start_idx:]
         
         return '\n'.join(relevant_lines) if relevant_lines else None
