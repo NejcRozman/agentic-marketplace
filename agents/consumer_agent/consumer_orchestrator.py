@@ -544,8 +544,8 @@ async def main(args):
             # Sequential creation: Create next auction when previous completes
             if config.auto_create_auction and auctions_created < config.num_auctions:
                 # Check if we should create next auction
-                completed_count = len([a for a in consumer.completed_auctions 
-                                     if a.status == AuctionStatus.COMPLETED])
+                # Use completed_auctions list length (only populated after feedback submission)
+                completed_count = len(consumer.completed_auctions)
                 
                 logger.debug(f"Status check: completed={completed_count}, created={auctions_created}, target={config.num_auctions}")
                 

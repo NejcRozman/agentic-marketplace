@@ -363,6 +363,9 @@ Maintain professional academic tone and provide detailed, well-structured respon
                     result["error"] = "Failed to load PDFs"
                     return result
             
+            # IMPORTANT: Rebuild graph for each service to prevent context accumulation
+            self._build_graph()
+            
             if not self.graph:
                 result["error"] = "Graph not initialized. Load PDFs first."
                 return result
