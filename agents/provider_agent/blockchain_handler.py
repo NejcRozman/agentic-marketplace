@@ -179,12 +179,13 @@ class BlockchainHandler:
                     logger.warning(f"Invalid complexity '{complexity}', defaulting to 'medium'")
                     complexity = "medium"
                 
-                base_cost = 50  # Base cost in USDC
+                # Get base cost from config (supports quality tiers)
+                base_cost = self.config.bidding_base_cost  # In USDC
                 
                 multipliers = {"low": 0.7, "medium": 1.0, "high": 1.5}
                 multiplier = multipliers.get(complexity, 1.0)
                 
-                estimated = int(base_cost * multiplier * 1e6)
+                estimated = int(base_cost * multiplier * 1e6)  # Convert to wei-like format
                 
                 return {"estimated_cost": estimated, "confidence": 0.7, "complexity": complexity}
             except Exception as e:
@@ -719,18 +720,14 @@ BIDDING GUIDELINES:
 1. Analyze each auction before bidding
 2. Fetch service requirements from IPFS using get_ipfs_data
 3. Extract the 'complexity' field from service data and use it to estimate cost
-4. CRITICAL: ALWAYS use validate_bid_profitability to check if your proposed bid is profitable
+4. Use validate_bid_profitability to check if your proposed bid is profitable
    - Pass your estimated_cost and proposed_bid to this tool
-   - Only proceed if verdict is PROFITABLE
-   - NEVER bid if verdict is UNPROFITABLE - you will lose money!
-5. Only bid if profitable (bid_amount > estimated_cost) as confirmed by validation
-6. Consider time remaining - urgent auctions may need immediate bids
-7. Check current winning bid - you need a better score to win
-8. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
-9. You can bid on multiple auctions if profitable
-10. If no auctions are profitable, don't bid
-
-IMPORTANT: The validate_bid_profitability tool will show you the math clearly. Trust its verdict.
+   - Only proceed based on verdict from this tool
+5. Consider time remaining - urgent auctions may need immediate bids
+6. Check current winning bid - you need a better score to win
+7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
+8. You can bid on multiple auctions if profitable
+9. If no auctions are profitable, don't bid
 
 Current eligible auctions:
 {auctions_context}

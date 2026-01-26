@@ -38,13 +38,35 @@ class LiteratureReviewAgent:
     - Provides properly cited responses
     """
     
-    # Default RAG parameters
-    CHUNK_SIZE = 10000
-    CHUNK_OVERLAP = 200
-    RETRIEVAL_K = 3
-    
-    # System prompt for the agent
-    SYSTEM_PROMPT = """You are a literature review assistant specialized in analyzing research papers.
+    # System prompts for different quality tiers
+    SYSTEM_PROMPTS = {
+        "detailed": """You are a literature review assistant specialized in analyzing research papers.
+
+Your responsibilities:
+1. Answer questions about research papers accurately and comprehensively
+2. ALWAYS cite your sources using the format [Author, 'Title'] after each statement
+3. When comparing papers, clearly indicate which paper each finding comes from
+4. Summarize papers with proper citations
+5. Generate literature reviews with consistent citation format
+6. Provide detailed analysis with multiple perspectives
+7. Include methodological details and context
+
+Citation Rules:
+- Every factual statement must be followed by a citation
+- Use the exact citation format provided by the search_literature tool
+- When multiple sources support a statement, list all citations
+- Be precise about which paper each piece of information comes from
+- Cross-reference related findings across papers
+
+Quality Standards:
+- Provide comprehensive answers with depth
+- Include nuanced analysis
+- Consider limitations and alternative interpretations
+- Structure responses with clear sections
+
+Maintain professional academic tone and provide detailed, well-structured responses.""",
+
+        "standard": """You are a literature review assistant specialized in analyzing research papers.
 
 Your responsibilities:
 1. Answer questions about research papers accurately and comprehensively
@@ -59,7 +81,17 @@ Citation Rules:
 - When multiple sources support a statement, list all citations
 - Be precise about which paper each piece of information comes from
 
-Maintain professional academic tone and provide detailed, well-structured responses."""
+Maintain professional academic tone and provide detailed, well-structured responses.""",
+
+        "minimal": """You are a literature review assistant.
+
+Your tasks:
+1. Answer questions about research papers
+2. Cite sources using [Author, 'Title'] format
+3. Provide summaries
+
+Keep responses concise and direct."""
+    }
     
     def __init__(
         self,
@@ -81,17 +113,24 @@ Maintain professional academic tone and provide detailed, well-structured respon
         if not config.openrouter_api_key:
             raise ValueError("OPENROUTER_API_KEY not found in environment variables")
         
+        # Use config-based parameters (supports quality profiles)
         self.llm = ChatOpenAI(
             model="xiaomi/mimo-v2-flash:free",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
-            temperature=0
+            temperature=config.rag_temperature
         )
         self.embeddings = OpenAIEmbeddings(
             model="text-embedding-3-small",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url
         )
+        
+        # RAG parameters from config (quality profile)
+        self.chunk_size = config.rag_chunk_size
+        self.chunk_overlap = config.rag_chunk_overlap
+        self.retrieval_k = config.rag_retrieval_k
+        self.system_prompt_type = config.rag_system_prompt_type
         
         # RAG components (initialized when PDFs are loaded)
         self.vectorstore = None
@@ -102,7 +141,8 @@ Maintain professional academic tone and provide detailed, well-structured respon
         self.graph = None
         self.tools = []
         
-        logger.info(f"Initialized LiteratureReviewAgent: {agent_id}")
+        logger.info(f"Initialized LiteratureReviewAgent: {agent_id} (quality: {config.quality_profile}, "
+                   f"temp={config.rag_temperature}, k={config.rag_retrieval_k})")
     
     def _extract_paper_metadata(self, document: Any) -> Dict[str, str]:
         """Extract paper title and first author from filename format: Author-Title.pdf"""
@@ -172,10 +212,10 @@ Maintain professional academic tone and provide detailed, well-structured respon
                     paper_metadata = self._extract_paper_metadata(doc)
                     doc.metadata.update(paper_metadata)
                 
-                # Split documents
+                # Split documents using config-based parameters
                 text_splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=self.CHUNK_SIZE,
-                    chunk_overlap=self.CHUNK_OVERLAP
+                    chunk_size=self.chunk_size,
+                    chunk_overlap=self.chunk_overlap
                 )
                 splits = text_splitter.split_documents(documents)
                 logger.info(f"Created {len(splits)} text chunks")
@@ -197,10 +237,10 @@ Maintain professional academic tone and provide detailed, well-structured respon
                 )
                 logger.info("Loaded existing vector database")
             
-            # Create retriever
+            # Create retriever using config-based parameters
             self.retriever = self.vectorstore.as_retriever(
                 search_type="similarity",
-                search_kwargs={"k": self.RETRIEVAL_K}
+                search_kwargs={"k": self.retrieval_k}
             )
             
             self.current_pdf_directory = pdf_directory
@@ -262,9 +302,10 @@ Maintain professional academic tone and provide detailed, well-structured respon
             """Call the LLM with tools and system prompt."""
             messages = state['messages']
             
-            # Add system prompt if not already present
+            # Add system prompt if not already present (use quality-specific prompt)
             if not messages or not isinstance(messages[0], SystemMessage):
-                messages = [SystemMessage(content=self.SYSTEM_PROMPT)] + messages
+                system_prompt = self.SYSTEM_PROMPTS.get(self.system_prompt_type, self.SYSTEM_PROMPTS["standard"])
+                messages = [SystemMessage(content=system_prompt)] + messages
             
             response = llm_with_tools.invoke(messages)
             return {'messages': [response]}

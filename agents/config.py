@@ -69,9 +69,71 @@ class Config:
         # Agent workspace
         self.workspace_dir = os.getenv("WORKSPACE_DIR", "./workspaces")
         
+        # Provider quality profile configuration
+        self.quality_profile = os.getenv("QUALITY_PROFILE", "medium")  # high, medium, or low
+        
+        # RAG parameters (will be set based on quality_profile)
+        self.rag_temperature = None
+        self.rag_retrieval_k = None
+        self.rag_chunk_size = None
+        self.rag_chunk_overlap = None
+        self.rag_system_prompt_type = None  # "detailed", "standard", or "minimal"
+        
+        # Provider bidding configuration
+        # Check if BIDDING_BASE_COST was explicitly set, otherwise use quality profile default
+        self.bidding_base_cost_override = os.getenv("BIDDING_BASE_COST")
+        self.bidding_base_cost = None  # Will be set by _set_quality_profile_params()
+        
+        # Set quality profile parameters
+        self._set_quality_profile_params()
+        
+        # Apply override if provided
+        if self.bidding_base_cost_override is not None:
+            self.bidding_base_cost = int(self.bidding_base_cost_override)
+        
         # Environment
         self.environment = os.getenv("ENVIRONMENT", "development")
         self.debug = os.getenv("DEBUG", "true").lower() == "true"
+    
+    def _set_quality_profile_params(self):
+        """Set RAG and bidding parameters based on quality profile.
+        
+        Quality profiles are justified by literature:
+        - High: Deterministic (temp=0), more context (k=5), better chunking → higher quality, higher cost
+        - Medium: Balanced parameters → standard quality, moderate cost
+        - Low: More random (temp=0.7), less context (k=1), poor chunking → lower quality, lower cost
+        """
+        profile = self.quality_profile.lower()
+        
+        if profile == "high":
+            # High quality: Precise, comprehensive, well-structured
+            self.rag_temperature = 0.0
+            self.rag_retrieval_k = 5
+            self.rag_chunk_size = 8000
+            self.rag_chunk_overlap = 400
+            self.rag_system_prompt_type = "detailed"
+            self.bidding_base_cost = 60  # Higher operational costs
+            
+        elif profile == "medium":
+            # Medium quality: Standard configuration
+            self.rag_temperature = 0.3
+            self.rag_retrieval_k = 3
+            self.rag_chunk_size = 10000
+            self.rag_chunk_overlap = 200
+            self.rag_system_prompt_type = "standard"
+            self.bidding_base_cost = 40  # Standard operational costs
+            
+        elif profile == "low":
+            # Low quality: Minimal effort, less precise
+            self.rag_temperature = 0.7
+            self.rag_retrieval_k = 1
+            self.rag_chunk_size = 15000
+            self.rag_chunk_overlap = 0
+            self.rag_system_prompt_type = "minimal"
+            self.bidding_base_cost = 20  # Lower operational costs
+            
+        else:
+            raise ValueError(f"Unknown quality profile: {profile}. Must be 'high', 'medium', or 'low'")
     
     def is_production(self) -> bool:
         """Check if running in production environment."""
