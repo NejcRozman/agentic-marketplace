@@ -513,6 +513,11 @@ class ExperimentRunner:
         # Setup environment variables
         env = os.environ.copy()
         
+        # Add quality profile for providers if specified
+        if agent_type == "provider" and additional_args and 'quality_profile' in additional_args:
+            env["QUALITY_PROFILE"] = additional_args['quality_profile']
+            logger.info(f"Setting QUALITY_PROFILE={additional_args['quality_profile']} for provider {agent_id}")
+        
         # Add project root to PYTHONPATH so agents can import from agents package
         project_root = str(Path(__file__).parent.parent.parent)
         if "PYTHONPATH" in env:
@@ -608,17 +613,36 @@ class ExperimentRunner:
         provider_config = self.config['agents']['providers']
         provider_pks = self.config['blockchain']['accounts']['providers']
         
+        # Check for quality profiles configuration
+        quality_profiles = provider_config.get('quality_profiles', None)
+        
+        if quality_profiles:
+            logger.info(f"Quality profiles configured: {quality_profiles}")
+            if len(quality_profiles) != len(self.provider_agent_ids):
+                raise ValueError(
+                    f"Mismatch: {len(quality_profiles)} quality profiles but "
+                    f"{len(self.provider_agent_ids)} provider agents"
+                )
+        
         provider_args = {
             'check_interval': provider_config['config']['check_interval']
         }
         
         for i, agent_id in enumerate(self.provider_agent_ids):
             pk = provider_pks[i] if i < len(provider_pks) else provider_pks[0]
+            
+            # Create provider-specific args with quality profile if configured
+            provider_specific_args = provider_args.copy()
+            if quality_profiles:
+                quality_profile = quality_profiles[i]
+                provider_specific_args['quality_profile'] = quality_profile
+                logger.info(f"Provider {i+1} (ID={agent_id}): quality_profile={quality_profile}")
+            
             self.spawn_agent_process(
                 "provider",
                 agent_id,
                 pk,
-                provider_args
+                provider_specific_args
             )
         
         # Wait for agents to initialize
