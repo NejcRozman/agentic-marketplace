@@ -736,7 +736,7 @@ Analyze these auctions and decide which to bid on."""
 
             # Create ReAct agent without rate limiting (use API defaults)
             llm = ChatOpenAI(
-                model="xiaomi/mimo-v2-flash:free",
+                model="tngtech/deepseek-r1t2-chimera:free",
                 api_key=self.config.openrouter_api_key,
                 base_url=self.config.openrouter_base_url,
                 temperature=0.3

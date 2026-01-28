@@ -35,7 +35,7 @@ class ServiceGenerator:
         
         # Initialize OpenRouter LLM
         self.model = ChatOpenAI(
-            model="xiaomi/mimo-v2-flash:free",
+            model="tngtech/deepseek-r1t2-chimera:free",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=0.7

@@ -115,7 +115,7 @@ Keep responses concise and direct."""
         
         # Use config-based parameters (supports quality profiles)
         self.llm = ChatOpenAI(
-            model="xiaomi/mimo-v2-flash:free",
+            model="tngtech/deepseek-r1t2-chimera:free",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=config.rag_temperature
