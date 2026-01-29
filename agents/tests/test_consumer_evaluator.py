@@ -679,7 +679,6 @@ class TestServiceEvaluatorIntegration(unittest.TestCase):
             self.assertLessEqual(evaluation["rating"], 100)
             
             print(f"\n✅ Real OpenRouter LLM evaluation completed!")
-            print(f"   Model: xiaomi/mimo-v2-flash:free")
             print(f"   Rating: {evaluation['rating']}/100")
             print(f"   Quality Scores: {evaluation['quality_scores']}")
             print(f"   Error: {evaluation.get('error', 'None')}")

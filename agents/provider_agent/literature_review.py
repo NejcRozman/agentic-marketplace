@@ -115,7 +115,7 @@ Keep responses concise and direct."""
         
         # Use config-based parameters (supports quality profiles)
         self.llm = ChatOpenAI(
-            model="tngtech/deepseek-r1t2-chimera:free",
+            model="openai/gpt-oss-20b",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=config.rag_temperature

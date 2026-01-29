@@ -76,13 +76,20 @@ class ServiceEvaluator:
             Returns:
                 Structured data ready for LLM evaluation
             """
+            def safe_json_loads(s):
+                if isinstance(s, str):
+                    # Escape single backslashes not already escaped
+                    s = s.replace('\\', '\\\\')  # double-escape existing escapes
+                    s = s.replace('"', '\"') if s.count('"') > s.count('\\"') else s
+                    # Now escape any remaining single backslashes
+                    s = s.replace('\\', '\\\\')
+                    return json.loads(s)
+                return s
             try:
-                requirements = json.loads(service_requirements)
-                result = json.loads(service_result)
-                
+                requirements = safe_json_loads(service_requirements)
+                result = safe_json_loads(service_result)
                 # Extract from literature_review result structure
                 responses_data = result.get("responses", [])
-                
                 # Each response has {"prompt": "...", "response": "..."}
                 pairs = []
                 for item in responses_data:
@@ -90,7 +97,6 @@ class ServiceEvaluator:
                         "prompt": item.get("prompt", ""),
                         "response": item.get("response", "")
                     })
-                
                 return {
                     "pair_count": len(pairs),
                     "pairs": pairs,
@@ -98,6 +104,8 @@ class ServiceEvaluator:
                     "complexity": requirements.get("complexity", "medium"),
                     "service_type": requirements.get("service_type", "")
                 }
+            except json.JSONDecodeError as e:
+                return {"error": f"JSON parsing error: {str(e)}"}
             except Exception as e:
                 return {"error": str(e)}
         
@@ -193,7 +201,7 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
 
             # Create ReAct agent without rate limiting (use API defaults)
             llm = ChatOpenAI(
-                model="tngtech/deepseek-r1t2-chimera:free",
+                model="openai/gpt-oss-20b",
                 api_key=self.config.openrouter_api_key,
                 base_url=self.config.openrouter_base_url,
                 temperature=0.3
