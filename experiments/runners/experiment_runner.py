@@ -70,6 +70,7 @@ class ExperimentRunner:
         # Registered agent IDs
         self.consumer_agent_id: Optional[int] = None
         self.provider_agent_ids: List[int] = []
+        self.provider_metadata: List[Dict[str, Any]] = []  # Track provider types and configs
         
         # Experiment directories
         self.experiment_id: str = ""
@@ -426,15 +427,62 @@ class ExperimentRunner:
         
         # Register providers
         provider_pks = self.config['blockchain']['accounts']['providers']
-        provider_count = self.config['agents']['providers']['count']
+        provider_config = self.config['agents']['providers']
         
-        for i in range(provider_count):
-            pk = provider_pks[i] if i < len(provider_pks) else provider_pks[0]
-            agent_id = self.register_agent(pk)
-            self.provider_agent_ids.append(agent_id)
-            logger.info(f"Provider {i+1} agent ID: {agent_id}")
+        # Check if grouped configuration exists (honest vs adversarial)
+        if 'groups' in provider_config:
+            logger.info("Using grouped provider configuration (honest + adversarial)")
+            
+            # Track provider metadata for later spawning
+            self.provider_metadata = []
+            
+            for group in provider_config['groups']:
+                group_type = group['type']
+                count = group['count']
+                agent_type = group.get('agent_type', 'provider_agent')
+                
+                logger.info(f"Registering {count} {group_type} providers ({agent_type})")
+                
+                for i in range(count):
+                    pk = provider_pks[len(self.provider_agent_ids)] if len(self.provider_agent_ids) < len(provider_pks) else provider_pks[0]
+                    agent_id = self.register_agent(pk)
+                    self.provider_agent_ids.append(agent_id)
+                    
+                    # Store metadata for spawning
+                    self.provider_metadata.append({
+                        'agent_id': agent_id,
+                        'private_key': pk,
+                        'agent_type': agent_type,
+                        'group_type': group_type,
+                        'group_config': group,
+                        'index': len(self.provider_agent_ids) - 1
+                    })
+                    
+                    logger.info(f"  {group_type.capitalize()} provider {i+1} agent ID: {agent_id} (type: {agent_type})")
+        else:
+            # Backward compatibility: all honest providers
+            logger.info("Using traditional provider configuration (all honest)")
+            provider_count = provider_config['count']
+            self.provider_metadata = []
+            
+            for i in range(provider_count):
+                pk = provider_pks[i] if i < len(provider_pks) else provider_pks[0]
+                agent_id = self.register_agent(pk)
+                self.provider_agent_ids.append(agent_id)
+                
+                # Store metadata for spawning
+                self.provider_metadata.append({
+                    'agent_id': agent_id,
+                    'private_key': pk,
+                    'agent_type': 'provider_agent',
+                    'group_type': 'honest',
+                    'group_config': provider_config,
+                    'index': i
+                })
+                
+                logger.info(f"Provider {i+1} agent ID: {agent_id}")
         
-        logger.info(f"✓ All agents registered")
+        logger.info(f"✓ All agents registered ({len(self.provider_agent_ids)} providers)")
     
     def spawn_agent_process(
         self,
@@ -444,10 +492,10 @@ class ExperimentRunner:
         additional_args: Dict[str, Any] = None
     ) -> ProcessHandle:
         """
-        Spawn an agent process (consumer or provider).
+        Spawn an agent process (consumer, provider, or adversarial_provider).
         
         Args:
-            agent_type: "consumer" or "provider"
+            agent_type: "consumer", "provider_agent", or "adversarial_provider_agent"
             agent_id: Agent ID to use
             private_key: Blockchain private key
             additional_args: Additional CLI arguments
@@ -464,7 +512,10 @@ class ExperimentRunner:
             script = agents_dir / "consumer_agent" / "consumer_orchestrator.py"
             status_file = self.log_dir / f"consumer_{agent_id}_status.json"
             self.consumer_status_file = status_file
-        else:
+        elif agent_type == "adversarial_provider_agent":
+            script = agents_dir / "adversarial_provider_agent" / "orchestrator.py"
+            status_file = self.log_dir / f"adversarial_provider_{agent_id}_status.json"
+        else:  # provider_agent (honest provider)
             script = agents_dir / "provider_agent" / "orchestrator.py"
             status_file = self.log_dir / f"provider_{agent_id}_status.json"
         
@@ -506,15 +557,19 @@ class ExperimentRunner:
                 cmd.extend(["--auction-creation-delay", str(additional_args['auction_creation_delay'])])
             if 'inter_auction_delay' in additional_args:
                 cmd.extend(["--inter-auction-delay", str(additional_args['inter_auction_delay'])])
-        elif agent_type == "provider" and additional_args:
+        elif agent_type in ["provider_agent", "adversarial_provider_agent"] and additional_args:
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
+            # Adversarial provider-specific argument
+            if agent_type == "adversarial_provider_agent" and 'strategy' in additional_args:
+                cmd.extend(["--strategy", additional_args['strategy']])
+                logger.info(f"Setting adversarial strategy: {additional_args['strategy']}")
         
         # Setup environment variables
         env = os.environ.copy()
         
         # Add quality profile for providers if specified
-        if agent_type == "provider" and additional_args and 'quality_profile' in additional_args:
+        if agent_type == "provider_agent" and additional_args and 'quality_profile' in additional_args:
             env["QUALITY_PROFILE"] = additional_args['quality_profile']
             logger.info(f"Setting QUALITY_PROFILE={additional_args['quality_profile']} for provider {agent_id}")
         
@@ -609,40 +664,41 @@ class ExperimentRunner:
             consumer_args
         )
         
-        # Spawn providers
+        # Spawn providers using metadata from registration
         provider_config = self.config['agents']['providers']
-        provider_pks = self.config['blockchain']['accounts']['providers']
         
-        # Check for quality profiles configuration
-        quality_profiles = provider_config.get('quality_profiles', None)
-        
-        if quality_profiles:
-            logger.info(f"Quality profiles configured: {quality_profiles}")
-            if len(quality_profiles) != len(self.provider_agent_ids):
-                raise ValueError(
-                    f"Mismatch: {len(quality_profiles)} quality profiles but "
-                    f"{len(self.provider_agent_ids)} provider agents"
-                )
-        
-        provider_args = {
-            'check_interval': provider_config['config']['check_interval']
-        }
-        
-        for i, agent_id in enumerate(self.provider_agent_ids):
-            pk = provider_pks[i] if i < len(provider_pks) else provider_pks[0]
+        for provider_meta in self.provider_metadata:
+            agent_id = provider_meta['agent_id']
+            pk = provider_meta['private_key']
+            agent_type = provider_meta['agent_type']
+            group_config = provider_meta['group_config']
             
-            # Create provider-specific args with quality profile if configured
-            provider_specific_args = provider_args.copy()
-            if quality_profiles:
-                quality_profile = quality_profiles[i]
-                provider_specific_args['quality_profile'] = quality_profile
-                logger.info(f"Provider {i+1} (ID={agent_id}): quality_profile={quality_profile}")
+            # Build provider-specific args
+            if 'config' in group_config:
+                provider_args = {
+                    'check_interval': group_config['config'].get('check_interval', 5)
+                }
+                
+                # Add quality profile if specified (for honest providers)
+                if 'quality_profile' in group_config['config']:
+                    provider_args['quality_profile'] = group_config['config']['quality_profile']
+            else:
+                provider_args = {}
+            
+            # Add behavior-specific arguments
+            if 'behavior' in group_config:
+                behavior = group_config['behavior']
+                
+                # Adversarial strategy
+                if 'strategy' in behavior:
+                    provider_args['strategy'] = behavior['strategy']
+                    logger.info(f"Provider {agent_id}: adversarial strategy={behavior['strategy']}")
             
             self.spawn_agent_process(
-                "provider",
+                agent_type,
                 agent_id,
                 pk,
-                provider_specific_args
+                provider_args
             )
         
         # Wait for agents to initialize

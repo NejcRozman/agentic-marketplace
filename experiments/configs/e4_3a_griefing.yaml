@@ -1,0 +1,166 @@
+# E4.3a: Griefing (Denial-of-Service) - Byzantine Robustness Test
+# Research Question: RQ4 - Byzantine Robustness
+# Description: 1 adversarial provider (11%) refusing service delivery vs 8 honest providers
+
+experiment:
+  id: "e4_3a_griefing"
+  name: "Griefing / Denial-of-Service (11% attackers)"
+  description: |
+    Tests system resilience to providers who win auctions but refuse service delivery.
+    Byzantine provider bids extremely low (0.1× multiplier) to win auctions, then refuses
+    to complete service (JobStatus.REFUSED). Tests auction mechanism's ability to handle
+    non-delivery and whether reputation penalties are sufficient to deter attack.
+    1 Byzantine provider vs 8 honest providers over 50 auctions.
+  research_question: "RQ4"
+  duration_timeout: 21600  # Maximum 6 hours for entire experiment
+  
+blockchain:
+  network: "anvil"
+  rpc_url: "http://localhost:8545"
+  fork_network: "sepolia"  # Fork from Sepolia to get ERC-8004 contracts
+  infura_key_env: "INFURA_API_KEY"  # Read from environment
+  
+  contracts:
+    # Addresses of contracts (deployed by experiment or pre-existing)
+    reverse_auction: null  # null = deploy new
+    identity_registry: "0x8004a6090Cd10A7288092483047B097295Fb8847"  # Sepolia ERC-8004
+    reputation_registry: "0x8004B8FD1A363aa02fDC07635C0c5F94f6Af5B7E"  # Sepolia ERC-8004
+    payment_token: null  # null = deploy mock USDC
+    
+  accounts:
+    main_account: "${BLOCKCHAIN_PRIVATE_KEY}"
+    deployer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    consumer: "${BLOCKCHAIN_CONSUMER_PRIVATE_KEY}"
+    providers:
+      - "${BLOCKCHAIN_PRIVATE_KEY}"  # Only need 1 key, experiment runner generates others
+    
+    # Funding configuration for consumer account
+    consumer_funding:
+      eth_amount: 2000000000000000000  # 2 ETH in wei
+      usdc_amount: 2000000000  # 2000 USDC (6 decimals)
+
+agents:
+  consumer:
+    count: 1
+    agent_id: null  # null = register new agent
+    private_key: null  # null = use blockchain.accounts.consumer
+    
+    config:
+      check_interval: 5  # Check blockchain every 5 seconds
+      max_budget: 100000000  # 100 USDC per auction (with 6 decimals)
+      auction_duration: 60  # 1 minute per auction
+      reputation_weight: 25  # 0-100: weight of reputation vs price (25 = 25% reputation, 75% price)
+      
+    behavior:
+      pdf_directory: "utils/files"  # Use existing test PDFs
+      service_selection: "sequential"  # Use PDFs in order
+      service_complexity: "medium"
+      auto_create_auction: true  # Create auction immediately on start
+      num_auctions: 50  # Create 50 sequential auctions
+      auto_monitor: true  # Monitor auction automatically
+      inter_auction_delay: 5  # Wait 5 seconds between auctions
+      eligible_per_auction: 9  # All 9 providers eligible per auction
+      
+      # Note: Consumer may need timeout handling for non-delivery
+      # Current implementation: May need to handle REFUSED status or timeouts
+      
+  providers:
+    count: 9  # Total 9 providers (1 adversarial + 8 honest)
+    
+    # Define honest vs adversarial groups
+    groups:
+      - type: "honest"
+        count: 8
+        agent_type: "provider_agent"  # Use normal provider
+        agent_ids: [null, null, null, null, null, null, null, null]  # null = register new agents
+        private_keys: null  # null = experiment runner generates
+        
+        config:
+          check_interval: 5  # Check blockchain every 5 seconds
+          quality_profile: "medium"  # Standard quality
+          
+        behavior:
+          auto_bid: true  # Automatically bid on detected auctions
+          auto_execute: true  # Automatically execute won services
+          auto_complete: true  # Automatically complete on blockchain
+          
+      - type: "adversarial"
+        count: 1
+        agent_type: "adversarial_provider_agent"  # Use adversarial provider
+        agent_ids: [null]  # null = register new agent
+        private_keys: null  # null = experiment runner generates
+        
+        config:
+          check_interval: 5  # Check blockchain every 5 seconds
+          
+        behavior:
+          strategy: "non_completion"  # Griefing/DoS strategy
+          auto_bid: true  # Automatically bid on detected auctions
+          auto_execute: true  # Attempt to execute (but will refuse)
+          auto_complete: false  # Do NOT complete on blockchain (service refused)
+          
+          # Strategy behavior:
+          # - Bids at 0.1× multiplier (extremely low to win)
+          # - After winning, refuses service (JobStatus.REFUSED)
+          # - Does not call blockchain complete_service()
+          # - Wastes consumer time and blocks honest providers
+     
+experiment_flow:
+  phases:
+    - name: "setup"
+      description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      
+    - name: "execution"
+      description: |
+        Consumer creates 50 sequential auctions; providers bid and deliver services.
+        Byzantine provider executes griefing attack:
+        - Bids extremely low (0.1× multiplier) to maximize win rate
+        - Wins auctions but refuses service delivery
+        - Does not complete on blockchain (no payment, no feedback)
+        - Tests if system can detect and penalize non-delivery
+      
+    - name: "completion"
+      description: "Collect all metrics and reputation snapshots"
+      
+    - name: "analysis"
+      description: |
+        Analyze griefing attack effectiveness:
+        - Byzantine win rate (should be high initially due to low bids)
+        - Service completion rate (% of won auctions with delivered service)
+        - Consumer time wasted (auction duration × failed auctions)
+        - Reputation penalties for non-delivery
+        - System recovery: Does consumer re-auction or lose opportunity?
+        - Honest provider opportunities lost
+        - Attack sustainability (is it deterred by penalties?)
+      
+metrics:
+  collect:
+    - "auction_details"
+    - "bid_amounts"
+    - "winner_selection"
+    - "service_completion_rate"  # Critical metric for this attack
+    - "non_delivery_incidents"
+    - "reputation_evolution"
+    - "win_distribution"
+    - "cost_analysis"
+    - "timing_data"
+    - "consumer_time_wasted"
+    
+  analysis:
+    - "byzantine_win_rate_over_time"
+    - "service_completion_rate_by_provider_type"
+    - "reputation_penalties_for_non_delivery"
+    - "consumer_time_wasted_total"
+    - "honest_provider_opportunities_lost"
+    - "attack_sustainability_analysis"
+    - "system_recovery_mechanisms"
+    
+  notes: |
+    Critical Success Test: Does system penalize non-delivery strongly enough?
+    - If penalties insufficient: Attack is sustainable and destructive (win rate stays high)
+    - If penalties sufficient: Byzantine reputation → 0, excluded within 5 auctions
+    
+    May require smart contract enhancement:
+    - Non-delivery detection (timeout or explicit refusal)
+    - Automatic reputation penalty for timeouts
+    - Potential re-auction mechanism for failed services

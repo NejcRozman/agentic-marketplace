@@ -1,0 +1,146 @@
+# E4.2a: Bait-and-Switch - Byzantine Robustness Test
+# Research Question: RQ4 - Byzantine Robustness
+# Description: 1 adversarial provider (11%) using bait-and-switch strategy vs 8 honest providers
+
+experiment:
+  id: "e4_2a_bait_and_switch"
+  name: "Bait-and-Switch (11% attackers)"
+  description: |
+    Tests reputation system's ability to detect strategic quality degradation after reputation building.
+    Byzantine provider builds reputation with high quality + low prices (Phase 1), then switches to
+    low quality + high prices once reputation >= 70 (Phase 2).
+    1 Byzantine provider vs 8 honest providers over 75-100 auctions.
+  research_question: "RQ4"
+  duration_timeout: 28800  # Maximum 8 hours for entire experiment (longer than E4.1 due to more auctions)
+  
+blockchain:
+  network: "anvil"
+  rpc_url: "http://localhost:8545"
+  fork_network: "sepolia"  # Fork from Sepolia to get ERC-8004 contracts
+  infura_key_env: "INFURA_API_KEY"  # Read from environment
+  
+  contracts:
+    # Addresses of contracts (deployed by experiment or pre-existing)
+    reverse_auction: null  # null = deploy new
+    identity_registry: "0x8004a6090Cd10A7288092483047B097295Fb8847"  # Sepolia ERC-8004
+    reputation_registry: "0x8004B8FD1A363aa02fDC07635C0c5F94f6Af5B7E"  # Sepolia ERC-8004
+    payment_token: null  # null = deploy mock USDC
+    
+  accounts:
+    main_account: "${BLOCKCHAIN_PRIVATE_KEY}"
+    deployer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    consumer: "${BLOCKCHAIN_CONSUMER_PRIVATE_KEY}"
+    providers:
+      - "${BLOCKCHAIN_PRIVATE_KEY}"  # Only need 1 key, experiment runner generates others
+    
+    # Funding configuration for consumer account
+    consumer_funding:
+      eth_amount: 3000000000000000000  # 3 ETH in wei (more for longer experiment)
+      usdc_amount: 3000000000  # 3000 USDC (6 decimals) - 75-100 auctions × 100 USDC
+
+agents:
+  consumer:
+    count: 1
+    agent_id: null  # null = register new agent
+    private_key: null  # null = use blockchain.accounts.consumer
+    
+    config:
+      check_interval: 5  # Check blockchain every 5 seconds
+      max_budget: 100000000  # 100 USDC per auction (with 6 decimals)
+      auction_duration: 60  # 1 minute per auction
+      reputation_weight: 25  # 0-100: weight of reputation vs price (25 = 25% reputation, 75% price)
+      
+    behavior:
+      pdf_directory: "utils/files"  # Use existing test PDFs
+      service_selection: "sequential"  # Use PDFs in order
+      service_complexity: "medium"
+      auto_create_auction: true  # Create auction immediately on start
+      num_auctions: 75  # 75 auctions (minimum for both phases)
+      auto_monitor: true  # Monitor auction automatically
+      inter_auction_delay: 5  # Wait 5 seconds between auctions
+      eligible_per_auction: 9  # All 9 providers eligible per auction
+      
+  providers:
+    count: 9  # Total 9 providers (1 adversarial + 8 honest)
+    
+    # Define honest vs adversarial groups
+    groups:
+      - type: "honest"
+        count: 8
+        agent_type: "provider_agent"  # Use normal provider
+        agent_ids: [null, null, null, null, null, null, null, null]  # null = register new agents
+        private_keys: null  # null = experiment runner generates
+        
+        config:
+          check_interval: 5  # Check blockchain every 5 seconds
+          quality_profile: "medium"  # Standard quality
+          
+        behavior:
+          auto_bid: true  # Automatically bid on detected auctions
+          auto_execute: true  # Automatically execute won services
+          auto_complete: true  # Automatically complete on blockchain
+          
+      - type: "adversarial"
+        count: 1
+        agent_type: "adversarial_provider_agent"  # Use adversarial provider
+        agent_ids: [null]  # null = register new agent
+        private_keys: null  # null = experiment runner generates
+        
+        config:
+          check_interval: 5  # Check blockchain every 5 seconds
+          
+        behavior:
+          strategy: "selective_defection"  # Bait-and-switch strategy
+          auto_bid: true  # Automatically bid on detected auctions
+          auto_execute: true  # Execute service (quality depends on phase)
+          auto_complete: true  # Complete on blockchain to collect payment
+          
+          # Strategy-specific parameters
+          reputation_threshold: 70  # Switch when reputation >= 70
+          # Phase 1 (Bait): bid_multiplier = 0.8 (underbid), use LLM (high quality)
+          # Phase 2 (Switch): bid_multiplier = 2.0 (overbid), hardcoded (low quality)
+     
+experiment_flow:
+  phases:
+    - name: "setup"
+      description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      
+    - name: "execution"
+      description: |
+        Consumer creates 75 sequential auctions; providers bid and deliver services.
+        Byzantine provider executes two-phase attack:
+        - Phase 1 (Bait): Low bids (0.8×) + high quality (LLM) → build reputation to 70+
+        - Phase 2 (Switch): High bids (2.0×) + low quality (hardcoded) → exploit reputation
+      
+    - name: "completion"
+      description: "Collect all metrics and reputation snapshots"
+      
+    - name: "analysis"
+      description: |
+        Analyze bait-and-switch effectiveness:
+        - Reputation build-up rate (auctions to reach 70)
+        - Win rate before/during/after switch
+        - Reputation decline rate post-switch
+        - Consumer reaction time (auctions to detect quality drop)
+        - Net profitability of attack strategy
+      
+metrics:
+  collect:
+    - "auction_details"
+    - "bid_amounts"
+    - "winner_selection"
+    - "service_quality"
+    - "reputation_evolution"
+    - "win_distribution"
+    - "cost_analysis"
+    - "timing_data"
+    - "phase_transitions"  # Track when Byzantine switches strategy
+    
+  analysis:
+    - "reputation_trajectory_with_phases"
+    - "win_rate_before_during_after_switch"
+    - "bid_amount_changes_over_time"
+    - "quality_score_changes_over_time"
+    - "consumer_reaction_time_to_quality_drop"
+    - "attack_profitability_analysis"
+    - "honest_provider_impact"
