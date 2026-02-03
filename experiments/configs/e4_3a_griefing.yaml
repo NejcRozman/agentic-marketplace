@@ -56,7 +56,7 @@ agents:
       service_selection: "sequential"  # Use PDFs in order
       service_complexity: "medium"
       auto_create_auction: true  # Create auction immediately on start
-      num_auctions: 50  # Create 50 sequential auctions
+      num_auctions: 5  # Create 50 sequential auctions
       auto_monitor: true  # Monitor auction automatically
       inter_auction_delay: 5  # Wait 5 seconds between auctions
       eligible_per_auction: 9  # All 9 providers eligible per auction
@@ -70,9 +70,9 @@ agents:
     # Define honest vs adversarial groups
     groups:
       - type: "honest"
-        count: 8
+        count: 5
         agent_type: "provider_agent"  # Use normal provider
-        agent_ids: [null, null, null, null, null, null, null, null]  # null = register new agents
+        agent_ids: [null, null, null, null, null]  # null = register new agents
         private_keys: null  # null = experiment runner generates
         
         config:
@@ -85,9 +85,9 @@ agents:
           auto_complete: true  # Automatically complete on blockchain
           
       - type: "adversarial"
-        count: 1
+        count: 4
         agent_type: "adversarial_provider_agent"  # Use adversarial provider
-        agent_ids: [null]  # null = register new agent
+        agent_ids: [null, null, null, null]  # null = register new agents
         private_keys: null  # null = experiment runner generates
         
         config:
@@ -109,8 +109,13 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      timeout: 60  # 1 minute to set up blockchain
       
-    - name: "execution"
+    - name: "agents_start"
+      description: "Launch consumer and provider agents (8 honest + 1 adversarial)"
+      timeout: 30  # 30 seconds for agents to initialize
+      
+    - name: "experiment_run"
       description: |
         Consumer creates 50 sequential auctions; providers bid and deliver services.
         Byzantine provider executes griefing attack:
@@ -118,49 +123,52 @@ experiment_flow:
         - Wins auctions but refuses service delivery
         - Does not complete on blockchain (no payment, no feedback)
         - Tests if system can detect and penalize non-delivery
-      
-    - name: "completion"
-      description: "Collect all metrics and reputation snapshots"
-      
-    - name: "analysis"
-      description: |
-        Analyze griefing attack effectiveness:
-        - Byzantine win rate (should be high initially due to low bids)
-        - Service completion rate (% of won auctions with delivered service)
-        - Consumer time wasted (auction duration × failed auctions)
-        - Reputation penalties for non-delivery
-        - System recovery: Does consumer re-auction or lose opportunity?
-        - Honest provider opportunities lost
-        - Attack sustainability (is it deterred by penalties?)
-      
-metrics:
-  collect:
-    - "auction_details"
-    - "bid_amounts"
-    - "winner_selection"
-    - "service_completion_rate"  # Critical metric for this attack
-    - "non_delivery_incidents"
-    - "reputation_evolution"
-    - "win_distribution"
-    - "cost_analysis"
-    - "timing_data"
-    - "consumer_time_wasted"
+      stopping_criteria:
+        type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
+        poll_interval: 5  # Check every 5 seconds
+  
+  # Reputation tracking configuration
+  reputation_snapshots:
+    enabled: true  # Take reputation snapshots after each auction
+    after_feedback: true  # Snapshot after feedback is submitted
+    include_all_providers: true  # Include all providers (honest + adversarial)
+  
+monitoring:
+  metrics:
+    - auction_created
+    - bids_received
+    - eligible_providers
+    - auction_winner
+    - service_executed
+    - service_completed
+    - service_completion_rate  # Critical metric for this attack
+    - non_delivery_incidents
+    - reputation_updated
+    - final_reputations
+    - gas_costs
+    - timing
+    - consumer_time_wasted
     
   analysis:
-    - "byzantine_win_rate_over_time"
-    - "service_completion_rate_by_provider_type"
-    - "reputation_penalties_for_non_delivery"
-    - "consumer_time_wasted_total"
-    - "honest_provider_opportunities_lost"
-    - "attack_sustainability_analysis"
-    - "system_recovery_mechanisms"
+    - byzantine_win_rate_over_time
+    - service_completion_rate_by_provider_type
+    - reputation_penalties_for_non_delivery
+    - consumer_time_wasted_total
+    - honest_provider_opportunities_lost
+    - attack_sustainability_analysis
+    - system_recovery_mechanisms
+
+  logs:
+    directory: "experiments/data/logs/e4_3a_griefing"
+    format: "json"
+    level: "INFO"
     
-  notes: |
-    Critical Success Test: Does system penalize non-delivery strongly enough?
-    - If penalties insufficient: Attack is sustainable and destructive (win rate stays high)
-    - If penalties sufficient: Byzantine reputation → 0, excluded within 5 auctions
-    
-    May require smart contract enhancement:
-    - Non-delivery detection (timeout or explicit refusal)
-    - Automatic reputation penalty for timeouts
-    - Potential re-auction mechanism for failed services
+  output:
+    directory: "experiments/data/metrics/e4_3a_griefing"
+    format: "json"
+
+api_keys:
+  # These are read from environment variables
+  google_api_key_env: "GOOGLE_API_KEY"
+  pinata_api_key_env: "PINATA_API_KEY"
+  pinata_secret_env: "PINATA_SECRET_KEY"

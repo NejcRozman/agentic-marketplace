@@ -54,7 +54,7 @@ agents:
       service_selection: "sequential"  # Use PDFs in order
       service_complexity: "medium"
       auto_create_auction: true  # Create auction immediately on start
-      num_auctions: 50  # Create 50 sequential auctions
+      num_auctions: 5  # Create 50 sequential auctions
       auto_monitor: true  # Monitor auction automatically
       inter_auction_delay: 5  # Wait 5 seconds between auctions
       eligible_per_auction: 9  # All 9 providers eligible per auction
@@ -65,9 +65,9 @@ agents:
     # Define honest vs adversarial groups
     groups:
       - type: "honest"
-        count: 8
+        count: 5
         agent_type: "provider_agent"  # Use normal provider
-        agent_ids: [null, null, null, null, null, null, null, null]  # null = register new agents
+        agent_ids: [null, null, null, null, null]  # null = register new agents
         private_keys: null  # null = experiment runner generates
         
         config:
@@ -80,9 +80,9 @@ agents:
           auto_complete: true  # Automatically complete on blockchain
           
       - type: "adversarial"
-        count: 1
+        count: 4
         agent_type: "adversarial_provider_agent"  # Use adversarial provider
-        agent_ids: [null]  # null = register new agent
+        agent_ids: [null, null, null, null]  # null = register new agents
         private_keys: null  # null = experiment runner generates
         
         config:

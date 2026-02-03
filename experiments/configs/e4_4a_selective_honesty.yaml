@@ -120,69 +120,64 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      timeout: 60  # 1 minute to set up blockchain
       
-    - name: "execution"
+    - name: "agents_start"
+      description: "Launch consumer and provider agents (8 honest + 1 adversarial)"
+      timeout: 30  # 30 seconds for agents to initialize
+      
+    - name: "experiment_run"
       description: |
         Consumer creates 50 sequential auctions with VARIED service complexity.
         Byzantine provider executes selective honesty attack:
         - Easy tasks: Deliver high quality (use LLM) to maintain reputation
         - Hard tasks: Deliver low quality (hardcoded) to save costs
         - Goal: Maintain acceptable average reputation while cheating on expensive work
-      
-    - name: "completion"
-      description: "Collect all metrics and reputation snapshots"
-      
-    - name: "analysis"
-      description: |
-        Analyze selective honesty effectiveness:
-        - Quality scores by service complexity (easy vs medium vs hard)
-        - Reputation trajectory (does mixing maintain stable reputation?)
-        - Profitability vs honest providers (does selective cheating increase profit?)
-        - Consumer detection: Correlation between task difficulty and quality
-        - Win rate by service complexity
-        - Key question: Is average reputation sufficient, or need per-task-type tracking?
-      
-metrics:
-  collect:
-    - "auction_details"
-    - "bid_amounts"
-    - "winner_selection"
-    - "service_quality"
-    - "service_complexity"  # Track which tasks were easy/medium/hard
-    - "reputation_evolution"
-    - "win_distribution"
-    - "cost_analysis"
-    - "timing_data"
-    - "quality_by_complexity"  # Critical metric for this attack
+      stopping_criteria:
+        type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
+        poll_interval: 5  # Check every 5 seconds
+  
+  # Reputation tracking configuration
+  reputation_snapshots:
+    enabled: true  # Take reputation snapshots after each auction
+    after_feedback: true  # Snapshot after feedback is submitted
+    include_all_providers: true  # Include all providers (honest + adversarial)
+  
+monitoring:
+  metrics:
+    - auction_created
+    - bids_received
+    - eligible_providers
+    - auction_winner
+    - service_executed
+    - service_completed
+    - service_complexity  # Track which tasks were easy/medium/hard
+    - reputation_updated
+    - final_reputations
+    - gas_costs
+    - timing
+    - quality_by_complexity  # Critical metric for this attack
     
   analysis:
-    - "quality_scores_by_service_complexity"
-    - "reputation_trajectory_selective_honesty"
-    - "profitability_comparison_honest_vs_byzantine"
-    - "consumer_detection_correlation"
-    - "win_rate_by_complexity"
-    - "attack_sustainability_analysis"
-    - "average_reputation_vs_per_task_tracking"
+    - quality_scores_by_service_complexity
+    - reputation_trajectory_selective_honesty
+    - profitability_comparison_honest_vs_byzantine
+    - consumer_detection_correlation
+    - win_rate_by_complexity
+    - attack_sustainability_analysis
+    - average_reputation_vs_per_task_tracking
+
+  logs:
+    directory: "experiments/data/logs/e4_4a_selective_honesty"
+    format: "json"
+    level: "INFO"
     
-  notes: |
-    Implementation Requirement: Service Complexity Variation
-    
-    Current Setup:
-    - 3 PDFs available in utils/files/ (1.txt, 2.txt, 3.txt)
-    - Consumer can randomly select subset of PDFs per auction
-    - PDF count serves as proxy for complexity
-    
-    Ideal Enhancement (Future Work):
-    - Easy: 1-2 PDFs (< 50 pages), simple factual questions
-    - Medium: 3-4 PDFs (50-150 pages), analytical questions
-    - Hard: 5-6 PDFs (150+ pages), complex synthesis questions
-    
-    Byzantine Strategy Detection:
-    - AdversarialBehaviorController checks service description for complexity indicators
-    - Current implementation: May need to parse PDF count from service request
-    - Fallback: Use bid amount as proxy (higher budget = harder task)
-    
-    Success Criteria:
-    - If selective honesty maintains reputation: Attack succeeds (need defense)
-    - If reputation drops anyway: System detects pattern and penalizes appropriately
-    - Key insight: Tests whether average reputation is sufficient metric
+  output:
+    directory: "experiments/data/metrics/e4_4a_selective_honesty"
+    format: "json"
+
+api_keys:
+  # These are read from environment variables
+  google_api_key_env: "GOOGLE_API_KEY"
+  pinata_api_key_env: "PINATA_API_KEY"
+  pinata_secret_env: "PINATA_SECRET_KEY"

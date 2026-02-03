@@ -55,7 +55,7 @@ agents:
       service_selection: "sequential"  # Use PDFs in order
       service_complexity: "medium"
       auto_create_auction: true  # Create auction immediately on start
-      num_auctions: 75  # 75 auctions (minimum for both phases)
+      num_auctions: 5  # 75 auctions (minimum for both phases)
       auto_monitor: true  # Monitor auction automatically
       inter_auction_delay: 5  # Wait 5 seconds between auctions
       eligible_per_auction: 9  # All 9 providers eligible per auction
@@ -66,9 +66,9 @@ agents:
     # Define honest vs adversarial groups
     groups:
       - type: "honest"
-        count: 8
+        count: 5
         agent_type: "provider_agent"  # Use normal provider
-        agent_ids: [null, null, null, null, null, null, null, null]  # null = register new agents
+        agent_ids: [null, null, null, null, null]  # null = register new agents
         private_keys: null  # null = experiment runner generates
         
         config:
@@ -81,9 +81,9 @@ agents:
           auto_complete: true  # Automatically complete on blockchain
           
       - type: "adversarial"
-        count: 1
+        count: 4
         agent_type: "adversarial_provider_agent"  # Use adversarial provider
-        agent_ids: [null]  # null = register new agent
+        agent_ids: [null, null, null, null]  # null = register new agent
         private_keys: null  # null = experiment runner generates
         
         config:
@@ -104,43 +104,62 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      timeout: 60  # 1 minute to set up blockchain
       
-    - name: "execution"
+    - name: "agents_start"
+      description: "Launch consumer and provider agents (8 honest + 1 adversarial)"
+      timeout: 30  # 30 seconds for agents to initialize
+      
+    - name: "experiment_run"
       description: |
         Consumer creates 75 sequential auctions; providers bid and deliver services.
         Byzantine provider executes two-phase attack:
         - Phase 1 (Bait): Low bids (0.8×) + high quality (LLM) → build reputation to 70+
         - Phase 2 (Switch): High bids (2.0×) + low quality (hardcoded) → exploit reputation
-      
-    - name: "completion"
-      description: "Collect all metrics and reputation snapshots"
-      
-    - name: "analysis"
-      description: |
-        Analyze bait-and-switch effectiveness:
-        - Reputation build-up rate (auctions to reach 70)
-        - Win rate before/during/after switch
-        - Reputation decline rate post-switch
-        - Consumer reaction time (auctions to detect quality drop)
-        - Net profitability of attack strategy
-      
-metrics:
-  collect:
-    - "auction_details"
-    - "bid_amounts"
-    - "winner_selection"
-    - "service_quality"
-    - "reputation_evolution"
-    - "win_distribution"
-    - "cost_analysis"
-    - "timing_data"
-    - "phase_transitions"  # Track when Byzantine switches strategy
+      stopping_criteria:
+        type: "completed_auctions"  # Poll consumer.get_status()['completed_auctions']
+        poll_interval: 5  # Check every 5 seconds
+  
+  # Reputation tracking configuration
+  reputation_snapshots:
+    enabled: true  # Take reputation snapshots after each auction
+    after_feedback: true  # Snapshot after feedback is submitted
+    include_all_providers: true  # Include all providers (honest + adversarial)
+  
+monitoring:
+  metrics:
+    - auction_created
+    - bids_received
+    - eligible_providers
+    - auction_winner
+    - service_executed
+    - service_completed
+    - reputation_updated
+    - final_reputations
+    - gas_costs
+    - timing
+    - phase_transitions  # Track when Byzantine switches strategy
     
   analysis:
-    - "reputation_trajectory_with_phases"
-    - "win_rate_before_during_after_switch"
-    - "bid_amount_changes_over_time"
-    - "quality_score_changes_over_time"
-    - "consumer_reaction_time_to_quality_drop"
-    - "attack_profitability_analysis"
-    - "honest_provider_impact"
+    - reputation_trajectory_with_phases
+    - win_rate_before_during_after_switch
+    - bid_amount_changes_over_time
+    - quality_score_changes_over_time
+    - consumer_reaction_time_to_quality_drop
+    - attack_profitability_analysis
+    - honest_provider_impact
+
+  logs:
+    directory: "experiments/data/logs/e4_2a_bait_and_switch"
+    format: "json"
+    level: "INFO"
+    
+  output:
+    directory: "experiments/data/metrics/e4_2a_bait_and_switch"
+    format: "json"
+
+api_keys:
+  # These are read from environment variables
+  google_api_key_env: "GOOGLE_API_KEY"
+  pinata_api_key_env: "PINATA_API_KEY"
+  pinata_secret_env: "PINATA_SECRET_KEY"
