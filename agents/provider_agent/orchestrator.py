@@ -3,7 +3,7 @@ Orchestrator for managing service execution in the agentic marketplace.
 
 The orchestrator coordinates between:
 - BlockchainHandler: Monitor auctions and handle blockchain interactions
-- LiteratureReviewAgent: Execute the actual service
+- ServiceExecutor: Execute the actual service
 - IPFS/P2P: File transfer
 
 Workflow:
@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from agents.provider_agent.blockchain_handler import BlockchainHandler
-from agents.provider_agent.literature_review import LiteratureReviewAgent
+from agents.provider_agent.service_executor import ServiceExecutor
 from agents.infrastructure.ipfs_client import IPFSClient
 from agents.config import Config
 
@@ -97,7 +97,7 @@ class Orchestrator:
         
         # Initialize agents
         self.blockchain_handler = BlockchainHandler(self.config.agent_id)
-        self.literature_agent = LiteratureReviewAgent(str(self.config.agent_id))
+        self.service_executor = ServiceExecutor(str(self.config.agent_id))
         self.ipfs_client = IPFSClient()
         
         # Job tracking
@@ -308,19 +308,19 @@ class Orchestrator:
             raise Exception(f"Failed to fetch files: {e}")
     
     async def _execute_service(self, job: Job):
-        """Execute the literature review service."""
+        """Execute the service."""
         logger.info(f"⚙️  Executing service for job {job.auction_id}")
         
         try:
-            # Execute literature review
-            result = self.literature_agent.perform_review(
+            # Execute service
+            result = self.service_executor.perform_review(
                 pdf_directory=str(job.pdf_directory),
                 prompts=job.prompts,
                 force_rebuild=True
             )
             
             if not result["success"]:
-                raise Exception(f"Literature review failed: {result.get('error')}")
+                raise Exception(f"Service execution failed: {result.get('error')}")
             
             job.result = result
             

@@ -28,7 +28,7 @@ from .infrastructure import (
     verify_feedback_auth_format
 )
 from .provider_agent import (
-    LiteratureReviewAgent,
+    ServiceExecutor,
     BlockchainHandler,
     BlockchainState
 )
@@ -47,7 +47,7 @@ __all__ = [
     "generate_feedback_auth",
     "parse_feedback_auth",
     "verify_feedback_auth_format",
-    "LiteratureReviewAgent",
+    "ServiceExecutor",
     "BlockchainHandler",
     "BlockchainState",
     "__version__"

@@ -1,5 +1,5 @@
 """
-Tests for LiteratureReviewAgent and provider agent functionality.
+Tests for ServiceExecutor and provider agent functionality.
 
 This test suite validates:
 1. Quality profile configuration: Different quality tiers set parameters correctly
@@ -9,7 +9,7 @@ Prerequisites:
 1. Valid OpenRouter API key in agents/.env (OPENROUTER_API_KEY)
 2. PDF files in utils/files/ directory
 
-Run with: python agents/tests/test_provider_literature_review.py
+Run with: python agents/tests/test_provider_service_executor.py
 """
 
 import sys
@@ -25,7 +25,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-from agents.provider_agent.literature_review import LiteratureReviewAgent
+from agents.provider_agent.service_executor import ServiceExecutor
 from agents.config import Config
 
 
@@ -163,7 +163,7 @@ class TestLiteratureReviewContextCleaning(unittest.TestCase):
     
     def setUp(self):
         """Create fresh agent for each test."""
-        self.agent = LiteratureReviewAgent(agent_id="test_context_agent")
+        self.agent = ServiceExecutor(agent_id="test_context_agent")
     
     def test_multiple_services_no_context_accumulation(self):
         """

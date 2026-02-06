@@ -73,7 +73,7 @@ class TestOrchestratorUnit(unittest.TestCase):
         
         self.assertEqual(orchestrator.config, self.mock_config)
         self.assertIsNotNone(orchestrator.blockchain_handler)
-        self.assertIsNotNone(orchestrator.literature_agent)
+        self.assertIsNotNone(orchestrator.service_executor)
         self.assertIsNotNone(orchestrator.ipfs_client)
         self.assertEqual(orchestrator.active_jobs, {})
         self.assertEqual(orchestrator.completed_jobs, [])
@@ -83,7 +83,7 @@ class TestOrchestratorUnit(unittest.TestCase):
         """Test that starting a job creates a Job object."""
         orchestrator = Orchestrator(config=self.mock_config)
         orchestrator.blockchain_handler = AsyncMock()
-        orchestrator.literature_agent = Mock()
+        orchestrator.service_executor = Mock()
         orchestrator.ipfs_client = AsyncMock()
         
         run_async(orchestrator._start_job(self.sample_auction_details))
@@ -119,8 +119,8 @@ class TestOrchestratorUnit(unittest.TestCase):
         """Test executing literature review service."""
         with TemporaryDirectory() as tmpdir:
             orchestrator = Orchestrator(config=self.mock_config)
-            orchestrator.literature_agent = Mock()
-            orchestrator.literature_agent.perform_review = Mock(return_value={
+            orchestrator.service_executor = Mock()
+            orchestrator.service_executor.perform_review = Mock(return_value={
                 "success": True,
                 "responses": ["Answer 1", "Answer 2"],
                 "agent_id": "4427"
@@ -234,7 +234,7 @@ class TestOrchestratorIntegration(unittest.TestCase):
             "responses": ["Mock answer 1", "Mock answer 2"],
             "pdf_directory": ""
         }
-        orchestrator.literature_agent.perform_review = Mock(return_value=mock_result)
+        orchestrator.service_executor.perform_review = Mock(return_value=mock_result)
         
         # Track iterations
         max_iterations = 10

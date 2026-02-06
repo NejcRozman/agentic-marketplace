@@ -27,9 +27,9 @@ class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
 
-class LiteratureReviewAgent:
+class ServiceExecutor:
     """
-    Literature Review Agent that performs RAG-based literature reviews.
+    Service Executor that performs RAG-based service execution.
     
     This agent:
     - Loads PDFs provided by clients
@@ -141,7 +141,7 @@ Keep responses concise and direct."""
         self.graph = None
         self.tools = []
         
-        logger.info(f"Initialized LiteratureReviewAgent: {agent_id} (quality: {config.quality_profile}, "
+        logger.info(f"Initialized ServiceExecutor: {agent_id} (quality: {config.quality_profile}, "
                    f"temp={config.rag_temperature}, k={config.rag_retrieval_k})")
     
     def _extract_paper_metadata(self, document: Any) -> Dict[str, str]:
