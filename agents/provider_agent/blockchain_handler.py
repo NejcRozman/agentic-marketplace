@@ -47,27 +47,89 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-class BlockchainState(TypedDict):
-    """State for blockchain agent workflow."""
+class AgentState(TypedDict):
+    """
+    State for blockchain agent workflow.
+    
+    Organized by temporal dimension (current/history/future) and parameter type
+    (performance/market/decision). Not all fields need to be populated - simpler
+    architectures can leave history/future fields empty without affecting reasoning.
+    """
+    
+    # ============================================================================
+    # WORKFLOW CONTROL (always populated)
+    # ============================================================================
     agent_id: int
     action: str  # "complete_service" or "monitor"
-    
-    # Service completion fields
-    auction_id: Optional[int]
-    client_address: Optional[str]
-    feedback_auth: Optional[bytes]
-    
-    # Monitor path - gathered state (deterministic)
-    won_auctions: List[Dict[str, Any]]  # Auctions we won with full details
-    eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on
-    
-    # Monitor path - ReAct results
-    bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
     
     # Transaction results
     tx_hash: Optional[str]
     error: Optional[str]
     messages: List[Any]
+    
+    # ============================================================================
+    # CURRENT STATE - Present moment snapshot
+    # ============================================================================
+    
+    # --- Current Market Parameters ---
+    # Active auctions and market conditions
+    eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on
+    won_auctions: List[Dict[str, Any]]  # Auctions we won (for service completion)
+    
+    # Service completion workflow (only for complete_service action)
+    auction_id: Optional[int]
+    client_address: Optional[str]
+    feedback_auth: Optional[bytes]
+    
+    # Additional market conditions (to be added)
+    # current_market_competition: Optional[float]  # How many bidders per auction
+    # current_avg_winning_bid: Optional[float]  # Average winning bid in current round
+    
+    # --- Current Performance Parameters ---
+    # Agent's current capabilities and status
+    # current_reputation: Optional[float]  # Current reputation score
+    # current_capacity: Optional[int]  # How many services can handle now
+    # current_cost_multiplier: Optional[float]  # Current cost efficiency
+    
+    # --- Current Decision Parameters ---
+    # Results of current decision cycle
+    bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
+    
+    # ============================================================================
+    # HISTORY STATE - Past observations and outcomes
+    # ============================================================================
+    # Populated only for Architecture B (minimal) and C (full)
+    
+    # --- History Performance Parameters ---
+    # past_auctions: Optional[List[Dict[str, Any]]]  # Last N auctions participated
+    # past_win_rate: Optional[float]  # Win rate over last N auctions
+    # past_avg_profit: Optional[float]  # Average profit per won auction
+    # past_reputation_trajectory: Optional[List[float]]  # Reputation over time
+    
+    # --- History Market Parameters ---
+    # past_market_prices: Optional[List[float]]  # Historical winning bids
+    # past_competition_levels: Optional[List[float]]  # Competition over time
+    
+    # --- History Decision Parameters ---
+    # past_bidding_strategy: Optional[List[str]]  # What strategies were used
+    # past_bid_outcomes: Optional[List[Dict[str, Any]]]  # Win/loss with details
+    
+    # ============================================================================
+    # FUTURE STATE - Predictions and forward-looking parameters
+    # ============================================================================
+    # Populated only for Architecture C (History-Integrated)
+    
+    # --- Future Market Parameters ---
+    # predicted_competition: Optional[float]  # Expected future competition
+    # predicted_price_trend: Optional[str]  # "increasing", "stable", "decreasing"
+    
+    # --- Future Performance Parameters ---
+    # expected_reputation_change: Optional[float]  # If we win/lose this auction
+    # expected_capacity_utilization: Optional[float]  # Future workload
+    
+    # --- Future Decision Parameters ---
+    # recommended_bid_range: Optional[Dict[str, float]]  # Min/max profitable bids
+    # risk_assessment: Optional[str]  # "low", "medium", "high"
 
 
 class BlockchainHandler:
@@ -78,11 +140,53 @@ class BlockchainHandler:
     - monitor: ReAct agent for intelligent bidding decisions
     """
     
-    def __init__(self, agent_id: int, blockchain_client: Optional[BlockchainClient] = None):
-        """Initialize the blockchain handler agent."""
+    def __init__(
+        self, 
+        agent_id: int, 
+        blockchain_client: Optional[BlockchainClient] = None,
+        system_prompt: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_temperature: Optional[float] = None,
+        llm_base_url: Optional[str] = None,
+        llm_api_key: Optional[str] = None,
+        enabled_tools: Optional[List[str]] = None
+    ):
+        """
+        Initialize the blockchain handler agent.
+        
+        Args:
+            agent_id: The agent's ID
+            blockchain_client: Optional blockchain client instance
+            system_prompt: System prompt for the ReAct agent (if None, uses default)
+            llm_model: LLM model identifier (default: openai/gpt-oss-20b)
+            llm_temperature: LLM temperature (default: 0.3)
+            llm_base_url: LLM API base URL (default: from config)
+            llm_api_key: LLM API key (default: from config)
+            enabled_tools: List of tool names to enable (if None, enables all tools)
+                Available: get_ipfs_data, get_reputation, estimate_cost, 
+                          validate_bid_profitability, place_bid
+        """
         self.agent_id = agent_id
         self.client = blockchain_client or BlockchainClient()
         self.config = config
+        
+        # System prompt configuration
+        self.system_prompt = system_prompt
+        
+        # LLM configuration (with defaults)
+        self.llm_model = llm_model or "openai/gpt-oss-20b"
+        self.llm_temperature = llm_temperature if llm_temperature is not None else 0.3
+        self.llm_base_url = llm_base_url or self.config.openrouter_base_url
+        self.llm_api_key = llm_api_key or self.config.openrouter_api_key
+        
+        # Tools configuration (if None, enable all tools)
+        self.enabled_tools = enabled_tools or [
+            "get_ipfs_data",
+            "get_reputation", 
+            "estimate_cost",
+            "validate_bid_profitability",
+            "place_bid"
+        ]
         
         self.contracts_loaded = False
         self.reverse_auction_contract = None
@@ -100,7 +204,13 @@ class BlockchainHandler:
         
         # Build the graph
         self.graph = self._build_graph()
-        logger.info(f"BlockchainHandler initialized for agent {agent_id}")
+        
+        prompt_info = "custom" if system_prompt else "default"
+        logger.info(
+            f"BlockchainHandler initialized for agent {agent_id} "
+            f"(system_prompt={prompt_info}, model={self.llm_model}, temp={self.llm_temperature}, "
+            f"tools={len(self._tools)})"
+        )
     
     def _build_tools(self) -> List:
         """Build tools for the ReAct agent."""
@@ -395,11 +505,67 @@ class BlockchainHandler:
                         "suggestion": "Review the error message and check if the auction is still active and you meet all requirements."
                     }
         
-        return [get_ipfs_data, get_reputation, estimate_cost, validate_bid_profitability, place_bid]
+        # Build tool list based on enabled_tools configuration
+        all_tools = {
+            "get_ipfs_data": get_ipfs_data,
+            "get_reputation": get_reputation,
+            "estimate_cost": estimate_cost,
+            "validate_bid_profitability": validate_bid_profitability,
+            "place_bid": place_bid
+        }
+        
+        enabled = [all_tools[name] for name in self.enabled_tools if name in all_tools]
+        
+        if len(enabled) < len(self.enabled_tools):
+            missing = set(self.enabled_tools) - set(all_tools.keys())
+            logger.warning(f"Some requested tools not found: {missing}")
+        
+        logger.info(f"Enabled tools: {[t.name for t in enabled]}")
+        return enabled
+    
+    def _get_default_system_prompt(self, auctions_context: str) -> str:
+        """
+        Generate default system prompt for the ReAct agent.
+        
+        This is used as fallback when no custom system_prompt is provided.
+        In experiments, custom prompts should be injected via config.
+        
+        Args:
+            auctions_context: JSON string of eligible auctions
+            
+        Returns:
+            Default system prompt string
+        """
+        return f"""You are a bidding agent (ID: {self.agent_id}) for a decentralized AI service marketplace.
+
+Available tools:
+- get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
+- get_reputation(agent_id): Get reputation score for an agent  
+- estimate_cost(complexity): Estimate cost to deliver a service. Pass 'low', 'medium', or 'high' based on service complexity from IPFS data
+- validate_bid_profitability(estimated_cost, proposed_bid): MANDATORY tool to check if a bid is profitable before placing it
+- place_bid(auction_id, bid_amount): Submit a bid for an auction
+
+BIDDING GUIDELINES:
+1. Analyze each auction before bidding
+2. Fetch service requirements from IPFS using get_ipfs_data
+3. Extract the 'complexity' field from service data and use it to estimate cost
+4. Use validate_bid_profitability to check if your proposed bid is profitable
+   - Pass your estimated_cost and proposed_bid to this tool
+   - Only proceed based on verdict from this tool
+5. Consider time remaining - urgent auctions may need immediate bids
+6. Check current winning bid - you need a better score to win
+7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
+8. You can bid on multiple auctions if profitable
+9. If no auctions are profitable, don't bid
+
+Current eligible auctions:
+{auctions_context}
+
+Analyze these auctions and decide which to bid on."""
     
     def _build_graph(self) -> StateGraph:
         """Build the LangGraph workflow for blockchain operations."""
-        workflow = StateGraph(BlockchainState)
+        workflow = StateGraph(AgentState)
         
         workflow.add_node("router", self._router_node)
         workflow.add_node("generate_feedback_auth", self._generate_feedback_auth_node)
@@ -459,18 +625,18 @@ class BlockchainHandler:
             logger.error(f"Failed to initialize BlockchainHandler: {e}", exc_info=True)
             return False
     
-    def _router_node(self, state: BlockchainState) -> BlockchainState:
+    def _router_node(self, state: AgentState) -> AgentState:
         """Router node - entry point that examines action field."""
         logger.info(f"🔀 Router: action={state['action']}")
         return state
     
-    def _route_action(self, state: BlockchainState) -> str:
+    def _route_action(self, state: AgentState) -> str:
         """Routing function for action field."""
         if state.get("action") == "complete_service":
             return "complete_service"
         return "monitor"
     
-    async def _generate_feedback_auth_node(self, state: BlockchainState) -> BlockchainState:
+    async def _generate_feedback_auth_node(self, state: AgentState) -> AgentState:
         """Generate ERC-8004 feedbackAuth for service completion."""
         logger.info("🔐 Generating feedbackAuth...")
         
@@ -507,7 +673,7 @@ class BlockchainHandler:
         
         return state
     
-    async def _call_complete_service_node(self, state: BlockchainState) -> BlockchainState:
+    async def _call_complete_service_node(self, state: AgentState) -> AgentState:
         """Call completeService on ReverseAuction contract."""
         logger.info("📝 Calling completeService...")
         
@@ -549,7 +715,7 @@ class BlockchainHandler:
         
         return state
     
-    async def _gather_state_node(self, state: BlockchainState) -> BlockchainState:
+    async def _gather_state_node(self, state: AgentState) -> AgentState:
         """Gather blockchain state: won auctions and active eligible auctions."""
         logger.info("📡 Gathering blockchain state...")
         
@@ -690,7 +856,7 @@ class BlockchainHandler:
         
         return state
     
-    async def _react_reasoning_node(self, state: BlockchainState) -> BlockchainState:
+    async def _react_reasoning_node(self, state: AgentState) -> AgentState:
         """Use ReAct agent to reason about bidding decisions."""
         logger.info("🤔 ReAct reasoning about auctions...")
         
@@ -707,44 +873,30 @@ class BlockchainHandler:
         try:
             auctions_context = json.dumps(eligible_auctions, indent=2)
             
-            system_prompt = f"""You are a bidding agent (ID: {self.agent_id}) for a decentralized AI service marketplace.
-
-Available tools:
-- get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
-- get_reputation(agent_id): Get reputation score for an agent  
-- estimate_cost(complexity): Estimate cost to deliver a service. Pass 'low', 'medium', or 'high' based on service complexity from IPFS data
-- validate_bid_profitability(estimated_cost, proposed_bid): MANDATORY tool to check if a bid is profitable before placing it
-- place_bid(auction_id, bid_amount): Submit a bid for an auction
-
-BIDDING GUIDELINES:
-1. Analyze each auction before bidding
-2. Fetch service requirements from IPFS using get_ipfs_data
-3. Extract the 'complexity' field from service data and use it to estimate cost
-4. Use validate_bid_profitability to check if your proposed bid is profitable
-   - Pass your estimated_cost and proposed_bid to this tool
-   - Only proceed based on verdict from this tool
-5. Consider time remaining - urgent auctions may need immediate bids
-6. Check current winning bid - you need a better score to win
-7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
-8. You can bid on multiple auctions if profitable
-9. If no auctions are profitable, don't bid
-
-Current eligible auctions:
-{auctions_context}
-
-Analyze these auctions and decide which to bid on."""
-
-            # Create ReAct agent without rate limiting (use API defaults)
+            # Use injected system_prompt or generate default
+            if self.system_prompt is not None:
+                # Use custom prompt from config
+                prompt = self.system_prompt.format(
+                    agent_id=self.agent_id,
+                    auctions_context=auctions_context
+                )
+                logger.info("Using custom system prompt from config")
+            else:
+                # Fall back to default prompt
+                prompt = self._get_default_system_prompt(auctions_context)
+                logger.info("Using default system prompt")
+            
+            # Create ReAct agent with configured LLM
             llm = ChatOpenAI(
-                model="openai/gpt-oss-20b", 
-                api_key=self.config.openrouter_api_key,
-                base_url=self.config.openrouter_base_url,
-                temperature=0.3
+                model=self.llm_model,
+                api_key=self.llm_api_key,
+                base_url=self.llm_base_url,
+                temperature=self.llm_temperature
             )
             
             react_agent = create_agent(llm, self._tools)
             
-            result = await react_agent.ainvoke({"messages": [HumanMessage(content=system_prompt)]})
+            result = await react_agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
             
             # Log the agent's reasoning trace
             logger.info("\n" + "=" * 80)
@@ -792,7 +944,7 @@ Analyze these auctions and decide which to bid on."""
         Returns:
             Dictionary with won_auctions, bids_placed, and any errors
         """
-        initial_state: BlockchainState = {
+        initial_state: AgentState = {
             "agent_id": self.agent_id,
             "action": "monitor",
             "auction_id": None,
@@ -826,7 +978,7 @@ Analyze these auctions and decide which to bid on."""
         Returns:
             Dictionary with tx_hash, feedback_auth, and any errors
         """
-        initial_state: BlockchainState = {
+        initial_state: AgentState = {
             "agent_id": self.agent_id,
             "action": "complete_service",
             "auction_id": auction_id,
