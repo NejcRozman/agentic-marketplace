@@ -46,7 +46,6 @@ class ServiceGenerator:
     async def generate_services_from_pdfs(
         self,
         pdf_dir: Path,
-        complexity: str = "medium",
         skip_processed: bool = True
     ) -> Dict[str, Any]:
         """
@@ -62,7 +61,6 @@ class ServiceGenerator:
         
         Args:
             pdf_dir: Directory containing PDF files and their abstracts
-            complexity: Service complexity level (low/medium/high)
             skip_processed: Skip PDFs already processed in this session
             
         Returns:
@@ -93,7 +91,7 @@ class ServiceGenerator:
                 continue
             
             try:
-                result = await self._generate_service_for_pdf(pdf_path, complexity)
+                result = await self._generate_service_for_pdf(pdf_path)
                 processed.append(result)
                 self.processed_pdfs.add(pdf_name)
                 logger.info(f"✓ Generated service for {pdf_name}")
@@ -115,8 +113,7 @@ class ServiceGenerator:
     
     async def _generate_service_for_pdf(
         self,
-        pdf_path: Path,
-        complexity: str
+        pdf_path: Path
     ) -> Dict[str, Any]:
         """
         Generate service description for a single PDF.
@@ -153,8 +150,6 @@ class ServiceGenerator:
             "service_type": "literature_review",
             "prompts": prompts,
             "input_files_cid": pdf_cid,
-            "complexity": complexity,
-            "expected_duration_minutes": self._estimate_duration(complexity),
             "quality_criteria": {
                 "completeness": "All prompts must be answered thoroughly",
                 "depth": "Answers should be detailed and well-supported with evidence from the paper",
@@ -167,7 +162,7 @@ class ServiceGenerator:
         service_result = await self.ipfs_client.pin_json(
             data=service_desc,
             name=f"service-{pdf_path.stem[:30]}",
-            metadata={"type": "service_description", "complexity": complexity}
+            metadata={"type": "service_description"}
         )
         
         if not service_result.success:
@@ -181,8 +176,7 @@ class ServiceGenerator:
             "pdf_cid": pdf_cid,
             "pdf_name": pdf_path.name,
             "title": service_desc["title"],
-            "prompts": prompts,
-            "complexity": complexity
+            "prompts": prompts
         }
     
     def _read_abstract(self, pdf_path: Path) -> str:
@@ -269,15 +263,6 @@ Generate 3-5 specific questions for this paper's literature review:"""
             logger.error(f"LLM generation failed: {e}")
             return self._get_default_prompts()
     
-    
-    def _estimate_duration(self, complexity: str) -> int:
-        """Estimate expected duration based on complexity."""
-        durations = {
-            "low": 20,
-            "medium": 30,
-            "high": 45
-        }
-        return durations.get(complexity, 30)
     
     def _get_default_prompts(self) -> List[str]:
         """Return default prompts as fallback."""

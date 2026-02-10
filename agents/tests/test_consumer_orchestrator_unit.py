@@ -121,13 +121,13 @@ class TestConsumerInitialization(unittest.TestCase):
                 
                 # Initialize with pdf_dir
                 test_dir = Path("/test/pdfs")
-                await consumer.initialize(pdf_dir=test_dir, complexity="high")
+                await consumer.initialize(pdf_dir=test_dir)
                 
                 # Verify blockchain handler initialized
                 consumer.blockchain_handler.initialize.assert_called_once()
                 
                 # Verify load_services called with correct params
-                consumer.load_services.assert_called_once_with(test_dir, "high")
+                consumer.load_services.assert_called_once_with(test_dir)
                 
                 print("\n✓ Initialize with pdf_dir triggered load_services")
         
@@ -208,16 +208,14 @@ class TestServiceLoading(unittest.TestCase):
                             "pdf_cid": "QmPDF1",
                             "pdf_name": "paper1.pdf",
                             "title": "Test Paper 1",
-                            "prompts": ["Q1", "Q2"],
-                            "complexity": "medium"
+                            "prompts": ["Q1", "Q2"]
                         },
                         {
                             "service_cid": "QmService2",
                             "pdf_cid": "QmPDF2",
                             "pdf_name": "paper2.pdf",
                             "title": "Test Paper 2",
-                            "prompts": ["Q3", "Q4"],
-                            "complexity": "medium"
+                            "prompts": ["Q3", "Q4"]
                         }
                     ],
                     "skipped": [],
@@ -228,7 +226,7 @@ class TestServiceLoading(unittest.TestCase):
                 
                 # Load services
                 test_dir = Path("/test/pdfs")
-                await consumer.load_services(test_dir, complexity="medium")
+                await consumer.load_services(test_dir)
                 
                 # Verify services loaded
                 self.assertEqual(len(consumer.available_services), 2)
@@ -239,7 +237,6 @@ class TestServiceLoading(unittest.TestCase):
                 # Verify generator called correctly
                 consumer.service_generator.generate_services_from_pdfs.assert_called_once_with(
                     pdf_dir=test_dir,
-                    complexity="medium",
                     skip_processed=True
                 )
                 
@@ -263,7 +260,7 @@ class TestServiceLoading(unittest.TestCase):
                 mock_result = {
                     "processed": [
                         {"service_cid": "QmService1", "pdf_cid": "QmPDF1", "pdf_name": "paper1.pdf", 
-                         "title": "Test 1", "prompts": ["Q1"], "complexity": "low"}
+                         "title": "Test 1", "prompts": ["Q1"]}
                     ],
                     "skipped": [],
                     "failed": [
@@ -273,7 +270,7 @@ class TestServiceLoading(unittest.TestCase):
                 
                 consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result)
                 
-                await consumer.load_services(Path("/test"), complexity="low")
+                await consumer.load_services(Path("/test"))
                 
                 # Verify only processed services added
                 self.assertEqual(len(consumer.available_services), 1)
@@ -303,7 +300,7 @@ class TestServiceLoading(unittest.TestCase):
                 
                 consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result)
                 
-                await consumer.load_services(Path("/test"), complexity="medium")
+                await consumer.load_services(Path("/test"))
                 
                 # Verify no services added
                 self.assertEqual(len(consumer.available_services), 0)
@@ -333,40 +330,11 @@ class TestServiceLoading(unittest.TestCase):
                 
                 consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result)
                 
-                await consumer.load_services(Path("/test/empty"), complexity="medium")
+                await consumer.load_services(Path("/test/empty"))
                 
                 self.assertEqual(len(consumer.available_services), 0)
                 
                 print("\n✓ Empty directory handled correctly")
-        
-        run_async(_test())
-    
-    def test_load_services_different_complexity_levels(self):
-        """Test loading services with different complexity levels."""
-        async def _test():
-            mock_config = Mock(spec=Config)
-            mock_config.consumer_check_interval = 10
-            
-            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
-                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
-                
-                consumer = Consumer(mock_config)
-                
-                mock_result = {"processed": [], "skipped": [], "failed": []}
-                consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result)
-                
-                # Test each complexity level
-                for complexity in ["low", "medium", "high"]:
-                    await consumer.load_services(Path("/test"), complexity=complexity)
-                    
-                    # Verify correct complexity passed
-                    calls = consumer.service_generator.generate_services_from_pdfs.call_args_list
-                    last_call = calls[-1]
-                    self.assertEqual(last_call[1]["complexity"], complexity)
-                
-                print("\n✓ All complexity levels (low/medium/high) passed correctly")
         
         run_async(_test())
     
@@ -387,13 +355,13 @@ class TestServiceLoading(unittest.TestCase):
                 mock_result1 = {
                     "processed": [
                         {"service_cid": "QmOld", "pdf_cid": "QmPDF1", "pdf_name": "old.pdf",
-                         "title": "Old", "prompts": ["Q"], "complexity": "low"}
+                         "title": "Old", "prompts": ["Q"]}
                     ],
                     "skipped": [],
                     "failed": []
                 }
                 consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result1)
-                await consumer.load_services(Path("/test"), complexity="low")
+                await consumer.load_services(Path("/test"))
                 
                 self.assertEqual(len(consumer.available_services), 1)
                 self.assertEqual(consumer.available_services[0]["service_cid"], "QmOld")
@@ -402,15 +370,15 @@ class TestServiceLoading(unittest.TestCase):
                 mock_result2 = {
                     "processed": [
                         {"service_cid": "QmNew1", "pdf_cid": "QmPDF2", "pdf_name": "new1.pdf",
-                         "title": "New 1", "prompts": ["Q"], "complexity": "medium"},
+                         "title": "New 1", "prompts": ["Q"]},
                         {"service_cid": "QmNew2", "pdf_cid": "QmPDF3", "pdf_name": "new2.pdf",
-                         "title": "New 2", "prompts": ["Q"], "complexity": "medium"}
+                         "title": "New 2", "prompts": ["Q"]}
                     ],
                     "skipped": [],
                     "failed": []
                 }
                 consumer.service_generator.generate_services_from_pdfs = AsyncMock(return_value=mock_result2)
-                await consumer.load_services(Path("/test"), complexity="medium")
+                await consumer.load_services(Path("/test"))
                 
                 # Verify cache replaced (not appended)
                 self.assertEqual(len(consumer.available_services), 2)
@@ -431,14 +399,15 @@ class TestAuctionCreation(unittest.TestCase):
         self.mock_config = Mock(spec=Config)
         self.mock_config.consumer_check_interval = 10
         self.mock_config.eligible_providers = [1, 2, 3]
+        self.mock_config.reputation_weight = 30
         
         self.sample_services = [
             {"service_cid": "QmService1", "pdf_cid": "QmPDF1", "pdf_name": "p1.pdf", 
-             "title": "Paper 1", "prompts": ["Q1"], "complexity": "medium"},
+             "title": "Paper 1", "prompts": ["Q1"]},
             {"service_cid": "QmService2", "pdf_cid": "QmPDF2", "pdf_name": "p2.pdf",
-             "title": "Paper 2", "prompts": ["Q2"], "complexity": "medium"},
+             "title": "Paper 2", "prompts": ["Q2"]},
             {"service_cid": "QmService3", "pdf_cid": "QmPDF3", "pdf_name": "p3.pdf",
-             "title": "Paper 3", "prompts": ["Q3"], "complexity": "medium"}
+             "title": "Paper 3", "prompts": ["Q3"]}
         ]
     
     def test_create_auction_auto_initialize(self):
@@ -896,6 +865,7 @@ class TestAuctionMonitoring(unittest.TestCase):
         """Set up common test fixtures."""
         self.mock_config = Mock(spec=Config)
         self.mock_config.consumer_check_interval = 10
+        self.mock_config.reputation_weight = 30
     
     def test_monitor_auctions_not_initialized(self):
         """Test monitoring skips when blockchain not initialized."""

@@ -56,7 +56,6 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
                 "depth": "Detailed explanations with examples",
                 "clarity": "Clear and well-structured responses"
             },
-            "complexity": "medium",
             "service_type": "literature_review"
         }
         
@@ -131,7 +130,6 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
         self.assertEqual(len(result["pairs"]), 2)
         self.assertEqual(result["pairs"][0]["prompt"], "What are the main quantum computing paradigms?")
         self.assertIn("completeness", result["quality_criteria"])
-        self.assertEqual(result["complexity"], "medium")
         self.assertEqual(result["service_type"], "literature_review")
         
         print("\n✓ Extract tool successfully extracted 2 prompt-response pairs")
@@ -647,7 +645,6 @@ class TestServiceEvaluatorIntegration(unittest.TestCase):
                     "accuracy": "Scientifically correct information",
                     "clarity": "Clear and well-structured"
                 },
-                "complexity": "medium",
                 "service_type": "literature_review"
             }
             
@@ -705,8 +702,7 @@ class TestServiceEvaluatorIntegration(unittest.TestCase):
                 "quality_criteria": {
                     "completeness": "All prompts answered comprehensively",
                     "depth": "Detailed technical explanations"
-                },
-                "complexity": "medium"
+                }
             }
             
             # Poor quality responses

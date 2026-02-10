@@ -45,17 +45,18 @@ class TestServiceGeneratorUnit(unittest.TestCase):
     def setUp(self):
         """Set up test fixtures with mocks."""
         self.mock_config = Mock(spec=Config)
-        self.mock_config.google_api_key = "test-api-key"
+        self.mock_config.openrouter_api_key = "test-api-key"
+        self.mock_config.openrouter_base_url = "https://openrouter.ai/api/v1"
         
         # Create generator with mocked LLM
-        with patch('agents.consumer_agent.service_generator.ChatGoogleGenerativeAI'):
+        with patch('agents.consumer_agent.service_generator.ChatOpenAI'):
             self.generator = ServiceGenerator(self.mock_config)
             self.generator.model = Mock()
             self.generator.ipfs_client = AsyncMock(spec=IPFSClient)
     
     def test_initialization(self):
         """Test ServiceGenerator initializes correctly."""
-        with patch('agents.consumer_agent.service_generator.ChatGoogleGenerativeAI'):
+        with patch('agents.consumer_agent.service_generator.ChatOpenAI'):
             generator = ServiceGenerator(self.mock_config)
             
             self.assertEqual(generator.config, self.mock_config)
@@ -107,15 +108,6 @@ class TestServiceGeneratorUnit(unittest.TestCase):
             
             self.assertIn("Abstract file is empty", str(cm.exception))
             print("\n✓ ValueError raised for empty abstract")
-    
-    def test_estimate_duration(self):
-        """Test duration estimation based on complexity."""
-        self.assertEqual(self.generator._estimate_duration("low"), 20)
-        self.assertEqual(self.generator._estimate_duration("medium"), 30)
-        self.assertEqual(self.generator._estimate_duration("high"), 45)
-        self.assertEqual(self.generator._estimate_duration("unknown"), 30)  # Default
-        
-        print("\n✓ Duration estimates correct for all complexity levels")
     
     def test_get_default_prompts(self):
         """Test default prompts fallback."""
@@ -229,13 +221,12 @@ class TestServiceGeneratorUnit(unittest.TestCase):
                     return_value=IPFSUploadResult(success=True, cid="QmService456", error=None)
                 )
                 
-                result = await self.generator._generate_service_for_pdf(pdf_path, "medium")
+                result = await self.generator._generate_service_for_pdf(pdf_path)
                 
                 # Verify result structure
                 self.assertEqual(result["service_cid"], "QmService456")
                 self.assertEqual(result["pdf_cid"], "QmPDF123")
                 self.assertEqual(result["pdf_name"], "test.pdf")
-                self.assertEqual(result["complexity"], "medium")
                 self.assertEqual(len(result["prompts"]), 2)
                 
                 # Verify IPFS was called
@@ -268,7 +259,7 @@ class TestServiceGeneratorUnit(unittest.TestCase):
                 )
                 
                 with self.assertRaises(Exception) as cm:
-                    await self.generator._generate_service_for_pdf(pdf_path, "medium")
+                    await self.generator._generate_service_for_pdf(pdf_path)
                 
                 self.assertIn("Failed to upload PDF", str(cm.exception))
                 print("\n✓ PDF upload failure handled correctly")
@@ -448,7 +439,7 @@ class TestServiceGeneratorIntegration(unittest.TestCase):
             from agents.config import config
             
             # Skip if API keys not configured
-            if not config.google_api_key or not (
+            if not config.openrouter_api_key or not (
                 config.pinata_jwt or (config.pinata_api_key and config.pinata_api_secret)
             ):
                 print("\n⏭️  Skipping integration test: API keys not configured")
@@ -458,7 +449,7 @@ class TestServiceGeneratorIntegration(unittest.TestCase):
             
             test_dir = Path(__file__).parent.parent.parent / "utils" / "files"
             
-            results = await generator.generate_services_from_pdfs(test_dir, complexity="medium")
+            results = await generator.generate_services_from_pdfs(test_dir)
             
             self.assertGreater(len(results["processed"]), 0)
             

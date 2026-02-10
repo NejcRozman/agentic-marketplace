@@ -100,7 +100,7 @@ class TestLoadAndCreateAuction(unittest.TestCase):
             
             # Initialize with PDF directory
             test_dir = Path(__file__).parent.parent.parent / "utils" / "files"
-            await consumer.initialize(pdf_dir=test_dir, complexity="low")
+            await consumer.initialize(pdf_dir=test_dir)
             
             # Verify services loaded
             self.assertGreater(len(consumer.available_services), 0)
@@ -176,8 +176,7 @@ class TestEvaluateRealResult(unittest.TestCase):
                     "completeness": "All prompts answered comprehensively",
                     "depth": "Detailed explanations with examples",
                     "clarity": "Clear and well-structured"
-                },
-                "complexity": "medium"
+                }
             })
             
             # High quality result
@@ -258,8 +257,7 @@ class TestMonitoringWithBlockchain(unittest.TestCase):
                 "pdf_cid": "QmPDF123",
                 "pdf_name": "test.pdf",
                 "title": "Test Service",
-                "prompts": ["Q1"],
-                "complexity": "low"
+                "prompts": ["Q1"]
             }]
             
             auction_id = await consumer.create_auction(
@@ -346,7 +344,7 @@ class TestMultipleServicesSequential(unittest.TestCase):
             consumer = Consumer(config)
             test_dir = Path(__file__).parent.parent.parent / "utils" / "files"
             
-            await consumer.initialize(pdf_dir=test_dir, complexity="low")
+            await consumer.initialize(pdf_dir=test_dir)
             
             num_services = len(consumer.available_services)
             self.assertGreater(num_services, 0)

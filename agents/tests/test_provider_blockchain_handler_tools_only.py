@@ -61,12 +61,7 @@ async def test_tools():
     print("\n3. Testing estimate_cost...")
     estimated_cost = None
     try:
-        # Get IPFS data first to check complexity
-        ipfs_data = await tool_map["get_ipfs_data"].ainvoke({"cid": "Qmc2Xruh3gcKCxo8FiNXMox5jj3wQS12s5YQnxNkM542AS"})
-        complexity = ipfs_data.get("complexity", "medium")
-        result = await tool_map["estimate_cost"].ainvoke({
-            "complexity": complexity
-        })
+        result = await tool_map["estimate_cost"].ainvoke({})
         print(f"✅ Success: {result}")
         # Extract cost for use in next test
         if isinstance(result, dict) and "estimated_cost" in result:

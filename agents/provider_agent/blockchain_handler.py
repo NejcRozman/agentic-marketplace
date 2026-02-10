@@ -94,11 +94,11 @@ class AgentState(TypedDict):
     # --- Current Decision Parameters ---
     # Results of current decision cycle
     bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
+    reasoning_mode: Optional[str]  # "deterministic" or "llm_react" (for tracking)
     
     # ============================================================================
     # HISTORY STATE - Past observations and outcomes
     # ============================================================================
-    # Populated only for Architecture B (minimal) and C (full)
     
     # --- History Performance Parameters ---
     # past_auctions: Optional[List[Dict[str, Any]]]  # Last N auctions participated
@@ -117,7 +117,6 @@ class AgentState(TypedDict):
     # ============================================================================
     # FUTURE STATE - Predictions and forward-looking parameters
     # ============================================================================
-    # Populated only for Architecture C (History-Integrated)
     
     # --- Future Market Parameters ---
     # predicted_competition: Optional[float]  # Expected future competition
@@ -149,7 +148,8 @@ class BlockchainHandler:
         llm_temperature: Optional[float] = None,
         llm_base_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
-        enabled_tools: Optional[List[str]] = None
+        enabled_tools: Optional[List[str]] = None,
+        reasoning_mode: str = "llm_react"
     ):
         """
         Initialize the blockchain handler agent.
@@ -165,10 +165,16 @@ class BlockchainHandler:
             enabled_tools: List of tool names to enable (if None, enables all tools)
                 Available: get_ipfs_data, get_reputation, estimate_cost, 
                           validate_bid_profitability, place_bid
+            reasoning_mode: "deterministic" or "llm_react" (default: llm_react)
         """
         self.agent_id = agent_id
         self.client = blockchain_client or BlockchainClient()
         self.config = config
+        
+        # Reasoning mode configuration
+        if reasoning_mode not in ["deterministic", "llm_react"]:
+            raise ValueError(f"Invalid reasoning_mode: {reasoning_mode}. Must be 'deterministic' or 'llm_react'")
+        self.reasoning_mode = reasoning_mode
         
         # System prompt configuration
         self.system_prompt = system_prompt
@@ -208,13 +214,17 @@ class BlockchainHandler:
         prompt_info = "custom" if system_prompt else "default"
         logger.info(
             f"BlockchainHandler initialized for agent {agent_id} "
-            f"(system_prompt={prompt_info}, model={self.llm_model}, temp={self.llm_temperature}, "
-            f"tools={len(self._tools)})"
+            f"(reasoning_mode={self.reasoning_mode}, system_prompt={prompt_info}, "
+            f"model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
         )
     
     def _build_tools(self) -> List:
         """Build tools for the ReAct agent."""
         handler = self
+
+        # ============================================================================
+        # EPISTEMIC TOOLS - Provide information about the world to the agent
+        # ============================================================================        
         
         @tool
         def get_ipfs_data(cid: str) -> Dict[str, Any]:
@@ -272,47 +282,34 @@ class BlockchainHandler:
             except Exception as e:
                 return {"error": str(e), "rating": 50, "feedback_count": 0}
         
+        
+        # ============================================================================
+        # OPERATIONAL TOOLS - perform operation LLM is bad at
+        # ============================================================================
+        
+
         @tool
-        def estimate_cost(complexity: str = "medium") -> Dict[str, Any]:
-            """Estimate cost to deliver a service based on complexity.
+        def estimate_cost() -> Dict[str, Any]:
+            """Estimate cost to deliver a service.
             
-            Args:
-                complexity: Service complexity level - 'low', 'medium', or 'high'
-                
+            Returns base cost from configuration. More sophisticated cost estimation
+            strategies can be implemented in future versions.
+            
             Returns:
-                Dictionary with estimated cost and confidence
+                Dictionary with estimated cost
             """
             try:
-                # Normalize complexity string
-                complexity = str(complexity).lower().strip()
-                if complexity not in ["low", "medium", "high"]:
-                    logger.warning(f"Invalid complexity '{complexity}', defaulting to 'medium'")
-                    complexity = "medium"
-                
-                # Get base cost from config (supports quality tiers)
+                # Get base cost from config
                 base_cost = self.config.bidding_base_cost  # In USDC
+                estimated = int(base_cost * 1e6)  # Convert to wei-like format (6 decimals)
                 
-                multipliers = {"low": 0.7, "medium": 1.0, "high": 1.5}
-                multiplier = multipliers.get(complexity, 1.0)
-                
-                estimated = int(base_cost * multiplier * 1e6)  # Convert to wei-like format
-                
-                return {"estimated_cost": estimated, "confidence": 0.7, "complexity": complexity}
+                return {"estimated_cost": estimated}
             except Exception as e:
-                return {"error": str(e), "estimated_cost": 0, "confidence": 0}
+                return {"error": str(e), "estimated_cost": 0}
         
         @tool
         def validate_bid_profitability(estimated_cost: int, proposed_bid: int) -> Dict[str, Any]:
             """Check if a proposed bid is profitable compared to estimated cost.
-            
-            CRITICAL: Always use this tool before placing a bid to ensure profitability.
-            
-            IMPORTANT: Loss-leading strategy for reputation building:
-            - If you have LOW reputation (< 3 feedback), accepting UNPROFITABLE bids 
-              can be a strategic investment to build your reputation
-            - Once you build reputation, you gain competitive advantage in future auctions
-            - Consider: Would you rather make 0 profit with 0 reputation, or lose some money 
-              now to build reputation and win more profitable jobs later?
             
             Args:
                 estimated_cost: Your estimated cost to deliver the service (in USDC with 6 decimals, e.g., 50000000 = 50 USDC)
@@ -337,42 +334,10 @@ class BlockchainHandler:
                     margin_percent = 0
                     loss_percent = 0
                 
-                # Calculate suggested minimum bid
-                suggested_min_bid = estimated_cost + 1000000  # Add 1 USDC profit
                 
-                # Strategic analysis based on reputation
+                # Reputation context (for reasoning layer to use)
                 is_newcomer = feedback_count < 3
                 has_low_reputation = current_rating < 70 and feedback_count > 0
-                
-                # Create clear verdict with strategic context
-                if is_profitable:
-                    if margin_percent < 5:
-                        verdict = "⚠️ MARGINALLY PROFITABLE - Low profit margin"
-                    else:
-                        verdict = "✅ PROFITABLE - Good margin"
-                    strategic_note = "Direct profit. No reputation investment needed."
-                else:
-                    # Unprofitable - provide strategic analysis
-                    if is_newcomer:
-                        if loss_percent <= 30:
-                            verdict = "💡 STRATEGIC LOSS-LEADING - Acceptable for reputation building"
-                            strategic_note = f"You have {feedback_count} reviews. Investing {abs(profit/1e6):.1f} USDC (loss) to build reputation could win future profitable auctions. CONSIDER ACCEPTING."
-                        elif loss_percent <= 50:
-                            verdict = "⚠️ RISKY LOSS-LEADING - High loss for reputation building"
-                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC is significant. Only accept if you believe reputation will unlock much higher-paying jobs."
-                        else:
-                            verdict = "❌ UNPROFITABLE - Loss too large even for reputation building"
-                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC ({loss_percent:.1f}%) is excessive. Not worth it even for reputation."
-                    elif has_low_reputation:
-                        if loss_percent <= 20:
-                            verdict = "💡 REPUTATION RECOVERY - Small loss may help improve low rating"
-                            strategic_note = f"Your rating is {current_rating}/100. Small loss of {abs(profit/1e6):.1f} USDC could help recover reputation."
-                        else:
-                            verdict = "❌ UNPROFITABLE - Loss too large for recovery strategy"
-                            strategic_note = f"Loss of {abs(profit/1e6):.1f} USDC is too much for reputation recovery."
-                    else:
-                        verdict = "❌ UNPROFITABLE - You have good reputation, don't accept losses"
-                        strategic_note = f"With {feedback_count} reviews at {current_rating}/100 rating, you should not accept unprofitable jobs."
                 
                 return {
                     "is_profitable": is_profitable,
@@ -380,25 +345,25 @@ class BlockchainHandler:
                     "proposed_bid": proposed_bid,
                     "profit": profit,
                     "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
-                    "verdict": verdict,
-                    "strategic_note": strategic_note,
                     "reputation_context": {
                         "feedback_count": feedback_count,
                         "current_rating": current_rating,
                         "is_newcomer": is_newcomer,
                         "has_low_reputation": has_low_reputation
                     },
-                    "recommendation": f"Bid at least {suggested_min_bid/1e6:.1f} USDC to ensure profit" if is_profitable else f"Current bid results in {abs(profit/1e6):.1f} USDC loss. {strategic_note}",
-                    "math_check": f"{proposed_bid/1e6:.1f} (bid) - {estimated_cost/1e6:.1f} (cost) = {profit/1e6:.1f} USDC ({'profit' if profit >= 0 else 'LOSS'})"
+                    "summary": f"{proposed_bid/1e6:.1f} USDC bid - {estimated_cost/1e6:.1f} USDC cost = {profit/1e6:.1f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.1f}%)"
                 }
             except Exception as e:
                 logger.error(f"validate_bid_profitability failed: {e}")
                 return {
                     "error": str(e),
-                    "verdict": "ERROR - Could not validate profitability",
-                    "recommendation": "Do not bid until validation succeeds"
+                    "is_profitable": False
                 }
-        
+
+        # ============================================================================
+        # ACTUATION TOOLS - perform actions that affect the world (e.g., placing bids)
+        # ============================================================================
+                
         @tool
         def place_bid(auction_id: int, bid_amount: int) -> Dict[str, Any]:
             """Submit a bid for an auction on the blockchain.
@@ -536,22 +501,30 @@ class BlockchainHandler:
         Returns:
             Default system prompt string
         """
+        # Dynamically generate tool descriptions based on enabled tools
+        tool_descriptions = {
+            "get_ipfs_data": "get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid",
+            "get_reputation": "get_reputation(agent_id): Get reputation score for an agent",
+            "estimate_cost": "estimate_cost(): Estimate base cost to deliver a service",
+            "validate_bid_profitability": "validate_bid_profitability(estimated_cost, proposed_bid): Check if a bid is profitable (returns profit/loss calculations)",
+            "place_bid": "place_bid(auction_id, bid_amount): Submit a bid for an auction"
+        }
+        
+        enabled_tool_descs = [f"- {tool_descriptions[name]}" for name in self.enabled_tools if name in tool_descriptions]
+        tools_section = "\n".join(enabled_tool_descs)
+        
         return f"""You are a bidding agent (ID: {self.agent_id}) for a decentralized AI service marketplace.
 
 Available tools:
-- get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid
-- get_reputation(agent_id): Get reputation score for an agent  
-- estimate_cost(complexity): Estimate cost to deliver a service. Pass 'low', 'medium', or 'high' based on service complexity from IPFS data
-- validate_bid_profitability(estimated_cost, proposed_bid): MANDATORY tool to check if a bid is profitable before placing it
-- place_bid(auction_id, bid_amount): Submit a bid for an auction
+{tools_section}
 
 BIDDING GUIDELINES:
 1. Analyze each auction before bidding
-2. Fetch service requirements from IPFS using get_ipfs_data
-3. Extract the 'complexity' field from service data and use it to estimate cost
+2. Fetch service requirements from IPFS using get_ipfs_data to understand the task
+3. Use estimate_cost to get the base cost estimate
 4. Use validate_bid_profitability to check if your proposed bid is profitable
    - Pass your estimated_cost and proposed_bid to this tool
-   - Only proceed based on verdict from this tool
+   - Review the profitability analysis before deciding
 5. Consider time remaining - urgent auctions may need immediate bids
 6. Check current winning bid - you need a better score to win
 7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
@@ -571,7 +544,7 @@ Analyze these auctions and decide which to bid on."""
         workflow.add_node("generate_feedback_auth", self._generate_feedback_auth_node)
         workflow.add_node("call_complete_service", self._call_complete_service_node)
         workflow.add_node("gather_state", self._gather_state_node)
-        workflow.add_node("react_reasoning", self._react_reasoning_node)
+        workflow.add_node("reasoning", self._reasoning_node)
         
         workflow.set_entry_point("router")
         
@@ -583,8 +556,8 @@ Analyze these auctions and decide which to bid on."""
         
         workflow.add_edge("generate_feedback_auth", "call_complete_service")
         workflow.add_edge("call_complete_service", END)
-        workflow.add_edge("gather_state", "react_reasoning")
-        workflow.add_edge("react_reasoning", END)
+        workflow.add_edge("gather_state", "reasoning")
+        workflow.add_edge("reasoning", END)
         
         return workflow.compile()
     
@@ -856,7 +829,107 @@ Analyze these auctions and decide which to bid on."""
         
         return state
     
-    async def _react_reasoning_node(self, state: AgentState) -> AgentState:
+    async def _reasoning_node(self, state: AgentState) -> AgentState:
+        """Route to appropriate reasoning strategy based on reasoning_mode."""
+        if self.reasoning_mode == "deterministic":
+            return await self._deterministic_reasoning(state)
+        else:
+            return await self._llm_react_reasoning(state)
+    
+    async def _deterministic_reasoning(self, state: AgentState) -> AgentState:
+        """Deterministic bidding strategy: bid = cost × markup."""
+        logger.info("🎯 Using deterministic reasoning (fixed strategy)")
+        
+        eligible_auctions = state.get("eligible_active_auctions", [])
+        
+        if not eligible_auctions:
+            logger.info("No eligible auctions to consider")
+            state["bids_placed"] = []
+            return state
+        
+        # Reset bids tracker
+        self._bids_placed = []
+        
+        try:
+            # Fixed markup strategy: bid = cost × 1.3 (30% profit margin)
+            markup = 1.3
+            
+            for auction in eligible_auctions:
+                auction_id = auction["auction_id"]
+                max_price = auction["max_price"]
+                
+                # Estimate cost using base cost
+                base_cost = self.config.bidding_base_cost
+                estimated_cost = int(base_cost * 1e6)  # Convert to 6 decimals
+                
+                # Calculate bid with fixed markup
+                bid_amount = int(estimated_cost * markup)
+                
+                # Check if bid is within max_price
+                if bid_amount > max_price:
+                    logger.info(
+                        f"⏭️ Skipping auction {auction_id}: bid {bid_amount} exceeds max_price {max_price}"
+                    )
+                    continue
+                
+                # Check profitability (should always be profitable with fixed markup)
+                profit = bid_amount - estimated_cost
+                profit_margin = (profit / estimated_cost) * 100
+                
+                logger.info(
+                    f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.1f} USDC, "
+                    f"bid={bid_amount/1e6:.1f} USDC, margin={profit_margin:.1f}%"
+                )
+                
+                # Place bid
+                try:
+                    estimated_gas = await self.client.estimate_gas(
+                        "ReverseAuction",
+                        "placeBid",
+                        auction_id,
+                        bid_amount,
+                        self.agent_id
+                    )
+                    
+                    tx_hash = await self.client.send_transaction(
+                        "ReverseAuction",
+                        "placeBid",
+                        auction_id,
+                        bid_amount,
+                        self.agent_id,
+                        gas_limit=estimated_gas + 50000
+                    )
+                    
+                    receipt = await self.client.wait_for_transaction(tx_hash)
+                    
+                    if receipt['status'] == 1:
+                        logger.info(f"✅ Bid placed successfully: {tx_hash}")
+                        result = {
+                            "success": True,
+                            "tx_hash": tx_hash,
+                            "auction_id": auction_id,
+                            "bid_amount": bid_amount,
+                            "block_number": receipt['blockNumber']
+                        }
+                        self._bids_placed.append(result)
+                    else:
+                        logger.warning(f"❌ Bid transaction failed for auction {auction_id}")
+                        
+                except Exception as e:
+                    logger.error(f"Error placing bid on auction {auction_id}: {e}")
+                    continue
+            
+            state["bids_placed"] = self._bids_placed
+            logger.info(f"✅ Deterministic reasoning completed: {len(self._bids_placed)} bids placed")
+            
+        except Exception as e:
+            logger.error(f"Error in deterministic reasoning: {e}")
+            state["error"] = str(e)
+            state["bids_placed"] = []
+        
+        return state
+    
+    async def _llm_react_reasoning(self, state: AgentState) -> AgentState:
         """Use ReAct agent to reason about bidding decisions."""
         logger.info("🤔 ReAct reasoning about auctions...")
         
@@ -953,6 +1026,7 @@ Analyze these auctions and decide which to bid on."""
             "won_auctions": [],
             "eligible_active_auctions": [],
             "bids_placed": [],
+            "reasoning_mode": self.reasoning_mode,
             "tx_hash": None,
             "error": None,
             "messages": []
@@ -987,6 +1061,7 @@ Analyze these auctions and decide which to bid on."""
             "won_auctions": [],
             "eligible_active_auctions": [],
             "bids_placed": [],
+            "reasoning_mode": self.reasoning_mode,
             "tx_hash": None,
             "error": None,
             "messages": []

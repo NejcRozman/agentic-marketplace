@@ -63,8 +63,7 @@ class TestOrchestratorUnit(unittest.TestCase):
                 "What is the main topic?",
                 "What are the key findings?"
             ],
-            "input_files_cid": "QmTestPDFCID456",
-            "complexity": "medium"
+            "input_files_cid": "QmTestPDFCID456"
         }
     
     def test_orchestrator_initialization(self):

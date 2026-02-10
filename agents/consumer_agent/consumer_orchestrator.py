@@ -113,12 +113,11 @@ class Consumer:
         
         logger.info(f"Consumer initialized")
     
-    async def initialize(self, pdf_dir: Optional[Path] = None, complexity: str = "medium"):
+    async def initialize(self, pdf_dir: Optional[Path] = None):
         """Initialize blockchain connections and contracts. Pre-generate services if PDF directory provided.
         
         Args:
             pdf_dir: Optional directory containing PDFs to generate services from
-            complexity: Service complexity level (low/medium/high)
         """
         logger.info("Initializing consumer components...")
         
@@ -128,22 +127,20 @@ class Consumer:
         
         # Pre-generate services from PDFs if directory provided
         if pdf_dir:
-            await self.load_services(pdf_dir, complexity)
+            await self.load_services(pdf_dir)
         
         logger.info("✅ Consumer initialized successfully")
     
-    async def load_services(self, pdf_dir: Path, complexity: str = "medium"):
+    async def load_services(self, pdf_dir: Path):
         """Pre-generate all services from PDF directory.
         
         Args:
             pdf_dir: Directory containing PDF files with corresponding .txt abstracts
-            complexity: Service complexity level (low/medium/high)
         """
         logger.info(f"📚 Loading services from {pdf_dir}...")
         
         result = await self.service_generator.generate_services_from_pdfs(
             pdf_dir=pdf_dir,
-            complexity=complexity,
             skip_processed=True
         )
         

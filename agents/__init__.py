@@ -30,7 +30,7 @@ from .infrastructure import (
 from .provider_agent import (
     ServiceExecutor,
     BlockchainHandler,
-    BlockchainState
+    AgentState
 )
 
 __all__ = [
@@ -49,6 +49,6 @@ __all__ = [
     "verify_feedback_auth_format",
     "ServiceExecutor",
     "BlockchainHandler",
-    "BlockchainState",
+    "AgentState",
     "__version__"
 ]
