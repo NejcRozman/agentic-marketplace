@@ -32,6 +32,7 @@ try:
     )
     from ..infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
     from ..infrastructure.ipfs_client import IPFSClient
+    from ..infrastructure.cost_tracker import CostTracker, LLMCostCallback
     from ..config import config
 except ImportError:
     from infrastructure.blockchain_client import BlockchainClient
@@ -42,10 +43,12 @@ except ImportError:
     )
     from infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
     from infrastructure.ipfs_client import IPFSClient
+    from infrastructure.cost_tracker import CostTracker, LLMCostCallback
     from config import Config
     config = Config()
 
 logger = logging.getLogger(__name__)
+
 
 class AgentState(TypedDict):
     """
@@ -149,7 +152,8 @@ class BlockchainHandler:
         llm_base_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        reasoning_mode: str = "llm_react"
+        reasoning_mode: str = "llm_react",
+        cost_tracker: Optional[CostTracker] = None
     ):
         """
         Initialize the blockchain handler agent.
@@ -166,6 +170,7 @@ class BlockchainHandler:
                 Available: get_ipfs_data, get_reputation, estimate_cost, 
                           validate_bid_profitability, place_bid
             reasoning_mode: "deterministic" or "llm_react" (default: llm_react)
+            cost_tracker: Optional CostTracker instance (creates new if None)
         """
         self.agent_id = agent_id
         self.client = blockchain_client or BlockchainClient()
@@ -180,7 +185,7 @@ class BlockchainHandler:
         self.system_prompt = system_prompt
         
         # LLM configuration (with defaults)
-        self.llm_model = llm_model or "openai/gpt-oss-20b"
+        self.llm_model = llm_model or self.config.llm_model
         self.llm_temperature = llm_temperature if llm_temperature is not None else 0.3
         self.llm_base_url = llm_base_url or self.config.openrouter_base_url
         self.llm_api_key = llm_api_key or self.config.openrouter_api_key
@@ -198,6 +203,9 @@ class BlockchainHandler:
         self.reverse_auction_contract = None
         self.identity_registry_contract = None
         self.reputation_registry_contract = None
+        
+        # Cost tracking (create new if not provided)
+        self.cost_tracker = cost_tracker or CostTracker(agent_id=agent_id, config=self.config)
         
         # Block tracking - persists across invocations
         self._last_processed_block: int = 0
@@ -398,6 +406,15 @@ class BlockchainHandler:
                 receipt = asyncio.run(handler.client.wait_for_transaction(tx_hash))
                 
                 if receipt['status'] == 1:
+                    # Track gas cost
+                    gas_used = receipt.get('gasUsed', 0)
+                    gas_price_wei = receipt.get('effectiveGasPrice', 0)
+                    handler.cost_tracker.add_gas_cost(
+                        gas_used=gas_used,
+                        gas_price_wei=gas_price_wei,
+                        context="place_bid"
+                    )
+                    
                     logger.info(f"✅ Bid placed successfully: {tx_hash}")
                     result = {
                         "success": True,
@@ -677,6 +694,31 @@ Analyze these auctions and decide which to bid on."""
             receipt = await self.client.wait_for_transaction(tx_hash)
             
             if receipt['status'] == 1:
+                # Track gas cost
+                gas_used = receipt.get('gasUsed', 0)
+                gas_price_wei = receipt.get('effectiveGasPrice', 0)
+                self.cost_tracker.add_gas_cost(
+                    gas_used=gas_used,
+                    gas_price_wei=gas_price_wei,
+                    context="complete_service"
+                )
+                
+                # Track revenue from winning auction
+                auction_data = await self.client.call_contract(
+                    "ReverseAuction",
+                    "auctions",
+                    auction_id
+                )
+                winning_bid = auction_data[3]  # winningBid field
+                revenue_usd = winning_bid / 1e6  # Convert from 6 decimals to USD
+                
+                self.cost_tracker.add_revenue(
+                    revenue_usd=revenue_usd,
+                    context=f"auction_{auction_id}"
+                )
+                
+                logger.info(f"💰 Revenue from auction {auction_id}: ${revenue_usd:.2f} USD")
+                
                 state["tx_hash"] = tx_hash
                 logger.info(f"✅ Service completed: {tx_hash}")
             else:
@@ -903,6 +945,15 @@ Analyze these auctions and decide which to bid on."""
                     receipt = await self.client.wait_for_transaction(tx_hash)
                     
                     if receipt['status'] == 1:
+                        # Track gas cost
+                        gas_used = receipt.get('gasUsed', 0)
+                        gas_price_wei = receipt.get('effectiveGasPrice', 0)
+                        self.cost_tracker.add_gas_cost(
+                            gas_used=gas_used,
+                            gas_price_wei=gas_price_wei,
+                            context="place_bid"
+                        )
+                        
                         logger.info(f"✅ Bid placed successfully: {tx_hash}")
                         result = {
                             "success": True,
@@ -959,12 +1010,19 @@ Analyze these auctions and decide which to bid on."""
                 prompt = self._get_default_system_prompt(auctions_context)
                 logger.info("Using default system prompt")
             
-            # Create ReAct agent with configured LLM
+            # Create ReAct agent with configured LLM and cost tracking
+            callback = LLMCostCallback(
+                cost_tracker=self.cost_tracker,
+                model=self.llm_model,
+                config=self.config
+            )
+            
             llm = ChatOpenAI(
                 model=self.llm_model,
                 api_key=self.llm_api_key,
                 base_url=self.llm_base_url,
-                temperature=self.llm_temperature
+                temperature=self.llm_temperature,
+                callbacks=[callback]
             )
             
             react_agent = create_agent(llm, self._tools)
@@ -1033,6 +1091,9 @@ Analyze these auctions and decide which to bid on."""
         }
         
         result = await self.graph.ainvoke(initial_state)
+        
+        # Log cost summary after monitoring cycle
+        self.cost_tracker.log_summary()
         
         return {
             "won_auctions": result.get("won_auctions", []),

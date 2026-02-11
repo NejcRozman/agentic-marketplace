@@ -30,6 +30,7 @@ from datetime import datetime
 from agents.provider_agent.blockchain_handler import BlockchainHandler
 from agents.provider_agent.service_executor import ServiceExecutor
 from agents.infrastructure.ipfs_client import IPFSClient
+from agents.infrastructure.cost_tracker import CostTracker
 from agents.config import Config
 
 # No global config instance needed for provider
@@ -95,9 +96,18 @@ class Orchestrator:
         """Initialize the orchestrator."""
         self.config = config or Config()
         
-        # Initialize agents
-        self.blockchain_handler = BlockchainHandler(self.config.agent_id)
-        self.service_executor = ServiceExecutor(str(self.config.agent_id))
+        # Create shared cost tracker for all components
+        self.cost_tracker = CostTracker(agent_id=self.config.agent_id, config=self.config)
+        
+        # Initialize agents with shared cost tracker
+        self.blockchain_handler = BlockchainHandler(
+            self.config.agent_id,
+            cost_tracker=self.cost_tracker
+        )
+        self.service_executor = ServiceExecutor(
+            str(self.config.agent_id),
+            cost_tracker=self.cost_tracker
+        )
         self.ipfs_client = IPFSClient()
         
         # Job tracking
@@ -323,9 +333,6 @@ class Orchestrator:
                 raise Exception(f"Service execution failed: {result.get('error')}")
             
             job.result = result
-            
-            # TODO: Track LLM costs from result
-            # job.llm_cost = result.get("total_cost", 0.0)
             
             logger.info(f"✓ Service executed: {len(result['responses'])} responses generated")
             job.status = JobStatus.PROCESSING

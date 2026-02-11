@@ -1,10 +1,6 @@
 """
 Tests for ServiceExecutor and provider agent functionality.
 
-This test suite validates:
-1. Quality profile configuration: Different quality tiers set parameters correctly
-2. Bug #14 fix: LangGraph doesn't accumulate messages across service executions
-
 Prerequisites:
 1. Valid OpenRouter API key in agents/.env (OPENROUTER_API_KEY)
 2. PDF files in utils/files/ directory
@@ -34,113 +30,12 @@ def run_async(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
-class TestQualityProfiles(unittest.TestCase):
-    """Test that quality profiles configure parameters correctly."""
-    
-    def test_high_quality_profile(self):
-        """Test high quality profile sets correct parameters."""
-        os.environ['QUALITY_PROFILE'] = 'high'
-        config = Config()
-        
-        self.assertEqual(config.rag_temperature, 0.0, "High quality should have temp=0.0")
-        self.assertEqual(config.rag_retrieval_k, 5, "High quality should have k=5")
-        self.assertEqual(config.rag_chunk_size, 8000, "High quality should have chunk_size=8000")
-        self.assertEqual(config.rag_chunk_overlap, 400, "High quality should have chunk_overlap=400")
-        self.assertEqual(config.rag_system_prompt_type, "detailed", "High quality should use detailed prompt")
-        
-        print(f"✅ HIGH quality: temp={config.rag_temperature}, k={config.rag_retrieval_k}, "
-              f"chunk={config.rag_chunk_size}, overlap={config.rag_chunk_overlap}, "
-              f"prompt={config.rag_system_prompt_type}")
-    
-    def test_medium_quality_profile(self):
-        """Test medium quality profile sets correct parameters."""
-        os.environ['QUALITY_PROFILE'] = 'medium'
-        config = Config()
-        
-        self.assertEqual(config.rag_temperature, 0.3, "Medium quality should have temp=0.3")
-        self.assertEqual(config.rag_retrieval_k, 3, "Medium quality should have k=3")
-        self.assertEqual(config.rag_chunk_size, 10000, "Medium quality should have chunk_size=10000")
-        self.assertEqual(config.rag_chunk_overlap, 200, "Medium quality should have chunk_overlap=200")
-        self.assertEqual(config.rag_system_prompt_type, "standard", "Medium quality should use standard prompt")
-        
-        print(f"✅ MEDIUM quality: temp={config.rag_temperature}, k={config.rag_retrieval_k}, "
-              f"chunk={config.rag_chunk_size}, overlap={config.rag_chunk_overlap}, "
-              f"prompt={config.rag_system_prompt_type}")
-    
-    def test_low_quality_profile(self):
-        """Test low quality profile sets correct parameters."""
-        os.environ['QUALITY_PROFILE'] = 'low'
-        config = Config()
-        
-        self.assertEqual(config.rag_temperature, 0.7, "Low quality should have temp=0.7")
-        self.assertEqual(config.rag_retrieval_k, 1, "Low quality should have k=1")
-        self.assertEqual(config.rag_chunk_size, 15000, "Low quality should have chunk_size=15000")
-        self.assertEqual(config.rag_chunk_overlap, 0, "Low quality should have chunk_overlap=0")
-        self.assertEqual(config.rag_system_prompt_type, "minimal", "Low quality should use minimal prompt")
-        
-        print(f"✅ LOW quality: temp={config.rag_temperature}, k={config.rag_retrieval_k}, "
-              f"chunk={config.rag_chunk_size}, overlap={config.rag_chunk_overlap}, "
-              f"prompt={config.rag_system_prompt_type}")
-    
-    def test_invalid_quality_profile(self):
-        """Test invalid quality profile raises error."""
-        os.environ['QUALITY_PROFILE'] = 'invalid'
-        
-        with self.assertRaises(ValueError) as context:
-            Config()
-        
-        self.assertIn("Unknown quality profile", str(context.exception))
-        print("✅ Invalid quality profile correctly raises ValueError")
-    
-    def test_default_quality_profile(self):
-        """Test default quality profile is medium."""
-        # Remove QUALITY_PROFILE to test default
-        if 'QUALITY_PROFILE' in os.environ:
-            del os.environ['QUALITY_PROFILE']
-        
-        config = Config()
-        
-        # Should default to medium
-        self.assertEqual(config.quality_profile, "medium")
-        self.assertEqual(config.rag_temperature, 0.3)
-        self.assertEqual(config.rag_retrieval_k, 3)
-        
-        print("✅ Default quality profile is MEDIUM")
-    
-    def test_bidding_base_cost_high(self):
-        """Test high quality profile has highest base cost."""
-        os.environ['QUALITY_PROFILE'] = 'high'
-        config = Config()
-        
-        self.assertEqual(config.bidding_base_cost, 60, "High quality should have base_cost=60")
-        print("✅ High quality base cost: 60 USDC")
-    
-    def test_bidding_base_cost_medium(self):
-        """Test medium quality profile has medium base cost."""
-        os.environ['QUALITY_PROFILE'] = 'medium'
-        config = Config()
-        
-        self.assertEqual(config.bidding_base_cost, 40, "Medium quality should have base_cost=40")
-        print("✅ Medium quality base cost: 40 USDC")
-    
-    def test_bidding_base_cost_low(self):
-        """Test low quality profile has lowest base cost."""
-        os.environ['QUALITY_PROFILE'] = 'low'
-        config = Config()
-        
-        self.assertEqual(config.bidding_base_cost, 20, "Low quality should have base_cost=20")
-        print("✅ Low quality base cost: 20 USDC")
-
-
 class TestLiteratureReviewContextCleaning(unittest.TestCase):
     """Test that context doesn't accumulate across multiple service executions."""
     
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
-        # Reset to default quality profile for these tests
-        os.environ['QUALITY_PROFILE'] = 'medium'
-        
         # Create config instance
         cls.config = Config()
         

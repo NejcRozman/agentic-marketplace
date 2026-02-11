@@ -38,35 +38,7 @@ class ServiceExecutor:
     - Provides properly cited responses
     """
     
-    # System prompts for different quality tiers
-    SYSTEM_PROMPTS = {
-        "detailed": """You are a literature review assistant specialized in analyzing research papers.
-
-Your responsibilities:
-1. Answer questions about research papers accurately and comprehensively
-2. ALWAYS cite your sources using the format [Author, 'Title'] after each statement
-3. When comparing papers, clearly indicate which paper each finding comes from
-4. Summarize papers with proper citations
-5. Generate literature reviews with consistent citation format
-6. Provide detailed analysis with multiple perspectives
-7. Include methodological details and context
-
-Citation Rules:
-- Every factual statement must be followed by a citation
-- Use the exact citation format provided by the search_literature tool
-- When multiple sources support a statement, list all citations
-- Be precise about which paper each piece of information comes from
-- Cross-reference related findings across papers
-
-Quality Standards:
-- Provide comprehensive answers with depth
-- Include nuanced analysis
-- Consider limitations and alternative interpretations
-- Structure responses with clear sections
-
-Maintain professional academic tone and provide detailed, well-structured responses.""",
-
-        "standard": """You are a literature review assistant specialized in analyzing research papers.
+    SYSTEM_PROMPT = """You are a literature review assistant specialized in analyzing research papers.
 
 Your responsibilities:
 1. Answer questions about research papers accurately and comprehensively
@@ -81,22 +53,13 @@ Citation Rules:
 - When multiple sources support a statement, list all citations
 - Be precise about which paper each piece of information comes from
 
-Maintain professional academic tone and provide detailed, well-structured responses.""",
-
-        "minimal": """You are a literature review assistant.
-
-Your tasks:
-1. Answer questions about research papers
-2. Cite sources using [Author, 'Title'] format
-3. Provide summaries
-
-Keep responses concise and direct."""
-    }
+Maintain professional academic tone and provide detailed, well-structured responses."""
     
     def __init__(
         self,
         agent_id: str,
-        workspace_dir: Optional[str] = None
+        workspace_dir: Optional[str] = None,
+        cost_tracker: Optional[Any] = None
     ):
         """
         Initialize the Literature Review Agent.
@@ -104,10 +67,12 @@ Keep responses concise and direct."""
         Args:
             agent_id: Unique identifier for this agent instance
             workspace_dir: Directory for storing RAG databases (optional)
+            cost_tracker: Optional CostTracker instance for tracking LLM costs
         """
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir or config.workspace_dir) / agent_id
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
+        self.cost_tracker = cost_tracker
         
         # Initialize LLM and embeddings
         if not config.openrouter_api_key:
@@ -115,7 +80,7 @@ Keep responses concise and direct."""
         
         # Use config-based parameters (supports quality profiles)
         self.llm = ChatOpenAI(
-            model="openai/gpt-oss-20b",
+            model=config.llm_model,
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=config.rag_temperature
@@ -126,11 +91,10 @@ Keep responses concise and direct."""
             base_url=config.openrouter_base_url
         )
         
-        # RAG parameters from config (quality profile)
+        # RAG parameters from config
         self.chunk_size = config.rag_chunk_size
         self.chunk_overlap = config.rag_chunk_overlap
         self.retrieval_k = config.rag_retrieval_k
-        self.system_prompt_type = config.rag_system_prompt_type
         
         # RAG components (initialized when PDFs are loaded)
         self.vectorstore = None
@@ -141,8 +105,8 @@ Keep responses concise and direct."""
         self.graph = None
         self.tools = []
         
-        logger.info(f"Initialized ServiceExecutor: {agent_id} (quality: {config.quality_profile}, "
-                   f"temp={config.rag_temperature}, k={config.rag_retrieval_k})")
+        logger.info(f"Initialized ServiceExecutor: {agent_id} "
+                   f"(temp={config.rag_temperature}, k={config.rag_retrieval_k})")
     
     def _extract_paper_metadata(self, document: Any) -> Dict[str, str]:
         """Extract paper title and first author from filename format: Author-Title.pdf"""
@@ -295,19 +259,39 @@ Keep responses concise and direct."""
         # Create tools
         search_tool = self._create_search_tool()
         self.tools = [search_tool]
+        
+        # Bind tools to LLM
         llm_with_tools = self.llm.bind_tools(self.tools)
+        
+        # Create callback if cost tracking enabled
+        callbacks = None
+        if self.cost_tracker:
+            try:
+                from ..infrastructure.cost_tracker import LLMCostCallback
+            except ImportError:
+                from infrastructure.cost_tracker import LLMCostCallback
+            
+            callback = LLMCostCallback(
+                cost_tracker=self.cost_tracker,
+                model=config.llm_model,
+                config=config
+            )
+            callbacks = [callback]
         
         # Define graph nodes
         def call_llm(state: AgentState) -> AgentState:
             """Call the LLM with tools and system prompt."""
             messages = state['messages']
             
-            # Add system prompt if not already present (use quality-specific prompt)
+            # Add system prompt if not already present
             if not messages or not isinstance(messages[0], SystemMessage):
-                system_prompt = self.SYSTEM_PROMPTS.get(self.system_prompt_type, self.SYSTEM_PROMPTS["standard"])
-                messages = [SystemMessage(content=system_prompt)] + messages
+                messages = [SystemMessage(content=self.SYSTEM_PROMPT)] + messages
             
-            response = llm_with_tools.invoke(messages)
+            # Invoke with callbacks if provided
+            if callbacks:
+                response = llm_with_tools.invoke(messages, config={"callbacks": callbacks})
+            else:
+                response = llm_with_tools.invoke(messages)
             return {'messages': [response]}
         
         def should_continue(state: AgentState) -> Literal["tools", "end"]:
