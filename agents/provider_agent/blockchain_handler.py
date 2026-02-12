@@ -90,6 +90,7 @@ class AgentState(TypedDict):
     
     # --- Current Performance Parameters ---
     # Agent's current capabilities and status
+    current_service_cost: Optional[float]  # Cost of most recent service execution (USD)
     # current_reputation: Optional[float]  # Current reputation score
     # current_capacity: Optional[int]  # How many services can handle now
     # current_cost_multiplier: Optional[float]  # Current cost efficiency
@@ -104,6 +105,7 @@ class AgentState(TypedDict):
     # ============================================================================
     
     # --- History Performance Parameters ---
+    past_execution_costs: Optional[List[float]]  # Historical service execution costs (USD)
     # past_auctions: Optional[List[Dict[str, Any]]]  # Last N auctions participated
     # past_win_rate: Optional[float]  # Win rate over last N auctions
     # past_avg_profit: Optional[float]  # Average profit per won auction
@@ -222,8 +224,8 @@ class BlockchainHandler:
         prompt_info = "custom" if system_prompt else "default"
         logger.info(
             f"BlockchainHandler initialized for agent {agent_id} "
-            f"(reasoning_mode={self.reasoning_mode}, system_prompt={prompt_info}, "
-            f"model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
+            f"(reasoning_mode={self.reasoning_mode}, coupling_mode={self.config.coupling_mode}, "
+            f"system_prompt={prompt_info}, model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
         )
     
     def _build_tools(self) -> List:
@@ -773,7 +775,8 @@ Analyze these auctions and decide which to bid on."""
                                 "is_active": auction[9],
                                 "is_completed": auction[10],
                                 "escrow_amount": auction[11],
-                                "reputation_weight": auction[12]
+                                "reputation_weight": auction[12],
+                                "effort_tier": None  # To be populated by bidding strategy
                             }
                             
                             won_auctions.append(auction_info)
@@ -860,6 +863,16 @@ Analyze these auctions and decide which to bid on."""
             
             state["eligible_active_auctions"] = eligible_active_auctions
             self._last_processed_block = current_block
+            
+            # Add service execution cost history to state (only if coupling enabled)
+            if self.config.coupling_mode in ["one_way", "two_way"]:
+                execution_history = self.cost_tracker.get_execution_cost_history()
+                state["past_execution_costs"] = execution_history if execution_history else None
+                state["current_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
+            else:
+                # Isolated mode: no history, but provide base cost as fallback
+                state["past_execution_costs"] = None
+                state["current_service_cost"] = self.config.bidding_base_cost
             
             logger.info(f"✅ State gathered: {len(won_auctions)} won, {len(eligible_active_auctions)} active eligible")
             
@@ -1085,6 +1098,8 @@ Analyze these auctions and decide which to bid on."""
             "eligible_active_auctions": [],
             "bids_placed": [],
             "reasoning_mode": self.reasoning_mode,
+            "current_service_cost": None,
+            "past_execution_costs": None,
             "tx_hash": None,
             "error": None,
             "messages": []

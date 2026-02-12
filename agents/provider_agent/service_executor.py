@@ -1,4 +1,4 @@
-"""Literature Review Agent for the agentic marketplace."""
+"""Literature Analysis Agent for the agentic marketplace."""
 
 import os
 import logging
@@ -34,18 +34,17 @@ class ServiceExecutor:
     This agent:
     - Loads PDFs provided by clients
     - Creates vector database for semantic search
-    - Performs literature reviews based on prompts
+    - Performs literature analyses based on prompts
     - Provides properly cited responses
     """
     
-    SYSTEM_PROMPT = """You are a literature review assistant specialized in analyzing research papers.
-
+    SYSTEM_PROMPT = """You are a literature analysis assistant specialized in analyzing research papers.
 Your responsibilities:
 1. Answer questions about research papers accurately and comprehensively
 2. ALWAYS cite your sources using the format [Author, 'Title'] after each statement
 3. When comparing papers, clearly indicate which paper each finding comes from
 4. Summarize papers with proper citations
-5. Generate literature reviews with consistent citation format
+5. Generate literature analyses with consistent citation format
 
 Citation Rules:
 - Every factual statement must be followed by a citation
@@ -62,7 +61,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
         cost_tracker: Optional[Any] = None
     ):
         """
-        Initialize the Literature Review Agent.
+        Initialize the Literature Analysis Agent.
         
         Args:
             agent_id: Unique identifier for this agent instance
@@ -156,7 +155,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
             logger.info(f"Found {len(pdf_files)} PDF files")
             
             # Set up persist directory for this PDF collection
-            collection_name = f"literature_review_{self.agent_id}"
+            collection_name = f"literature_analysis_{self.agent_id}"
             persist_directory = self.workspace_dir / "RAGfiles" / pdf_dir.name
             persist_directory.mkdir(parents=True, exist_ok=True)
             
@@ -228,7 +227,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
             Search through research papers to find relevant information.
             Returns content with citations indicating which paper each piece of information comes from.
             Use this tool to answer questions about research papers, find specific information,
-            compare findings, or gather information for literature reviews.
+            compare findings, or gather information for literature analyses.
             """
             docs = retriever.invoke(query)
             
@@ -250,18 +249,26 @@ Maintain professional academic tone and provide detailed, well-structured respon
         
         return search_literature
     
-    def _build_graph(self):
-        """Build the LangGraph workflow."""
+    def _build_graph(self, llm_override: Optional[ChatOpenAI] = None):
+        """
+        Build the LangGraph workflow.
+        
+        Args:
+            llm_override: Optional LLM instance to use instead of self.llm (for effort tiers)
+        """
         if not self.retriever:
             logger.warning("Cannot build graph without retriever. Load PDFs first.")
             return
+        
+        # Use override LLM or default
+        active_llm = llm_override or self.llm
         
         # Create tools
         search_tool = self._create_search_tool()
         self.tools = [search_tool]
         
-        # Bind tools to LLM
-        llm_with_tools = self.llm.bind_tools(self.tools)
+        # Bind tools to active LLM
+        llm_with_tools = active_llm.bind_tools(self.tools)
         
         # Create callback if cost tracking enabled
         callbacks = None
@@ -273,7 +280,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
             
             callback = LLMCostCallback(
                 cost_tracker=self.cost_tracker,
-                model=config.llm_model,
+                model=active_llm.model_name,  # Use active LLM's model
                 config=config
             )
             callbacks = [callback]
@@ -347,22 +354,24 @@ Maintain professional academic tone and provide detailed, well-structured respon
         self.graph = workflow.compile()
         logger.info("LangGraph workflow built successfully")
     
-    def perform_review(
+    def perform_analysis(
         self,
         pdf_directory: str,
         prompts: List[str],
-        force_rebuild: bool = False
+        force_rebuild: bool = False,
+        effort_tier: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Perform a literature review based on provided PDFs and prompts.
+        Perform a literature analysis based on provided PDFs and prompts.
         
         Args:
             pdf_directory: Path to directory containing PDF files
-            prompts: List of questions/prompts for the literature review
+            prompts: List of questions/prompts for the literature analysis
             force_rebuild: Force rebuild of vector database
+            effort_tier: Optional effort tier for model selection ("minimal", "low", "standard", "high", "premium")
             
         Returns:
-            Dictionary containing review results:
+            Dictionary containing analysis results:
             {
                 "success": bool,
                 "agent_id": str,
@@ -382,6 +391,22 @@ Maintain professional academic tone and provide detailed, well-structured respon
         }
         
         try:
+            # Select model based on effort tier (if provided)
+            selected_llm = None
+            if effort_tier:
+                if effort_tier in config.effort_tiers:
+                    selected_model = config.effort_tiers[effort_tier]
+                    logger.info(f"Using effort tier '{effort_tier}': model={selected_model}")
+                    
+                    # Create new LLM instance with selected model
+                    selected_llm = ChatOpenAI(
+                        model=selected_model,
+                        api_key=config.openrouter_api_key,
+                        base_url=config.openrouter_base_url,
+                        temperature=config.rag_temperature
+                    )
+                else:
+                    logger.warning(f"Unknown effort tier '{effort_tier}', using default model")
             # Load PDFs if not already loaded or if directory changed
             if self.current_pdf_directory != pdf_directory or force_rebuild:
                 if not self.load_pdfs(pdf_directory, force_rebuild):
@@ -389,7 +414,11 @@ Maintain professional academic tone and provide detailed, well-structured respon
                     return result
             
             # IMPORTANT: Rebuild graph for each service to prevent context accumulation
-            self._build_graph()
+            # Pass selected LLM if effort tier was specified
+            if selected_llm:
+                self._build_graph(llm_override=selected_llm)
+            else:
+                self._build_graph()
             
             if not self.graph:
                 result["error"] = "Graph not initialized. Load PDFs first."
@@ -420,10 +449,10 @@ Maintain professional academic tone and provide detailed, well-structured respon
                 })
             
             result["success"] = True
-            logger.info(f"Literature review completed successfully with {len(prompts)} prompts")
+            logger.info(f"Literature analysis completed successfully with {len(prompts)} prompts")
             
         except Exception as e:
-            logger.error(f"Error performing review: {e}", exc_info=True)
+            logger.error(f"Error performing analysis: {e}", exc_info=True)
             result["error"] = str(e)
         
         return result

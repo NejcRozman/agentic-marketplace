@@ -62,6 +62,7 @@ class CostTracker:
     - LLM API calls (reasoning + service execution)
     - Blockchain gas fees
     - Revenue from completed services
+    - Service execution cost history (for bidding strategies)
     
     No persistence - tracks during agent lifetime only.
     """
@@ -74,6 +75,22 @@ class CostTracker:
         self.total_llm_costs = 0.0
         self.total_gas_costs = 0.0
         self.total_revenue = 0.0
+        
+        # Service execution tracking
+        self.service_execution_history = []  # List of scaled execution costs (USD)
+        self.service_cost_multiplier = config.service_cost_multiplier
+        self._current_execution_llm_cost = 0.0
+        self._is_executing_service = False
+    
+    def start_service_execution(self):
+        """
+        Begin tracking costs for a service execution.
+        
+        Call this before ServiceExecutor starts processing a service.
+        """
+        self._current_execution_llm_cost = 0.0
+        self._is_executing_service = True
+        logger.debug("📊 Started tracking service execution costs")
     
     def add_llm_cost(self, cost_usd: float, context: str = "llm_call"):
         """
@@ -84,6 +101,11 @@ class CostTracker:
             context: Description of what the LLM call was for
         """
         self.total_llm_costs += cost_usd
+        
+        # If we're executing a service, track separately
+        if self._is_executing_service:
+            self._current_execution_llm_cost += cost_usd
+        
         logger.debug(f"💰 LLM cost: ${cost_usd:.4f} ({context})")
     
     def add_gas_cost(self, gas_used: int, gas_price_wei: int, context: str = "transaction"):
@@ -113,6 +135,43 @@ class CostTracker:
         """
         self.total_revenue += revenue_usd
         logger.info(f"💵 Revenue: ${revenue_usd:.2f} USD ({context})")
+    
+    def end_service_execution(self) -> float:
+        """
+        Complete service execution tracking and record to history.
+        
+        Returns:
+            Scaled service execution cost (USD)
+        """
+        if not self._is_executing_service:
+            logger.warning("end_service_execution called but no service execution in progress")
+            return 0.0
+        
+        raw_cost = self._current_execution_llm_cost
+        scaled_cost = raw_cost * self.service_cost_multiplier
+        
+        self.service_execution_history.append(scaled_cost)
+        self._is_executing_service = False
+        
+        logger.info(
+            f"📊 Service execution complete: "
+            f"${raw_cost:.6f} raw → ${scaled_cost:.2f} scaled "
+            f"({self.service_cost_multiplier}x multiplier)"
+        )
+        
+        return scaled_cost
+    
+    def get_execution_cost_history(self) -> list:
+        """
+        Get raw array of past service execution costs.
+        
+        This is pure information relay - no interpretation or aggregation.
+        BlockchainHandler decides how to use this history.
+        
+        Returns:
+            List of scaled execution costs (USD) in chronological order
+        """
+        return self.service_execution_history.copy()
     
     def get_net_balance(self) -> float:
         """

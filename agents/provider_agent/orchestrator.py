@@ -10,7 +10,7 @@ Workflow:
 1. Periodically check for won auctions
 2. Fetch service requirements from IPFS
 3. Download input files (PDFs)
-4. Execute literature review service
+4. Execute literature analysis service
 5. Deliver results to customer
 6. Complete service on blockchain
 7. Track costs and handle retries
@@ -66,6 +66,7 @@ class Job:
     retry_count: int = 0
     max_retries: int = 3
     error: Optional[str] = None
+    effort_tier: Optional[str] = None
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert job to dictionary for logging/storage."""
@@ -196,7 +197,8 @@ class Orchestrator:
                 status=JobStatus.WON,
                 started_at=datetime.now(),
                 buyer_address=auction_details["buyer_address"],
-                service_cid=auction_details["service_cid"]
+                service_cid=auction_details["service_cid"],
+                effort_tier=auction_details["effort_tier"]
             )
             
             self.active_jobs[auction_id] = job
@@ -245,7 +247,7 @@ class Orchestrator:
             
             job.service_requirements = requirements
             
-            # Extract prompts for literature review
+            # Extract prompts for literature analysis
             job.prompts = requirements.get("prompts", requirements.get("requirements", []))
             
             logger.info(f"✓ Requirements fetched: {len(job.prompts)} prompts")
@@ -323,11 +325,16 @@ class Orchestrator:
         
         try:
             # Execute service
-            result = self.service_executor.perform_review(
-                pdf_directory=str(job.pdf_directory),
-                prompts=job.prompts,
-                force_rebuild=True
-            )
+            # Only pass effort_tier if two_way coupling is enabled
+            kwargs = {
+                "pdf_directory": str(job.pdf_directory),
+                "prompts": job.prompts,
+                "force_rebuild": True
+            }
+            if self.config.coupling_mode == "two_way":
+                kwargs["effort_tier"] = job.effort_tier
+            
+            result = self.service_executor.perform_analysis(**kwargs)
             
             if not result["success"]:
                 raise Exception(f"Service execution failed: {result.get('error')}")

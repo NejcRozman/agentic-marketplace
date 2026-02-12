@@ -84,6 +84,21 @@ class Config:
         self.eth_price_usd = float(os.getenv("ETH_PRICE_USD", "3000.0"))
         self.llm_input_price_per_1k = float(os.getenv("LLM_INPUT_PRICE_PER_1K", "0.0002"))
         self.llm_output_price_per_1k = float(os.getenv("LLM_OUTPUT_PRICE_PER_1K", "0.0002"))
+        self.service_cost_multiplier = float(os.getenv("SERVICE_COST_MULTIPLIER", "100.0"))
+        
+        # Coupling mode configuration
+        self.coupling_mode = os.getenv("COUPLING_MODE", "isolated")  # "isolated", "one_way", "two_way"
+        
+        # Effort tier configuration (model selection based on quality/cost tradeoff)
+        # Maps effort tier name to LLM model identifier
+        self.effort_tiers = {
+            "minimal": "meta-llama/llama-3.2-3b-instruct",      # ~$0.06/M tokens
+            "low": "meta-llama/llama-3.1-8b-instruct",          # ~$0.055/M tokens
+            "standard": "openai/gpt-4o-mini",                   # ~$0.15/M tokens (default)
+            "high": "anthropic/claude-3.5-sonnet",              # ~$3/M tokens
+            "premium": "openai/o1"                              # ~$15/M tokens (reasoning model)
+        }
+        self.default_effort_tier = "standard"
         
         # Environment
         self.environment = os.getenv("ENVIRONMENT", "development")
