@@ -89,6 +89,9 @@ class Config:
         # Coupling mode configuration
         self.coupling_mode = os.getenv("COUPLING_MODE", "isolated")  # "isolated", "one_way", "two_way"
         
+        # Experimental architecture selection
+        self.architecture = os.getenv("ARCHITECTURE", "1")  # Default to architecture 1
+        
         # Effort tier configuration (model selection based on quality/cost tradeoff)
         # Maps effort tier name to LLM model identifier
         self.effort_tiers = {
@@ -155,6 +158,58 @@ class Config:
         print(f"  Workspace: {self.workspace_dir}")
         print(f"  Environment: {self.environment}")
         print(f"  Debug: {self.debug}")
+
+
+# ============================================================================
+# Experimental Architecture Configurations
+# ============================================================================
+
+from dataclasses import dataclass
+from typing import List
+
+
+@dataclass
+class ArchitectureConfig:
+    """Configuration for a specific agent architecture variant."""
+    name: str
+    description: str
+    state_level: int  # 0=current, 1=+perf_history, 2=+market_history, 3=+future
+    reasoning_mode: str  # "deterministic", "llm_react", "llm_strategic"
+    coupling_mode: str  # "isolated", "one_way", "two_way"
+    prompt_template: str  # "minimal", "guided", "rich"
+    enabled_tools: List[str]
+    llm_model: str = "openai/gpt-4o-mini"
+    llm_temperature: float = 0.3
+
+
+# Architecture registry - add more as experiments evolve
+ARCHITECTURES = {
+    "1": ArchitectureConfig(
+        name="Architecture 1",
+        description="LLM Minimal - Current state only, reactive reasoning, isolated coupling",
+        state_level=0,
+        reasoning_mode="llm_react",
+        coupling_mode="isolated",
+        prompt_template="1",
+        enabled_tools=["get_ipfs_data", "get_reputation", "estimate_cost",
+                      "validate_bid_profitability", "place_bid"],
+        llm_model="openai/gpt-4o-mini",
+        llm_temperature=0.3,
+    ),
+    # Future architectures will be added here:
+    # "2": ArchitectureConfig(...),
+    # "3": ArchitectureConfig(...),
+    # "4": ArchitectureConfig(...),
+    # "5": ArchitectureConfig(...),
+}
+
+
+def get_architecture(name: str) -> ArchitectureConfig:
+    """Get architecture configuration by name."""
+    if name not in ARCHITECTURES:
+        available = ", ".join(ARCHITECTURES.keys())
+        raise ValueError(f"Unknown architecture '{name}'. Available: {available}")
+    return ARCHITECTURES[name]
 
 
 # Global configuration instance

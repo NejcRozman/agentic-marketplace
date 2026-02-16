@@ -33,8 +33,6 @@ from agents.infrastructure.ipfs_client import IPFSClient
 from agents.infrastructure.cost_tracker import CostTracker
 from agents.config import Config
 
-# No global config instance needed for provider
-
 logger = logging.getLogger(__name__)
 
 

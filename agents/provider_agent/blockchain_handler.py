@@ -33,7 +33,8 @@ try:
     from ..infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
     from ..infrastructure.ipfs_client import IPFSClient
     from ..infrastructure.cost_tracker import CostTracker, LLMCostCallback
-    from ..config import config
+    from ..infrastructure.prompts import get_prompt
+    from ..config import config, get_architecture
 except ImportError:
     from infrastructure.blockchain_client import BlockchainClient
     from infrastructure.contract_abis import (
@@ -44,7 +45,8 @@ except ImportError:
     from infrastructure.feedback_auth import generate_feedback_auth, verify_feedback_auth_format
     from infrastructure.ipfs_client import IPFSClient
     from infrastructure.cost_tracker import CostTracker, LLMCostCallback
-    from config import Config
+    from infrastructure.prompts import get_prompt
+    from config import Config, get_architecture
     config = Config()
 
 logger = logging.getLogger(__name__)
@@ -148,13 +150,14 @@ class BlockchainHandler:
         self, 
         agent_id: int, 
         blockchain_client: Optional[BlockchainClient] = None,
+        architecture: Optional[str] = None,
         system_prompt: Optional[str] = None,
         llm_model: Optional[str] = None,
         llm_temperature: Optional[float] = None,
         llm_base_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
         enabled_tools: Optional[List[str]] = None,
-        reasoning_mode: str = "llm_react",
+        reasoning_mode: Optional[str] = None,
         cost_tracker: Optional[CostTracker] = None
     ):
         """
@@ -163,43 +166,43 @@ class BlockchainHandler:
         Args:
             agent_id: The agent's ID
             blockchain_client: Optional blockchain client instance
-            system_prompt: System prompt for the ReAct agent (if None, uses default)
-            llm_model: LLM model identifier (default: openai/gpt-oss-20b)
-            llm_temperature: LLM temperature (default: 0.3)
+            architecture: Architecture name. If None, uses config.architecture
+            system_prompt: System prompt for the ReAct agent (if None, uses architecture's template)
+            llm_model: LLM model identifier (if None, uses architecture's default)
+            llm_temperature: LLM temperature (if None, uses architecture's default)
             llm_base_url: LLM API base URL (default: from config)
             llm_api_key: LLM API key (default: from config)
-            enabled_tools: List of tool names to enable (if None, enables all tools)
-                Available: get_ipfs_data, get_reputation, estimate_cost, 
-                          validate_bid_profitability, place_bid
-            reasoning_mode: "deterministic" or "llm_react" (default: llm_react)
+            enabled_tools: List of tool names to enable (if None, uses architecture's tools)
+            reasoning_mode: "deterministic" or "llm_react" (if None, uses architecture's mode)
             cost_tracker: Optional CostTracker instance (creates new if None)
         """
         self.agent_id = agent_id
         self.client = blockchain_client or BlockchainClient()
         self.config = config
         
-        # Reasoning mode configuration
-        if reasoning_mode not in ["deterministic", "llm_react"]:
-            raise ValueError(f"Invalid reasoning_mode: {reasoning_mode}. Must be 'deterministic' or 'llm_react'")
-        self.reasoning_mode = reasoning_mode
+        # Load architecture configuration
+        arch_name = architecture or self.config.architecture
+        self.arch_config = get_architecture(arch_name)
+        
+        # Apply architecture settings (can be overridden by explicit kwargs)
+        self.reasoning_mode = reasoning_mode or self.arch_config.reasoning_mode
+        if self.reasoning_mode not in ["deterministic", "llm_react", "llm_strategic"]:
+            raise ValueError(f"Invalid reasoning_mode: {self.reasoning_mode}")
         
         # System prompt configuration
         self.system_prompt = system_prompt
         
-        # LLM configuration (with defaults)
-        self.llm_model = llm_model or self.config.llm_model
-        self.llm_temperature = llm_temperature if llm_temperature is not None else 0.3
+        # LLM configuration (with architecture defaults)
+        self.llm_model = llm_model or self.arch_config.llm_model
+        self.llm_temperature = llm_temperature if llm_temperature is not None else self.arch_config.llm_temperature
         self.llm_base_url = llm_base_url or self.config.openrouter_base_url
         self.llm_api_key = llm_api_key or self.config.openrouter_api_key
         
-        # Tools configuration (if None, enable all tools)
-        self.enabled_tools = enabled_tools or [
-            "get_ipfs_data",
-            "get_reputation", 
-            "estimate_cost",
-            "validate_bid_profitability",
-            "place_bid"
-        ]
+        # Tools configuration (from architecture)
+        self.enabled_tools = enabled_tools or self.arch_config.enabled_tools
+        
+        # Store coupling mode from architecture (used in state population)
+        self.coupling_mode = self.arch_config.coupling_mode
         
         self.contracts_loaded = False
         self.reverse_auction_contract = None
@@ -221,11 +224,12 @@ class BlockchainHandler:
         # Build the graph
         self.graph = self._build_graph()
         
-        prompt_info = "custom" if system_prompt else "default"
+        prompt_info = "custom" if system_prompt else self.arch_config.prompt_template
         logger.info(
             f"BlockchainHandler initialized for agent {agent_id} "
-            f"(reasoning_mode={self.reasoning_mode}, coupling_mode={self.config.coupling_mode}, "
-            f"system_prompt={prompt_info}, model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
+            f"(architecture={self.arch_config.name}, reasoning_mode={self.reasoning_mode}, "
+            f"coupling_mode={self.coupling_mode}, prompt={prompt_info}, "
+            f"model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
         )
     
     def _build_tools(self) -> List:
@@ -233,7 +237,7 @@ class BlockchainHandler:
         handler = self
 
         # ============================================================================
-        # EPISTEMIC TOOLS - Provide information about the world to the agent
+        # INFORMATION TOOLS - Provide information about the world to the agent
         # ============================================================================        
         
         @tool
@@ -294,7 +298,7 @@ class BlockchainHandler:
         
         
         # ============================================================================
-        # OPERATIONAL TOOLS - perform operation LLM is bad at
+        # COMPUTATION TOOLS - perform operation LLM is bad at
         # ============================================================================
         
 
@@ -864,15 +868,25 @@ Analyze these auctions and decide which to bid on."""
             state["eligible_active_auctions"] = eligible_active_auctions
             self._last_processed_block = current_block
             
-            # Add service execution cost history to state (only if coupling enabled)
-            if self.config.coupling_mode in ["one_way", "two_way"]:
-                execution_history = self.cost_tracker.get_execution_cost_history()
-                state["past_execution_costs"] = execution_history if execution_history else None
-                state["current_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
-            else:
-                # Isolated mode: no history, but provide base cost as fallback
+            # Populate state based on architecture's state_level and coupling_mode
+            if self.arch_config.state_level == 0:
+                # State Level 0: Current only (no history)
                 state["past_execution_costs"] = None
                 state["current_service_cost"] = self.config.bidding_base_cost
+            elif self.arch_config.state_level >= 1:
+                # State Level 1+: Performance history (if coupling allows)
+                if self.coupling_mode in ["one_way", "two_way"]:
+                    execution_history = self.cost_tracker.get_execution_cost_history()
+                    state["past_execution_costs"] = execution_history if execution_history else None
+                    state["current_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
+                else:
+                    # Isolated coupling: no history available
+                    state["past_execution_costs"] = None
+                    state["current_service_cost"] = self.config.bidding_base_cost
+            
+            # State Level 2+ (market history) - to be implemented
+            # if self.arch_config.state_level >= 2:
+            #     state["past_winning_bids"] = await self._fetch_market_history()
             
             logger.info(f"✅ State gathered: {len(won_auctions)} won, {len(eligible_active_auctions)} active eligible")
             
@@ -1010,7 +1024,7 @@ Analyze these auctions and decide which to bid on."""
         try:
             auctions_context = json.dumps(eligible_auctions, indent=2)
             
-            # Use injected system_prompt or generate default
+            # Use injected system_prompt or generate from architecture's template
             if self.system_prompt is not None:
                 # Use custom prompt from config
                 prompt = self.system_prompt.format(
@@ -1019,9 +1033,15 @@ Analyze these auctions and decide which to bid on."""
                 )
                 logger.info("Using custom system prompt from config")
             else:
-                # Fall back to default prompt
-                prompt = self._get_default_system_prompt(auctions_context)
-                logger.info("Using default system prompt")
+                # Use architecture's prompt template
+                prompt = get_prompt(
+                    architecture=self.arch_config.prompt_template,
+                    agent_id=self.agent_id,
+                    auctions_context=auctions_context,
+                    past_execution_costs=state.get("past_execution_costs"),
+                    # past_winning_bids=state.get("past_winning_bids"),  # For future architectures
+                )
+                logger.info(f"Using {self.arch_config.name} prompt")
             
             # Create ReAct agent with configured LLM and cost tracking
             callback = LLMCostCallback(
