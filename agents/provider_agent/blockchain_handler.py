@@ -75,39 +75,32 @@ class AgentState(TypedDict):
     # ============================================================================
     # CURRENT STATE - Present moment snapshot
     # ============================================================================
-    
-    # --- Current Market Parameters ---
+
     # Active auctions and market conditions
-    eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on
-    won_auctions: List[Dict[str, Any]]  # Auctions we won (for service completion)
+    eligible_active_auctions: List[Dict[str, Any]]  # Auctions we can bid on (BC + IPFS data)
+    won_auctions: List[Dict[str, Any]]  # Auctions we won (for service completion) 
+
+    # Current reputation context
+    competitors_reputation: List[Dict[str, Any]]  # All other agents bidding in auctions with their reputation
+    agent_reputation: Dict[str, Any]  # Agent's current reputation score and feedback count
+
+    # Agent's current performance context
+    estimated_service_cost: Optional[float]  # Estimated cost of service execution (USD)
     
+    # Results of current decision cycle
+    bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
+
     # Service completion workflow (only for complete_service action)
     auction_id: Optional[int]
     client_address: Optional[str]
     feedback_auth: Optional[bytes]
-    
-    # Additional market conditions (to be added)
-    # current_market_competition: Optional[float]  # How many bidders per auction
-    # current_avg_winning_bid: Optional[float]  # Average winning bid in current round
-    
-    # --- Current Performance Parameters ---
-    # Agent's current capabilities and status
-    current_service_cost: Optional[float]  # Cost of most recent service execution (USD)
-    # current_reputation: Optional[float]  # Current reputation score
-    # current_capacity: Optional[int]  # How many services can handle now
-    # current_cost_multiplier: Optional[float]  # Current cost efficiency
-    
-    # --- Current Decision Parameters ---
-    # Results of current decision cycle
-    bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
-    reasoning_mode: Optional[str]  # "deterministic" or "llm_react" (for tracking)
     
     # ============================================================================
     # HISTORY STATE - Past observations and outcomes
     # ============================================================================
     
     # --- History Performance Parameters ---
-    past_execution_costs: Optional[List[float]]  # Historical service execution costs (USD)
+    # past_execution_costs: Optional[List[float]]  # Historical service execution costs (USD)
     # past_auctions: Optional[List[Dict[str, Any]]]  # Last N auctions participated
     # past_win_rate: Optional[float]  # Win rate over last N auctions
     # past_avg_profit: Optional[float]  # Average profit per won auction
@@ -237,89 +230,8 @@ class BlockchainHandler:
         handler = self
 
         # ============================================================================
-        # INFORMATION TOOLS - Provide information about the world to the agent
-        # ============================================================================        
-        
-        @tool
-        def get_ipfs_data(cid: str) -> Dict[str, Any]:
-            """Fetch service requirements from IPFS using a CID.
-            
-            Args:
-                cid: The IPFS content identifier (from auction's service_description_cid)
-                
-            Returns:
-                Dictionary containing service requirements from IPFS
-            """
-            try:
-                if not cid:
-                    return {"error": "No IPFS CID provided"}
-                
-                ipfs_client = IPFSClient()
-                result = asyncio.run(ipfs_client.fetch_json(cid))
-                
-                if result is None:
-                    return {"error": "Failed to fetch from IPFS"}
-                
-                return result
-            except Exception as e:
-                return {"error": str(e)}
-        
-        @tool
-        def get_reputation(agent_id: int) -> Dict[str, Any]:
-            """Get reputation score for an agent from ERC-8004 ReputationRegistry.
-            
-            Args:
-                agent_id: The agent ID to get reputation for
-                
-            Returns:
-                Dictionary with rating and feedback count
-            """
-            try:
-                if not handler.reputation_registry_contract:
-                    return {"rating": 50, "feedback_count": 0, "note": "ReputationRegistry not configured"}
-                
-                empty_addresses = []
-                zero_bytes32 = b'\x00' * 32
-                
-                result = asyncio.run(handler.client.call_contract_method(
-                    "ReputationRegistry",
-                    "getSummary",
-                    agent_id,
-                    empty_addresses,
-                    zero_bytes32,
-                    zero_bytes32
-                ))
-                feedback_count = result[0]
-                average_score = result[1] if feedback_count > 0 else 50
-                
-                return {"rating": average_score, "feedback_count": feedback_count}
-            except Exception as e:
-                return {"error": str(e), "rating": 50, "feedback_count": 0}
-        
-        
-        # ============================================================================
         # COMPUTATION TOOLS - perform operation LLM is bad at
         # ============================================================================
-        
-
-        @tool
-        def estimate_cost() -> Dict[str, Any]:
-            """Estimate cost to deliver a service.
-            
-            Returns base cost from configuration. More sophisticated cost estimation
-            strategies can be implemented in future versions.
-            
-            Returns:
-                Dictionary with estimated cost
-            """
-            try:
-                # Get base cost from config
-                base_cost = self.config.bidding_base_cost  # In USDC
-                estimated = int(base_cost * 1e6)  # Convert to wei-like format (6 decimals)
-                
-                return {"estimated_cost": estimated}
-            except Exception as e:
-                return {"error": str(e), "estimated_cost": 0}
         
         @tool
         def validate_bid_profitability(estimated_cost: int, proposed_bid: int) -> Dict[str, Any]:
@@ -330,14 +242,9 @@ class BlockchainHandler:
                 proposed_bid: The bid amount you're considering (in USDC with 6 decimals, e.g., 55000000 = 55 USDC)
             
             Returns:
-                Profitability analysis with verdict and strategic recommendation considering reputation
+                Profitability analysis with verdict and profit margin
             """
             try:
-                # Get current reputation - call the function directly, not as a tool
-                rep_result = get_reputation.func(handler.agent_id)
-                feedback_count = rep_result.get("feedback_count", 0)
-                current_rating = rep_result.get("rating", 50)
-                
                 profit = proposed_bid - estimated_cost
                 is_profitable = proposed_bid > estimated_cost
                 
@@ -348,23 +255,12 @@ class BlockchainHandler:
                     margin_percent = 0
                     loss_percent = 0
                 
-                
-                # Reputation context (for reasoning layer to use)
-                is_newcomer = feedback_count < 3
-                has_low_reputation = current_rating < 70 and feedback_count > 0
-                
                 return {
                     "is_profitable": is_profitable,
                     "estimated_cost": estimated_cost,
                     "proposed_bid": proposed_bid,
                     "profit": profit,
                     "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
-                    "reputation_context": {
-                        "feedback_count": feedback_count,
-                        "current_rating": current_rating,
-                        "is_newcomer": is_newcomer,
-                        "has_low_reputation": has_low_reputation
-                    },
                     "summary": f"{proposed_bid/1e6:.1f} USDC bid - {estimated_cost/1e6:.1f} USDC cost = {profit/1e6:.1f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.1f}%)"
                 }
             except Exception as e:
@@ -372,6 +268,120 @@ class BlockchainHandler:
                 return {
                     "error": str(e),
                     "is_profitable": False
+                }
+        
+        @tool
+        def calculate_bid_score(bid_amount: int, agent_reputation: int) -> Dict[str, Any]:
+            """Calculate the bid score that will be used in auction ranking.
+            
+            The contract calculates bid score as: bid * (100 + reputation) / 100
+            Lower scores win in reverse auctions. Higher reputation gives better (lower) scores.
+            
+            Args:
+                bid_amount: The bid amount in USDC (with 6 decimals, e.g., 50000000 = 50 USDC)
+                agent_reputation: The reputation score (0-100, where 50 is neutral)
+            
+            Returns:
+                Dictionary with bid_score and explanation
+            """
+            try:
+                # Contract formula: bidScore = bid * (100 + reputation) / 100
+                bid_score = (bid_amount * (100 + agent_reputation)) // 100
+                
+                reputation_effect = agent_reputation - 50  # How much better/worse than neutral
+                if reputation_effect > 0:
+                    advantage = f"{reputation_effect} points above neutral gives you a {reputation_effect}% advantage"
+                elif reputation_effect < 0:
+                    advantage = f"{-reputation_effect} points below neutral gives you a {-reputation_effect}% disadvantage"
+                else:
+                    advantage = "neutral reputation (no advantage or disadvantage)"
+                
+                return {
+                    "bid_amount": bid_amount,
+                    "agent_reputation": agent_reputation,
+                    "bid_score": bid_score,
+                    "bid_amount_usdc": round(bid_amount / 1e6, 2),
+                    "bid_score_usdc": round(bid_score / 1e6, 2),
+                    "reputation_effect": advantage,
+                    "summary": f"Bid {bid_amount/1e6:.2f} USDC with reputation {agent_reputation} = score {bid_score/1e6:.2f} USDC ({advantage})"
+                }
+            except Exception as e:
+                logger.error(f"calculate_bid_score failed: {e}")
+                return {
+                    "error": str(e),
+                    "bid_score": bid_amount  # Fallback to bid amount
+                }
+        
+        @tool
+        def simulate_bid_outcome(
+            proposed_bid: int,
+            your_reputation: int,
+            current_winning_bid: int = 0,
+            current_winner_reputation: int = 50
+        ) -> Dict[str, Any]:
+            """Simulate whether a proposed bid would win against the current winner.
+            
+            Checks if your bid score (bid + reputation weight) would beat the current winning bid.
+            Prevents wasting gas on bids that will revert with BidScoreNotCompetitive.
+            
+            Args:
+                proposed_bid: Your proposed bid amount (in USDC with 6 decimals)
+                your_reputation: Your reputation score (0-100, from agent_reputation in state)
+                current_winning_bid: Current winning bid amount (0 if no bids yet, in USDC with 6 decimals)
+                current_winner_reputation: Current winner's reputation (default 50 if unknown)
+            
+            Returns:
+                Analysis of whether you would win and by what margin
+            """
+            try:
+                # Calculate our bid score: bid * (100 + reputation) / 100
+                our_score = (proposed_bid * (100 + your_reputation)) // 100
+                
+                # If there's a current winner, compare scores
+                if current_winning_bid > 0:
+                    current_winner_score = (current_winning_bid * (100 + current_winner_reputation)) // 100
+                    
+                    # In reverse auction, LOWER score wins
+                    will_win = our_score < current_winner_score
+                    margin = current_winner_score - our_score  # Positive = we're better
+                    margin_percent = (margin / current_winner_score * 100) if current_winner_score > 0 else 0
+                    
+                    return {
+                        "proposed_bid": proposed_bid,
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "your_score": our_score,
+                        "your_score_usdc": round(our_score / 1e6, 2),
+                        "your_reputation": your_reputation,
+                        "current_winning_bid": current_winning_bid,
+                        "current_winning_bid_usdc": round(current_winning_bid / 1e6, 2),
+                        "current_winner_score": current_winner_score,
+                        "current_winner_score_usdc": round(current_winner_score / 1e6, 2),
+                        "current_winner_reputation": current_winner_reputation,
+                        "will_win": will_win,
+                        "margin": margin,
+                        "margin_usdc": round(margin / 1e6, 2),
+                        "margin_percent": round(margin_percent, 2),
+                        "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score/1e6:.2f} vs current {current_winner_score/1e6:.2f} (margin: {margin/1e6:.2f} USDC, {margin_percent:.1f}%)"
+                    }
+                else:
+                    # No current winner - we'll be first bid
+                    return {
+                        "proposed_bid": proposed_bid,
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "your_score": our_score,
+                        "your_score_usdc": round(our_score / 1e6, 2),
+                        "your_reputation": your_reputation,
+                        "current_winning_bid": 0,
+                        "will_win": True,
+                        "summary": "✅ WILL WIN: No current bids, you'll be the first bidder"
+                    }
+                    
+            except Exception as e:
+                logger.error(f"simulate_bid_outcome failed: {e}")
+                return {
+                    "error": str(e),
+                    "will_win": False,
+                    "explanation": "Failed to simulate bid outcome."
                 }
 
         # ============================================================================
@@ -495,10 +505,9 @@ class BlockchainHandler:
         
         # Build tool list based on enabled_tools configuration
         all_tools = {
-            "get_ipfs_data": get_ipfs_data,
-            "get_reputation": get_reputation,
-            "estimate_cost": estimate_cost,
             "validate_bid_profitability": validate_bid_profitability,
+            "calculate_bid_score": calculate_bid_score,
+            "simulate_bid_outcome": simulate_bid_outcome,
             "place_bid": place_bid
         }
         
@@ -526,10 +535,9 @@ class BlockchainHandler:
         """
         # Dynamically generate tool descriptions based on enabled tools
         tool_descriptions = {
-            "get_ipfs_data": "get_ipfs_data(cid): Fetch service requirements from IPFS using the service_description_cid",
-            "get_reputation": "get_reputation(agent_id): Get reputation score for an agent",
-            "estimate_cost": "estimate_cost(): Estimate base cost to deliver a service",
             "validate_bid_profitability": "validate_bid_profitability(estimated_cost, proposed_bid): Check if a bid is profitable (returns profit/loss calculations)",
+            "calculate_bid_score": "calculate_bid_score(bid_amount, agent_reputation): Calculate bid score used in auction ranking",
+            "simulate_bid_outcome": "simulate_bid_outcome(proposed_bid, your_reputation, current_winning_bid, current_winner_reputation): Check if your bid would win against current winner",
             "place_bid": "place_bid(auction_id, bid_amount): Submit a bid for an auction"
         }
         
@@ -543,14 +551,12 @@ Available tools:
 
 BIDDING GUIDELINES:
 1. Analyze each auction before bidding
-2. Fetch service requirements from IPFS using get_ipfs_data to understand the task
-3. Use estimate_cost to get the base cost estimate
-4. Use validate_bid_profitability to check if your proposed bid is profitable
-   - Pass your estimated_cost and proposed_bid to this tool
-   - Review the profitability analysis before deciding
-5. Consider time remaining - urgent auctions may need immediate bids
-6. Check current winning bid - you need a better score to win
-7. This is a reverse auction where LOWER bids win, but your bid score is also weighted by your reputation
+2. Service requirements are already embedded in auction details
+3. Use validate_bid_profitability to check if your proposed bid is profitable
+4. Use calculate_bid_score to understand how reputation affects your bid score
+5. Use simulate_bid_outcome to check if your bid will actually win (prevents BidScoreNotCompetitive reverts)
+6. Consider time remaining - urgent auctions may need immediate bids
+7. This is a reverse auction where LOWER bids win, and your bid score is weighted by reputation
 8. You can bid on multiple auctions if profitable
 9. If no auctions are profitable, don't bid
 
@@ -625,6 +631,38 @@ Analyze these auctions and decide which to bid on."""
         """Router node - entry point that examines action field."""
         logger.info(f"🔀 Router: action={state['action']}")
         return state
+    
+    async def _fetch_reputation(self, agent_id: int) -> Dict[str, Any]:
+        """Fetch reputation for an agent.
+        
+        Args:
+            agent_id: Agent ID to fetch reputation for
+            
+        Returns:
+            Dictionary with rating and feedback_count
+        """
+        try:
+            if not self.reputation_registry_contract:
+                return {"rating": 50, "feedback_count": 0}
+            
+            empty_addresses = []
+            zero_bytes32 = b'\x00' * 32
+            
+            result = await self.client.call_contract_method(
+                "ReputationRegistry",
+                "getSummary",
+                agent_id,
+                empty_addresses,
+                zero_bytes32,
+                zero_bytes32
+            )
+            feedback_count = result[0]
+            average_score = result[1] if feedback_count > 0 else 50
+            
+            return {"rating": average_score, "feedback_count": feedback_count}
+        except Exception as e:
+            logger.warning(f"Error fetching reputation for agent {agent_id}: {e}")
+            return {"rating": 50, "feedback_count": 0}
     
     def _route_action(self, state: AgentState) -> str:
         """Routing function for action field."""
@@ -868,23 +906,58 @@ Analyze these auctions and decide which to bid on."""
             state["eligible_active_auctions"] = eligible_active_auctions
             self._last_processed_block = current_block
             
+            # Pre-fetch agent's own reputation
+            agent_reputation = await self._fetch_reputation(self.agent_id)
+            state["agent_reputation"] = agent_reputation
+            logger.info(f"📊 Agent reputation: rating={agent_reputation['rating']}, feedback_count={agent_reputation['feedback_count']}")
+            
+            # Pre-fetch IPFS service requirements and embed in auction data
+            ipfs_client = IPFSClient()
+            for auction in eligible_active_auctions:
+                cid = auction.get("service_description_cid")
+                if cid:
+                    try:
+                        service_reqs = await ipfs_client.fetch_json(cid)
+                        auction["service_requirements"] = service_reqs if service_reqs else {}
+                        logger.debug(f"📥 Fetched service requirements for auction {auction['auction_id']}")
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch IPFS data for auction {auction['auction_id']}: {e}")
+                        auction["service_requirements"] = {}
+                else:
+                    auction["service_requirements"] = {}
+            
+            # Pre-fetch competitors' reputation (winning agents in active auctions)
+            competitors_reputation = []
+            seen_agents = set()
+            for auction in eligible_active_auctions:
+                winning_agent_id = auction.get("winning_agent_id")
+                if winning_agent_id and winning_agent_id != self.agent_id and winning_agent_id not in seen_agents:
+                    seen_agents.add(winning_agent_id)
+                    comp_rep = await self._fetch_reputation(winning_agent_id)
+                    competitors_reputation.append({
+                        "agent_id": winning_agent_id,
+                        "rating": comp_rep["rating"],
+                        "feedback_count": comp_rep["feedback_count"]
+                    })
+            
+            state["competitors_reputation"] = competitors_reputation
+            logger.info(f"👥 Fetched reputation for {len(competitors_reputation)} competitors")
+            
             # Populate state based on architecture's state_level and coupling_mode
             if self.arch_config.state_level == 0:
-                # State Level 0: Current only (no history)
-                state["past_execution_costs"] = None
-                state["current_service_cost"] = self.config.bidding_base_cost
+                # State Level 0: Current only (no history) - Architecture 1
+                state["estimated_service_cost"] = self.config.bidding_base_cost
             elif self.arch_config.state_level >= 1:
-                # State Level 1+: Performance history (if coupling allows)
+                # State Level 1+: Performance history (if coupling allows) - Future architectures
                 if self.coupling_mode in ["one_way", "two_way"]:
                     execution_history = self.cost_tracker.get_execution_cost_history()
-                    state["past_execution_costs"] = execution_history if execution_history else None
-                    state["current_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
+                    # For now, use most recent cost or base cost as fallback
+                    state["estimated_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
                 else:
                     # Isolated coupling: no history available
-                    state["past_execution_costs"] = None
-                    state["current_service_cost"] = self.config.bidding_base_cost
+                    state["estimated_service_cost"] = self.config.bidding_base_cost
             
-            # State Level 2+ (market history) - to be implemented
+            # State Level 2+ (market history) - to be implemented for future architectures
             # if self.arch_config.state_level >= 2:
             #     state["past_winning_bids"] = await self._fetch_market_history()
             
@@ -1116,10 +1189,10 @@ Analyze these auctions and decide which to bid on."""
             "feedback_auth": None,
             "won_auctions": [],
             "eligible_active_auctions": [],
+            "competitors_reputation": [],
+            "agent_reputation": {"rating": 50, "feedback_count": 0},
+            "estimated_service_cost": None,
             "bids_placed": [],
-            "reasoning_mode": self.reasoning_mode,
-            "current_service_cost": None,
-            "past_execution_costs": None,
             "tx_hash": None,
             "error": None,
             "messages": []
@@ -1156,8 +1229,10 @@ Analyze these auctions and decide which to bid on."""
             "feedback_auth": None,
             "won_auctions": [],
             "eligible_active_auctions": [],
+            "competitors_reputation": [],
+            "agent_reputation": {"rating": 50, "feedback_count": 0},
+            "estimated_service_cost": None,
             "bids_placed": [],
-            "reasoning_mode": self.reasoning_mode,
             "tx_hash": None,
             "error": None,
             "messages": []

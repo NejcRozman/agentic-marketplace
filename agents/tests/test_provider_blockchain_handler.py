@@ -13,7 +13,7 @@ These tests require:
    - BLOCKCHAIN_REVERSE_AUCTION_ADDRESS=0x...
    - BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS=0x...
    - BLOCKCHAIN_REPUTATION_REGISTRY_ADDRESS=0x...
-   - GOOGLE_API_KEY=...
+   - OPENROUTER_API_KEY=...
 
 Run with: python agents/tests/test_blockchain_handler.py
 """
@@ -51,7 +51,7 @@ class TestBlockchainHandlerSetup(unittest.TestCase):
         self.assertIsNotNone(config.rpc_url, "BLOCKCHAIN_RPC_URL not set")
         self.assertIsNotNone(config.reverse_auction_address, "BLOCKCHAIN_REVERSE_AUCTION_ADDRESS not set")
         self.assertIsNotNone(config.identity_registry_address, "BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS not set")
-        self.assertIsNotNone(config.google_api_key, "GOOGLE_API_KEY not set")
+        self.assertIsNotNone(config.openrouter_api_key, "OPENROUTER_API_KEY not set")
         print(f"\n✓ Config loaded:")
         print(f"  RPC URL: {config.rpc_url}")
         print(f"  ReverseAuction: {config.reverse_auction_address}")
