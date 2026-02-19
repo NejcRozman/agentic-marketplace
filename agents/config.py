@@ -78,6 +78,11 @@ class Config:
         
         # Provider bidding configuration
         self.bidding_base_cost = int(os.getenv("BIDDING_BASE_COST", "40"))
+
+        # Heuristic bidding configuration
+        self.heuristic_strategy = os.getenv("HEURISTIC_STRATEGY", "random_markup")
+        self.heuristic_min_margin = float(os.getenv("HEURISTIC_MIN_MARGIN", "0.10"))
+        self.heuristic_max_margin = float(os.getenv("HEURISTIC_MAX_MARGIN", "0.30"))
         
         # Cost tracking constants (for economic simulation)
         self.gas_price_gwei = float(os.getenv("GAS_PRICE_GWEI", "20.0"))

@@ -3,7 +3,7 @@ BlockchainHandler - Agentic handler for blockchain operations.
 
 This agent uses LangGraph to handle blockchain operations:
 - Complete service path: Deterministic workflow for completing auctions
-- Monitor path: ReAct agent with tools for intelligent bidding decisions
+- Monitor path: Heuristic or ReAct agent with tools for intelligent bidding decisions
 
 Built with LangGraph for agentic reasoning and decision-making.
 """
@@ -12,6 +12,7 @@ import asyncio
 import logging
 import json
 import time
+import random
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from typing_extensions import TypedDict
@@ -85,7 +86,7 @@ class AgentState(TypedDict):
     agent_reputation: Dict[str, Any]  # Agent's current reputation score and feedback count
 
     # Agent's current performance context
-    estimated_service_cost: Optional[float]  # Estimated cost of service execution (USD)
+    estimated_service_cost: Optional[float]  # Estimated cost of service execution (USD)    
     
     # Results of current decision cycle
     bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
@@ -136,7 +137,7 @@ class BlockchainHandler:
     Agentic blockchain handler using LangGraph.
     
     - complete_service: Deterministic path for service completion
-    - monitor: ReAct agent for intelligent bidding decisions
+    - monitor: Heuristic or ReAct agent for intelligent bidding decisions
     """
     
     def __init__(
@@ -166,7 +167,7 @@ class BlockchainHandler:
             llm_base_url: LLM API base URL (default: from config)
             llm_api_key: LLM API key (default: from config)
             enabled_tools: List of tool names to enable (if None, uses architecture's tools)
-            reasoning_mode: "deterministic" or "llm_react" (if None, uses architecture's mode)
+            reasoning_mode: "heuristic" or "llm_react" (if None, uses architecture's mode)
             cost_tracker: Optional CostTracker instance (creates new if None)
         """
         self.agent_id = agent_id
@@ -179,7 +180,7 @@ class BlockchainHandler:
         
         # Apply architecture settings (can be overridden by explicit kwargs)
         self.reasoning_mode = reasoning_mode or self.arch_config.reasoning_mode
-        if self.reasoning_mode not in ["deterministic", "llm_react", "llm_strategic"]:
+        if self.reasoning_mode not in ["deterministic", "heuristic", "llm_react", "llm_strategic"]:
             raise ValueError(f"Invalid reasoning_mode: {self.reasoning_mode}")
         
         # System prompt configuration
@@ -956,7 +957,7 @@ Analyze these auctions and decide which to bid on."""
                 else:
                     # Isolated coupling: no history available
                     state["estimated_service_cost"] = self.config.bidding_base_cost
-            
+
             # State Level 2+ (market history) - to be implemented for future architectures
             # if self.arch_config.state_level >= 2:
             #     state["past_winning_bids"] = await self._fetch_market_history()
@@ -973,14 +974,21 @@ Analyze these auctions and decide which to bid on."""
     
     async def _reasoning_node(self, state: AgentState) -> AgentState:
         """Route to appropriate reasoning strategy based on reasoning_mode."""
-        if self.reasoning_mode == "deterministic":
-            return await self._deterministic_reasoning(state)
+        if self.reasoning_mode in ["deterministic", "heuristic"]:
+            return await self._heuristic_reasoning(state)
         else:
             return await self._llm_react_reasoning(state)
     
-    async def _deterministic_reasoning(self, state: AgentState) -> AgentState:
-        """Deterministic bidding strategy: bid = cost × markup."""
-        logger.info("🎯 Using deterministic reasoning (fixed strategy)")
+    async def _heuristic_reasoning(self, state: AgentState) -> AgentState:
+        """Heuristic bidding strategy with selectable approaches."""
+        strategy = (self.config.heuristic_strategy or "random_markup").lower()
+        min_margin = max(0.0, self.config.heuristic_min_margin)
+        max_margin = max(min_margin, self.config.heuristic_max_margin)
+
+        logger.info(
+            f"🎯 Using heuristic reasoning (strategy={strategy}, "
+            f"min_margin={min_margin:.2f}, max_margin={max_margin:.2f})"
+        )
         
         eligible_auctions = state.get("eligible_active_auctions", [])
         
@@ -993,9 +1001,6 @@ Analyze these auctions and decide which to bid on."""
         self._bids_placed = []
         
         try:
-            # Fixed markup strategy: bid = cost × 1.3 (30% profit margin)
-            markup = 1.3
-            
             for auction in eligible_auctions:
                 auction_id = auction["auction_id"]
                 max_price = auction["max_price"]
@@ -1003,9 +1008,45 @@ Analyze these auctions and decide which to bid on."""
                 # Estimate cost using base cost
                 base_cost = self.config.bidding_base_cost
                 estimated_cost = int(base_cost * 1e6)  # Convert to 6 decimals
-                
-                # Calculate bid with fixed markup
-                bid_amount = int(estimated_cost * markup)
+
+                # Strategy 1: Random markup within configured margin bounds
+                if strategy == "random_markup":
+                    markup = 1.0 + random.uniform(min_margin, max_margin)
+                    bid_amount = int(estimated_cost * markup)
+                # Strategy 2: Feasible random within profitable and competitive region
+                elif strategy == "feasible_random":
+                    min_profitable_bid = int(estimated_cost * (1.0 + min_margin))
+
+                    winning_bid = auction.get("winning_bid", 0) or 0
+                    winning_agent_id = auction.get("winning_agent_id", 0) or 0
+                    winner_reputation = 50
+                    if winning_agent_id and winning_agent_id != self.agent_id:
+                        for rep in state.get("competitors_reputation", []):
+                            if rep.get("agent_id") == winning_agent_id:
+                                winner_reputation = rep.get("rating", 50)
+                                break
+
+                    if winning_bid > 0:
+                        current_winner_score = (winning_bid * (100 + winner_reputation)) // 100
+                        max_competitive_bid = int((current_winner_score * 100 - 1) // (100 + state.get("agent_reputation", {}).get("rating", 50)))
+                    else:
+                        max_competitive_bid = max_price
+
+                    # Cap to auction max price
+                    max_competitive_bid = min(max_competitive_bid, max_price)
+
+                    if max_competitive_bid < min_profitable_bid:
+                        logger.info(
+                            f"⏭️ Skipping auction {auction_id}: no profitable competitive region "
+                            f"(min_profitable={min_profitable_bid}, max_competitive={max_competitive_bid})"
+                        )
+                        continue
+
+                    bid_amount = random.randint(min_profitable_bid, max_competitive_bid)
+                else:
+                    logger.warning(f"Unknown heuristic strategy '{strategy}', defaulting to random_markup")
+                    markup = 1.0 + random.uniform(min_margin, max_margin)
+                    bid_amount = int(estimated_cost * markup)
                 
                 # Check if bid is within max_price
                 if bid_amount > max_price:
@@ -1071,7 +1112,7 @@ Analyze these auctions and decide which to bid on."""
                     continue
             
             state["bids_placed"] = self._bids_placed
-            logger.info(f"✅ Deterministic reasoning completed: {len(self._bids_placed)} bids placed")
+            logger.info(f"✅ Heuristic reasoning completed: {len(self._bids_placed)} bids placed")
             
         except Exception as e:
             logger.error(f"Error in deterministic reasoning: {e}")
