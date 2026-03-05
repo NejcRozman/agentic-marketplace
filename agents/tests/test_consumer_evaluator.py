@@ -372,7 +372,7 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
         run_async(_test())
     
     def test_react_evaluation_node_fallback(self):
-        """Test fallback when agent doesn't use tools properly."""
+        """Test deterministic fallback when agent doesn't use tools properly."""
         async def _test():
             # Mock agent that doesn't call finalize_evaluation
             mock_agent = AsyncMock()
@@ -400,12 +400,15 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
                     
                     result_state = await self.evaluator._react_evaluation_node(state)
                     
-                    # Should use fallback
-                    self.assertEqual(result_state["overall_rating"], 75)
-                    self.assertEqual(result_state["quality_scores"], {"fallback": 75})
+                    # Should use local deterministic fallback with bounded score
+                    self.assertIsInstance(result_state["overall_rating"], int)
+                    self.assertGreaterEqual(result_state["overall_rating"], 0)
+                    self.assertLessEqual(result_state["overall_rating"], 100)
+                    self.assertIsInstance(result_state["quality_scores"], dict)
+                    self.assertTrue(len(result_state["quality_scores"]) > 0)
                     self.assertIsNone(result_state["error"])
                     
-                    print("\n✓ ReAct evaluation used fallback rating 75")
+                    print("\n✓ ReAct evaluation used deterministic local fallback")
         
         run_async(_test())
     

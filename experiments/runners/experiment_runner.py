@@ -518,6 +518,16 @@ class ExperimentRunner:
         elif agent_type == "provider_agent" and additional_args:
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
+            if 'architecture' in additional_args:
+                cmd.extend(["--architecture", str(additional_args['architecture'])])
+            if 'reasoning_mode' in additional_args:
+                cmd.extend(["--reasoning-mode", str(additional_args['reasoning_mode'])])
+            if 'heuristic_strategy' in additional_args:
+                cmd.extend(["--heuristic-strategy", str(additional_args['heuristic_strategy'])])
+            if 'heuristic_min_margin' in additional_args:
+                cmd.extend(["--heuristic-min-margin", str(additional_args['heuristic_min_margin'])])
+            if 'heuristic_max_margin' in additional_args:
+                cmd.extend(["--heuristic-max-margin", str(additional_args['heuristic_max_margin'])])
         
         # Setup environment variables
         env = os.environ.copy()
@@ -526,6 +536,19 @@ class ExperimentRunner:
         if agent_type == "provider_agent" and additional_args and 'quality_profile' in additional_args:
             env["QUALITY_PROFILE"] = additional_args['quality_profile']
             logger.info(f"Setting QUALITY_PROFILE={additional_args['quality_profile']} for provider {agent_id}")
+
+        # Provider reasoning configuration (also set in env for compatibility)
+        if agent_type == "provider_agent" and additional_args:
+            if 'architecture' in additional_args:
+                env["ARCHITECTURE"] = str(additional_args['architecture'])
+            if 'reasoning_mode' in additional_args:
+                env["REASONING_MODE"] = str(additional_args['reasoning_mode'])
+            if 'heuristic_strategy' in additional_args:
+                env["HEURISTIC_STRATEGY"] = str(additional_args['heuristic_strategy'])
+            if 'heuristic_min_margin' in additional_args:
+                env["HEURISTIC_MIN_MARGIN"] = str(additional_args['heuristic_min_margin'])
+            if 'heuristic_max_margin' in additional_args:
+                env["HEURISTIC_MAX_MARGIN"] = str(additional_args['heuristic_max_margin'])
         
         # Add project root to PYTHONPATH so agents can import from agents package
         project_root = str(Path(__file__).parent.parent.parent)
@@ -637,6 +660,34 @@ class ExperimentRunner:
                     provider_args['quality_profile'] = group_config['config']['quality_profile']
             else:
                 provider_args = {}
+
+            provider_behavior = group_config.get('behavior', {})
+            provider_cfg = group_config.get('config', {})
+
+            # Routing for provider strategy selection (YAML-driven)
+            architecture = provider_behavior.get('architecture', provider_cfg.get('architecture'))
+            reasoning_mode = provider_behavior.get('reasoning_mode', provider_cfg.get('reasoning_mode'))
+            heuristic_strategy = provider_behavior.get('heuristic_strategy', provider_cfg.get('heuristic_strategy'))
+            heuristic_min_margin = provider_behavior.get('heuristic_min_margin', provider_cfg.get('heuristic_min_margin'))
+            heuristic_max_margin = provider_behavior.get('heuristic_max_margin', provider_cfg.get('heuristic_max_margin'))
+
+            if architecture is not None:
+                provider_args['architecture'] = architecture
+            if reasoning_mode is not None:
+                provider_args['reasoning_mode'] = reasoning_mode
+            if heuristic_strategy is not None:
+                provider_args['heuristic_strategy'] = heuristic_strategy
+            if heuristic_min_margin is not None:
+                provider_args['heuristic_min_margin'] = heuristic_min_margin
+            if heuristic_max_margin is not None:
+                provider_args['heuristic_max_margin'] = heuristic_max_margin
+
+            logger.info(
+                f"Provider {agent_id} runtime config: "
+                f"architecture={provider_args.get('architecture', 'default')}, "
+                f"reasoning_mode={provider_args.get('reasoning_mode', 'default')}, "
+                f"heuristic_strategy={provider_args.get('heuristic_strategy', 'default')}"
+            )
             
             self.spawn_agent_process(
                 "provider_agent",

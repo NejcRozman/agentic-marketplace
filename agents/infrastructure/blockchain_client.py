@@ -156,25 +156,39 @@ class BlockchainClient:
         
         contract = self.contracts[contract_name]
         method = getattr(contract.functions, method_name)
-        
-        # Build transaction
-        transaction = await method(*args, **kwargs).build_transaction({
-            'from': self.account.address,
-            'value': value,
-            'gas': gas_limit or self.config.gas_limit,
-            'gasPrice': gas_price or await self.get_gas_price(),
-            'nonce': await self.w3.eth.get_transaction_count(self.account.address),
-            'chainId': self.config.chain_id,
-        })
-        
-        # Sign transaction
-        signed_txn = self.account.sign_transaction(transaction)
-        
-        # Send transaction
-        tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-        
-        logger.info(f"Sent transaction: {tx_hash.hex()}")
-        return tx_hash.hex()
+
+        # Retry nonce-related races (common when same key is used across processes)
+        last_error = None
+        for attempt in range(3):
+            try:
+                # Build transaction
+                transaction = await method(*args, **kwargs).build_transaction({
+                    'from': self.account.address,
+                    'value': value,
+                    'gas': gas_limit or self.config.gas_limit,
+                    'gasPrice': gas_price or await self.get_gas_price(),
+                    'nonce': await self.w3.eth.get_transaction_count(self.account.address, 'pending'),
+                    'chainId': self.config.chain_id,
+                })
+
+                # Sign transaction
+                signed_txn = self.account.sign_transaction(transaction)
+
+                # Send transaction
+                tx_hash = await self.w3.eth.send_raw_transaction(signed_txn.raw_transaction)
+
+                logger.info(f"Sent transaction: {tx_hash.hex()}")
+                return tx_hash.hex()
+            except Exception as e:
+                last_error = e
+                err_text = str(e).lower()
+                if "nonce too low" in err_text or "already known" in err_text or "replacement transaction underpriced" in err_text:
+                    logger.warning(f"Transaction nonce race on attempt {attempt + 1}/3: {e}")
+                    await asyncio.sleep(0.2)
+                    continue
+                raise
+
+        raise last_error
     
     async def wait_for_transaction(self, tx_hash: str, timeout: int = 120) -> Dict[str, Any]:
         """Wait for transaction confirmation."""
@@ -188,6 +202,7 @@ class BlockchainClient:
                 'transactionHash': receipt['transactionHash'].hex(),
                 'blockNumber': receipt['blockNumber'],
                 'gasUsed': receipt['gasUsed'],
+                'effectiveGasPrice': receipt.get('effectiveGasPrice', 0),
                 'status': receipt['status'],
                 'logs': [dict(log) for log in receipt['logs']]
             }

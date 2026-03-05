@@ -91,7 +91,12 @@ class Orchestrator:
     - Handles retries and errors
     """
     
-    def __init__(self, config: Optional[Config] = None):
+    def __init__(
+        self,
+        config: Optional[Config] = None,
+        architecture: Optional[str] = None,
+        reasoning_mode: Optional[str] = None,
+    ):
         """Initialize the orchestrator."""
         self.config = config or Config()
         
@@ -101,6 +106,8 @@ class Orchestrator:
         # Initialize agents with shared cost tracker
         self.blockchain_handler = BlockchainHandler(
             self.config.agent_id,
+            architecture=architecture,
+            reasoning_mode=reasoning_mode,
             cost_tracker=self.cost_tracker
         )
         self.service_executor = ServiceExecutor(
@@ -431,15 +438,40 @@ class Orchestrator:
 
 async def main(args):
     """Run the orchestrator with CLI arguments."""
-    # Override config from CLI arguments
+    # Build runtime config from environment and CLI overrides
+    runtime_config = Config()
+
     if args.agent_id:
-        Config.agent_id = args.agent_id
+        runtime_config.agent_id = args.agent_id
     if args.private_key:
-        Config.blockchain_private_key = args.private_key
+        runtime_config.private_key = args.private_key
+
+    if args.heuristic_strategy:
+        runtime_config.heuristic_strategy = args.heuristic_strategy
+    if args.heuristic_min_margin is not None:
+        runtime_config.heuristic_min_margin = args.heuristic_min_margin
+    if args.heuristic_max_margin is not None:
+        runtime_config.heuristic_max_margin = args.heuristic_max_margin
+
+    architecture = args.architecture or runtime_config.architecture
+    reasoning_mode = args.reasoning_mode
+
+    orchestrator = Orchestrator(
+        config=runtime_config,
+        architecture=architecture,
+        reasoning_mode=reasoning_mode,
+    )
     if args.check_interval:
-        Config.check_interval = args.check_interval
-    
-    orchestrator = Orchestrator()
+        orchestrator.check_interval = args.check_interval
+
+    logger.info(
+        "Provider runtime: "
+        f"architecture={architecture}, reasoning_mode={reasoning_mode or 'default'}, "
+        f"heuristic_strategy={runtime_config.heuristic_strategy}, "
+        f"heuristic_min_margin={runtime_config.heuristic_min_margin}, "
+        f"heuristic_max_margin={runtime_config.heuristic_max_margin}"
+    )
+
     await orchestrator.initialize()
     
     # Create status file path if provided
@@ -477,6 +509,21 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Provider Agent Orchestrator")
     parser.add_argument("--agent-id", type=int, help="Provider agent ID")
     parser.add_argument("--private-key", type=str, help="Blockchain private key")
+    parser.add_argument("--architecture", type=str, help="Architecture profile (e.g., 1)")
+    parser.add_argument(
+        "--reasoning-mode",
+        type=str,
+        choices=["deterministic", "heuristic", "llm_react", "llm_strategic"],
+        help="Provider reasoning mode override"
+    )
+    parser.add_argument(
+        "--heuristic-strategy",
+        type=str,
+        choices=["random_markup", "feasible_random"],
+        help="Heuristic bidding strategy"
+    )
+    parser.add_argument("--heuristic-min-margin", type=float, help="Heuristic minimum markup margin")
+    parser.add_argument("--heuristic-max-margin", type=float, help="Heuristic maximum markup margin")
     parser.add_argument("--check-interval", type=int, help="Blockchain check interval in seconds")
     parser.add_argument("--status-file", type=str, help="Path to write status JSON file")
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])

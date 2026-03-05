@@ -500,7 +500,7 @@ async def main(args):
     
     # Initialize with PDF directory if auto-create is enabled
     pdf_dir = Path(config.pdf_directory) if config.pdf_directory and config.auto_create_auction else None
-    await consumer.initialize(pdf_dir=pdf_dir, complexity=config.service_complexity)
+    await consumer.initialize(pdf_dir=pdf_dir)
     
     # Create status file path if provided
     status_file = Path(args.status_file) if args.status_file else None

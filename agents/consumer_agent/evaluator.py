@@ -6,6 +6,8 @@ Uses ReAct pattern with LLM to assess service quality and generate ratings.
 
 import json
 import logging
+import ast
+import re
 from typing import Dict, Any, List, Optional
 from typing_extensions import TypedDict
 
@@ -64,8 +66,8 @@ class ServiceEvaluator:
         
         @tool
         def extract_prompt_response_pairs(
-            service_requirements: str,  # JSON string
-            service_result: str  # JSON string
+            service_requirements: Any,
+            service_result: Any
         ) -> Dict[str, Any]:
             """Extract structured prompt-response pairs for evaluation.
             
@@ -76,15 +78,49 @@ class ServiceEvaluator:
             Returns:
                 Structured data ready for LLM evaluation
             """
-            def safe_json_loads(s):
-                if isinstance(s, str):
-                    # Escape single backslashes not already escaped
-                    s = s.replace('\\', '\\\\')  # double-escape existing escapes
-                    s = s.replace('"', '\"') if s.count('"') > s.count('\\"') else s
-                    # Now escape any remaining single backslashes
-                    s = s.replace('\\', '\\\\')
-                    return json.loads(s)
-                return s
+            def safe_json_loads(value):
+                """Parse tool input robustly (dict/list, JSON string, or Python-literal string)."""
+                if isinstance(value, (dict, list)):
+                    return value
+                if value is None:
+                    return {}
+                if isinstance(value, str):
+                    text = value.strip()
+
+                    # Strip markdown code fences if present
+                    if text.startswith("```"):
+                        lines = text.splitlines()
+                        if len(lines) >= 2:
+                            text = "\n".join(lines[1:-1]).strip()
+
+                    # Prefer strict JSON
+                    try:
+                        return json.loads(text)
+                    except Exception:
+                        pass
+
+                    # Fallback: Python literal dict/list from model output
+                    try:
+                        return ast.literal_eval(text)
+                    except Exception:
+                        pass
+
+                    # Last attempt: recover likely JSON object substring
+                    if "{" in text and "}" in text:
+                        start = text.find("{")
+                        end = text.rfind("}")
+                        if start < end:
+                            snippet = text[start:end + 1]
+                            try:
+                                return json.loads(snippet)
+                            except Exception:
+                                try:
+                                    return ast.literal_eval(snippet)
+                                except Exception:
+                                    pass
+
+                    raise ValueError("Unable to parse tool argument as JSON/object")
+                raise TypeError(f"Unsupported input type: {type(value).__name__}")
             try:
                 requirements = safe_json_loads(service_requirements)
                 result = safe_json_loads(service_result)
@@ -157,6 +193,103 @@ class ServiceEvaluator:
         workflow.add_edge("validate_rating", END)
         
         return workflow.compile()
+
+    def _parse_rating_from_messages(self, messages: List[Any]) -> tuple[Optional[int], Optional[Dict[str, int]]]:
+        """Extract overall rating and quality scores from agent messages."""
+        for msg in reversed(messages):
+            try:
+                # Preferred: tool output from finalize_evaluation
+                if msg.__class__.__name__ == "ToolMessage" and "overall_rating" in str(msg.content):
+                    if isinstance(msg.content, str):
+                        try:
+                            result_data = json.loads(msg.content)
+                        except Exception:
+                            result_data = ast.literal_eval(msg.content)
+                    else:
+                        result_data = msg.content
+
+                    if isinstance(result_data, dict):
+                        return result_data.get("overall_rating"), result_data.get("quality_scores")
+
+                # Secondary: model returned final JSON directly (no tool message)
+                if msg.__class__.__name__ == "AIMessage" and "overall_rating" in str(getattr(msg, "content", "")):
+                    content = getattr(msg, "content", "")
+                    if isinstance(content, str) and content.strip():
+                        try:
+                            result_data = json.loads(content)
+                        except Exception:
+                            try:
+                                result_data = ast.literal_eval(content)
+                            except Exception:
+                                result_data = None
+                        if isinstance(result_data, dict):
+                            return result_data.get("overall_rating"), result_data.get("quality_scores")
+            except Exception:
+                continue
+
+        return None, None
+
+    def _local_fallback_evaluation(
+        self,
+        service_requirements: Dict[str, Any],
+        service_result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Deterministic local fallback when agent doesn't return tool-based rating."""
+        responses = service_result.get("responses", []) if isinstance(service_result, dict) else []
+        prompts = service_requirements.get("prompts", []) if isinstance(service_requirements, dict) else []
+        criteria = service_requirements.get("quality_criteria", {}) if isinstance(service_requirements, dict) else {}
+
+        total_expected = max(len(prompts), len(responses), 1)
+        non_empty = [r for r in responses if str(r.get("response", "")).strip()]
+        coverage = len(non_empty) / total_expected
+
+        avg_len = int(sum(len(str(r.get("response", ""))) for r in non_empty) / max(len(non_empty), 1))
+        if avg_len >= 600:
+            depth_base = 90
+        elif avg_len >= 300:
+            depth_base = 75
+        elif avg_len >= 120:
+            depth_base = 60
+        elif avg_len >= 40:
+            depth_base = 45
+        else:
+            depth_base = 25
+
+        citation_hits = 0
+        for r in non_empty:
+            text = str(r.get("response", ""))
+            if re.search(r"\(\d{4}\)|\[\d+\]|et al\.", text, flags=re.IGNORECASE):
+                citation_hits += 1
+        citations = int(100 * citation_hits / max(len(non_empty), 1))
+
+        completeness = int(100 * coverage)
+        depth = int(depth_base * coverage + 0.2 * completeness)
+        clarity = int(min(100, max(0, 0.7 * depth + 0.3 * completeness)))
+
+        default_dims = ["completeness", "depth", "clarity", "citations"]
+        dimensions = list(criteria.keys()) if isinstance(criteria, dict) and criteria else default_dims
+
+        quality_scores: Dict[str, int] = {}
+        for dim in dimensions:
+            key = str(dim).lower()
+            if "complete" in key:
+                quality_scores[dim] = max(0, min(100, completeness))
+            elif "depth" in key or "detail" in key:
+                quality_scores[dim] = max(0, min(100, depth))
+            elif "clar" in key or "struct" in key:
+                quality_scores[dim] = max(0, min(100, clarity))
+            elif "citation" in key or "reference" in key or "source" in key:
+                quality_scores[dim] = max(0, min(100, citations))
+            else:
+                quality_scores[dim] = max(0, min(100, int((completeness + depth + clarity) / 3)))
+
+        overall = int(sum(quality_scores.values()) / max(len(quality_scores), 1))
+        overall = max(0, min(100, overall))
+
+        return {
+            "overall_rating": overall,
+            "quality_scores": quality_scores
+        }
     
     async def _react_evaluation_node(self, state: EvaluatorState) -> EvaluatorState:
         """Use ReAct agent to evaluate service quality."""
@@ -241,26 +374,30 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
             logger.info("=" * 80 + "\n")
             
             # Extract results from tool calls
-            overall_rating = None
-            quality_scores = None
-            
-            for msg in reversed(agent_result["messages"]):
-                if msg.__class__.__name__ == "ToolMessage" and "overall_rating" in str(msg.content):
-                    try:
-                        # Parse the finalize_evaluation output
-                        result_data = eval(msg.content) if isinstance(msg.content, str) else msg.content
-                        if isinstance(result_data, dict):
-                            overall_rating = result_data.get("overall_rating")
-                            quality_scores = result_data.get("quality_scores")
-                            break
-                    except:
-                        pass
-            
-            # Fallback if agent didn't use tools properly
+            overall_rating, quality_scores = self._parse_rating_from_messages(agent_result["messages"])
+
+            # Retry once with stricter instruction if no usable rating was produced
             if overall_rating is None:
-                logger.warning("Agent did not produce rating via tools, using fallback")
-                overall_rating = 75
-                quality_scores = {"fallback": 75}
+                logger.warning("Agent did not produce rating on first pass; retrying with stricter tool-use instruction")
+                retry_msg = HumanMessage(content=(
+                    "You must call tools to finish: "
+                    "1) extract_prompt_response_pairs(service_requirements, service_result), "
+                    "2) compute dimension scores (0-100), "
+                    "3) call finalize_evaluation(dimension_scores as JSON string). "
+                    "Return only final JSON from finalize_evaluation."
+                ))
+                retry_result = await react_agent.ainvoke({
+                    "messages": [HumanMessage(content=system_prompt), retry_msg]
+                })
+                agent_result = retry_result
+                overall_rating, quality_scores = self._parse_rating_from_messages(agent_result["messages"])
+
+            # Deterministic fallback if tool path still failed
+            if overall_rating is None:
+                logger.warning("Agent still did not produce a valid rating; using deterministic local fallback evaluation")
+                fallback = self._local_fallback_evaluation(requirements, result)
+                overall_rating = fallback["overall_rating"]
+                quality_scores = fallback["quality_scores"]
             
             state["overall_rating"] = overall_rating
             state["quality_scores"] = quality_scores

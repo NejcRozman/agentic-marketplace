@@ -749,12 +749,13 @@ Analyze these auctions and decide which to bid on."""
                 )
                 
                 # Track revenue from winning auction
-                auction_data = await self.client.call_contract(
+                auction_data = await self.client.call_contract_method(
                     "ReverseAuction",
-                    "auctions",
+                    "getAuctionDetails",
                     auction_id
                 )
-                winning_bid = auction_data[3]  # winningBid field
+                # getAuctionDetails struct index 8 = winningBid
+                winning_bid = auction_data[8]
                 revenue_usd = winning_bid / 1e6  # Convert from 6 decimals to USD
                 
                 self.cost_tracker.add_revenue(
@@ -1004,6 +1005,20 @@ Analyze these auctions and decide which to bid on."""
             for auction in eligible_auctions:
                 auction_id = auction["auction_id"]
                 max_price = auction["max_price"]
+                winning_agent_id = auction.get("winning_agent_id", 0) or 0
+                time_remaining = auction.get("time_remaining", 0) or 0
+
+                # Skip rebidding if we are already current winner
+                if winning_agent_id == self.agent_id:
+                    logger.info(f"⏭️ Skipping auction {auction_id}: already winning")
+                    continue
+
+                # Skip last-second bids that are likely to expire before inclusion
+                if time_remaining <= 10:
+                    logger.info(
+                        f"⏭️ Skipping auction {auction_id}: only {time_remaining}s remaining"
+                    )
+                    continue
                 
                 # Estimate cost using base cost
                 base_cost = self.config.bidding_base_cost
@@ -1018,7 +1033,6 @@ Analyze these auctions and decide which to bid on."""
                     min_profitable_bid = int(estimated_cost * (1.0 + min_margin))
 
                     winning_bid = auction.get("winning_bid", 0) or 0
-                    winning_agent_id = auction.get("winning_agent_id", 0) or 0
                     winner_reputation = 50
                     if winning_agent_id and winning_agent_id != self.agent_id:
                         for rep in state.get("competitors_reputation", []):

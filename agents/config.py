@@ -62,7 +62,6 @@ class Config:
         self.auction_creation_delay = int(os.getenv("AUCTION_CREATION_DELAY", "0"))  # Delay before first auction
         self.inter_auction_delay = int(os.getenv("INTER_AUCTION_DELAY", "30"))  # Delay between auctions
         self.pdf_directory = os.getenv("PDF_DIRECTORY", "")
-        self.service_complexity = os.getenv("SERVICE_COMPLEXITY", "medium")
         self.max_budget = int(os.getenv("MAX_BUDGET", "100000000"))  # 100 USDC with 6 decimals
         self.auction_duration = int(os.getenv("AUCTION_DURATION", "1800"))  # 30 minutes
         self.reputation_weight = int(os.getenv("REPUTATION_WEIGHT", "30"))  # 0-100, weight of reputation in bid scoring

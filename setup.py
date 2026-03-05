@@ -14,6 +14,7 @@ setup(
         "langchain>=0.1.0",
         "langchain-core>=0.1.0",
         "langchain-community>=0.0.20",
+        "pypdf>=4.0.0",
         "langchain-google-genai>=0.0.6",
         "langgraph>=0.0.20",
     ],
