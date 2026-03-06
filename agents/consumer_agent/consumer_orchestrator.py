@@ -156,7 +156,7 @@ class Consumer:
     async def create_auction(
         self,
         service_index: Optional[int] = None,
-        max_budget: int = 100_000_000,  # 100 USDC
+        max_budget: int = 10_000_000,  # 10 USDC
         duration: int = 1800,  # 30 minutes
         eligible_providers: Optional[List[int]] = None
     ) -> int:

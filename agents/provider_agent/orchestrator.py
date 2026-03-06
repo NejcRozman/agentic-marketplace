@@ -328,7 +328,13 @@ class Orchestrator:
         """Execute the service."""
         logger.info(f"⚙️  Executing service for job {job.auction_id}")
         
+        tracking_started = False
         try:
+            # Track only service-execution LLM costs
+            if self.cost_tracker:
+                self.cost_tracker.start_service_execution()
+                tracking_started = True
+
             # Execute service
             # Only pass effort_tier if two_way coupling is enabled
             kwargs = {
@@ -345,11 +351,17 @@ class Orchestrator:
                 raise Exception(f"Service execution failed: {result.get('error')}")
             
             job.result = result
+
+            if self.cost_tracker and tracking_started:
+                job.llm_cost = self.cost_tracker.end_service_execution()
             
             logger.info(f"✓ Service executed: {len(result['responses'])} responses generated")
             job.status = JobStatus.PROCESSING
             
         except Exception as e:
+            if self.cost_tracker and tracking_started:
+                # Close tracking window even on failure (captures partial execution cost)
+                job.llm_cost = self.cost_tracker.end_service_execution()
             raise Exception(f"Failed to execute service: {e}")
     
     async def _deliver_result(self, job: Job):

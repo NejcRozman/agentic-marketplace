@@ -1188,7 +1188,11 @@ Analyze these auctions and decide which to bid on."""
             
             react_agent = create_agent(llm, self._tools)
             
-            result = await react_agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
+            recursion_limit = int(getattr(self.config, "react_recursion_limit", 12))
+            result = await react_agent.ainvoke(
+                {"messages": [HumanMessage(content=prompt)]},
+                config={"recursion_limit": recursion_limit}
+            )
             
             # Log the agent's reasoning trace
             logger.info("\n" + "=" * 80)
@@ -1223,8 +1227,15 @@ Analyze these auctions and decide which to bid on."""
             logger.info(f"✅ ReAct completed: {len(self._bids_placed)} bids placed")
             
         except Exception as e:
+            err_text = str(e)
+            if "GRAPH_RECURSION_LIMIT" in err_text or "Recursion limit" in err_text:
+                logger.warning(f"ReAct recursion limit reached; returning partial bidding decisions: {e}")
+                state["error"] = None
+                state["bids_placed"] = self._bids_placed
+                return state
+
             logger.error(f"Error in ReAct reasoning: {e}")
-            state["error"] = str(e)
+            state["error"] = err_text
             state["bids_placed"] = []
         
         return state

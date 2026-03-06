@@ -37,7 +37,12 @@ from agents.config import Config
 
 def run_async(coro):
     """Helper to run async functions in sync tests."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 class TestOrchestratorUnit(unittest.TestCase):
@@ -53,8 +58,15 @@ class TestOrchestratorUnit(unittest.TestCase):
             "buyer_address": "0x1234567890123456789012345678901234567890",
             "service_cid": "QmTestServiceCID123",
             "max_price": 100000000,
-            "winning_bid": 50000000
+            "winning_bid": 50000000,
+            "effort_tier": None
         }
+
+        # CostTracker dependencies used by Orchestrator
+        self.mock_config.service_cost_multiplier = 100.0
+        self.mock_config.gas_price_gwei = 20.0
+        self.mock_config.eth_price_usd = 3000.0
+        self.mock_config.coupling_mode = "isolated"
         
         self.sample_service_requirements = {
             "title": "Test Literature Review",
@@ -119,7 +131,7 @@ class TestOrchestratorUnit(unittest.TestCase):
         with TemporaryDirectory() as tmpdir:
             orchestrator = Orchestrator(config=self.mock_config)
             orchestrator.service_executor = Mock()
-            orchestrator.service_executor.perform_review = Mock(return_value={
+            orchestrator.service_executor.perform_analysis = Mock(return_value={
                 "success": True,
                 "responses": ["Answer 1", "Answer 2"],
                 "agent_id": "4427"

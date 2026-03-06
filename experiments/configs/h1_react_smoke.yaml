@@ -1,10 +1,10 @@
-# H1 Heuristic Smoke Test (Homogeneous Providers)
-# Purpose: Fast end-to-end sanity check with only heuristic providers
+# H1 ReAct Smoke Test (Homogeneous Providers)
+# Purpose: Fast end-to-end sanity check with architecture 1 + LLM ReAct providers
 
 experiment:
-  id: "h1_heuristic_smoke"
-  name: "Heuristic Homogeneous Smoke Test"
-  description: "Quick smoke test with 1 consumer and 2 homogeneous heuristic providers over 2 auctions"
+  id: "h1_react_smoke"
+  name: "ReAct Homogeneous Smoke Test"
+  description: "Quick smoke test with 1 consumer and 2 homogeneous architecture-1 ReAct providers over 2 auctions"
   research_question: "smoke_test"
   duration_timeout: 1200  # 20 minutes max
 
@@ -40,7 +40,7 @@ agents:
 
     config:
       check_interval: 5
-      max_budget: 10000000        # 10 USDC
+      max_budget: 10000000       # 10 USDC
       auction_duration: 60        # 1 minute
       reputation_weight: 25
 
@@ -62,16 +62,13 @@ agents:
       check_interval: 5
       bidding_base_cost: 5        # 5 USD estimated service cost
       gas_cost_mode: "fixed"     # model with fixed network average gas price
-      gas_price_gwei: 0.04          # assumed average gas price
+      gas_price_gwei: 0.04        # assumed average gas price
       eth_price_usd: 2000         # ETH/USD for gas conversion
 
     behavior:
-      # Homogeneous heuristic setup
+      # Homogeneous architecture-1 ReAct setup
       architecture: "1"
-      reasoning_mode: "heuristic"
-      heuristic_strategy: "random_markup"
-      heuristic_min_margin: 0.10
-      heuristic_max_margin: 0.30
+      reasoning_mode: "llm_react"
       auto_bid: true
       auto_execute: true
       auto_complete: true
@@ -109,12 +106,12 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h1_heuristic_smoke"
+    directory: "experiments/data/logs/h1_react_smoke"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h1_heuristic_smoke"
+    directory: "experiments/data/metrics/h1_react_smoke"
     format: "json"
 
 api_keys:

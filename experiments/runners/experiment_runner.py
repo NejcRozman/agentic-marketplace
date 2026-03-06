@@ -549,6 +549,14 @@ class ExperimentRunner:
                 env["HEURISTIC_MIN_MARGIN"] = str(additional_args['heuristic_min_margin'])
             if 'heuristic_max_margin' in additional_args:
                 env["HEURISTIC_MAX_MARGIN"] = str(additional_args['heuristic_max_margin'])
+            if 'bidding_base_cost' in additional_args:
+                env["BIDDING_BASE_COST"] = str(additional_args['bidding_base_cost'])
+            if 'gas_cost_mode' in additional_args:
+                env["GAS_COST_MODE"] = str(additional_args['gas_cost_mode'])
+            if 'gas_price_gwei' in additional_args:
+                env["GAS_PRICE_GWEI"] = str(additional_args['gas_price_gwei'])
+            if 'eth_price_usd' in additional_args:
+                env["ETH_PRICE_USD"] = str(additional_args['eth_price_usd'])
         
         # Add project root to PYTHONPATH so agents can import from agents package
         project_root = str(Path(__file__).parent.parent.parent)
@@ -681,6 +689,21 @@ class ExperimentRunner:
                 provider_args['heuristic_min_margin'] = heuristic_min_margin
             if heuristic_max_margin is not None:
                 provider_args['heuristic_max_margin'] = heuristic_max_margin
+
+            # Provider economic simulation parameters
+            bidding_base_cost = provider_cfg.get('bidding_base_cost')
+            gas_cost_mode = provider_cfg.get('gas_cost_mode')
+            gas_price_gwei = provider_cfg.get('gas_price_gwei')
+            eth_price_usd = provider_cfg.get('eth_price_usd')
+
+            if bidding_base_cost is not None:
+                provider_args['bidding_base_cost'] = bidding_base_cost
+            if gas_cost_mode is not None:
+                provider_args['gas_cost_mode'] = gas_cost_mode
+            if gas_price_gwei is not None:
+                provider_args['gas_price_gwei'] = gas_price_gwei
+            if eth_price_usd is not None:
+                provider_args['eth_price_usd'] = eth_price_usd
 
             logger.info(
                 f"Provider {agent_id} runtime config: "

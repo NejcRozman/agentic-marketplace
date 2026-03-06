@@ -394,8 +394,8 @@ class TestServiceExecutionCostTracking(unittest.TestCase):
 class TestCouplingModeIntegration(unittest.TestCase):
     """Test coupling mode configurations."""
     
-    def test_isolated_mode_no_history(self):
-        """Test isolated mode doesn't populate execution cost history."""
+    def test_isolated_mode_uses_base_estimate(self):
+        """Architecture 1 should use base estimated cost in isolated mode."""
         from agents.provider_agent.blockchain_handler import BlockchainHandler
         from unittest.mock import AsyncMock, MagicMock
         
@@ -432,21 +432,16 @@ class TestCouplingModeIntegration(unittest.TestCase):
             # Call gather state node directly
             result = asyncio.run(handler._gather_state_node(state))
             
-            # In isolated mode, past_execution_costs should be None
-            self.assertIsNone(result.get("past_execution_costs"))
+            # Current architecture schema uses estimated_service_cost
+            self.assertEqual(result.get("estimated_service_cost"), test_config.bidding_base_cost)
             
-            # current_service_cost should fall back to base_cost
-            self.assertEqual(result.get("current_service_cost"), test_config.bidding_base_cost)
-            
-            print("\n✓ Isolated mode: no execution cost history in state")
-            print(f"  past_execution_costs: None")
-            print(f"  current_service_cost: {test_config.bidding_base_cost} (base cost)")
+            print("\n✓ Isolated mode: estimated_service_cost uses base cost")
         
         finally:
             test_config.coupling_mode = original_mode
     
-    def test_one_way_mode_with_history(self):
-        """Test one_way mode populates execution cost history."""
+    def test_one_way_mode_arch1_still_uses_base_estimate(self):
+        """Architecture 1 ignores history and keeps base estimated cost in one_way mode."""
         from agents.provider_agent.blockchain_handler import BlockchainHandler
         from unittest.mock import AsyncMock, MagicMock
         
@@ -487,23 +482,16 @@ class TestCouplingModeIntegration(unittest.TestCase):
             # Call gather state
             result = asyncio.run(handler._gather_state_node(state))
             
-            # In one_way mode, past_execution_costs should be populated
-            self.assertIsNotNone(result.get("past_execution_costs"))
-            self.assertEqual(len(result["past_execution_costs"]), 2)
+            # Architecture 1 (state_level=0) keeps base estimate regardless of coupling mode
+            self.assertEqual(result.get("estimated_service_cost"), handler.config.bidding_base_cost)
             
-            # current_service_cost should be last execution cost
-            history = tracker.get_execution_cost_history()
-            self.assertEqual(result.get("current_service_cost"), history[-1])
-            
-            print("\n✓ One-way mode: execution cost history in state")
-            print(f"  past_execution_costs: {len(result['past_execution_costs'])} entries")
-            print(f"  current_service_cost: ${result['current_service_cost']:.2f}")
+            print("\n✓ One-way mode: architecture 1 keeps base estimated_service_cost")
         
         finally:
             handler.config.coupling_mode = original_mode
     
-    def test_two_way_mode_with_history(self):
-        """Test two_way mode populates execution cost history (same as one_way for now)."""
+    def test_two_way_mode_arch1_still_uses_base_estimate(self):
+        """Architecture 1 ignores history and keeps base estimated cost in two_way mode."""
         from agents.provider_agent.blockchain_handler import BlockchainHandler
         from unittest.mock import AsyncMock, MagicMock
         
@@ -540,17 +528,10 @@ class TestCouplingModeIntegration(unittest.TestCase):
             # Call gather state
             result = asyncio.run(handler._gather_state_node(state))
             
-            # In two_way mode, past_execution_costs should be populated
-            self.assertIsNotNone(result.get("past_execution_costs"))
-            self.assertEqual(len(result["past_execution_costs"]), 1)
+            # Architecture 1 (state_level=0) keeps base estimate regardless of coupling mode
+            self.assertEqual(result.get("estimated_service_cost"), handler.config.bidding_base_cost)
             
-            # current_service_cost should be last execution cost
-            history = tracker.get_execution_cost_history()
-            self.assertEqual(result.get("current_service_cost"), history[-1])
-            
-            print("\n✓ Two-way mode: execution cost history in state")
-            print(f"  past_execution_costs: {len(result['past_execution_costs'])} entries")
-            print(f"  current_service_cost: ${result['current_service_cost']:.2f}")
+            print("\n✓ Two-way mode: architecture 1 keeps base estimated_service_cost")
         
         finally:
             handler.config.coupling_mode = original_mode

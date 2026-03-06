@@ -62,7 +62,7 @@ class Config:
         self.auction_creation_delay = int(os.getenv("AUCTION_CREATION_DELAY", "0"))  # Delay before first auction
         self.inter_auction_delay = int(os.getenv("INTER_AUCTION_DELAY", "30"))  # Delay between auctions
         self.pdf_directory = os.getenv("PDF_DIRECTORY", "")
-        self.max_budget = int(os.getenv("MAX_BUDGET", "100000000"))  # 100 USDC with 6 decimals
+        self.max_budget = int(os.getenv("MAX_BUDGET", "10000000"))  # 10 USDC with 6 decimals
         self.auction_duration = int(os.getenv("AUCTION_DURATION", "1800"))  # 30 minutes
         self.reputation_weight = int(os.getenv("REPUTATION_WEIGHT", "30"))  # 0-100, weight of reputation in bid scoring
         
@@ -76,7 +76,7 @@ class Config:
         self.rag_chunk_overlap = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
         
         # Provider bidding configuration
-        self.bidding_base_cost = int(os.getenv("BIDDING_BASE_COST", "40"))
+        self.bidding_base_cost = int(os.getenv("BIDDING_BASE_COST", "5"))
 
         # Heuristic bidding configuration
         self.heuristic_strategy = os.getenv("HEURISTIC_STRATEGY", "random_markup")
@@ -84,6 +84,7 @@ class Config:
         self.heuristic_max_margin = float(os.getenv("HEURISTIC_MAX_MARGIN", "0.30"))
         
         # Cost tracking constants (for economic simulation)
+        self.gas_cost_mode = os.getenv("GAS_COST_MODE", "receipt")  # "receipt" or "fixed"
         self.gas_price_gwei = float(os.getenv("GAS_PRICE_GWEI", "20.0"))
         self.eth_price_usd = float(os.getenv("ETH_PRICE_USD", "3000.0"))
         self.llm_input_price_per_1k = float(os.getenv("LLM_INPUT_PRICE_PER_1K", "0.0002"))

@@ -30,25 +30,51 @@ class LLMCostCallback(BaseCallbackHandler):
     def on_llm_end(self, response, **kwargs):
         """Called when LLM finishes - calculate cost from token usage."""
         try:
-            # Extract token usage from response
+            input_tokens = 0
+            output_tokens = 0
+
+            # Format 1: llm_output.token_usage
             if hasattr(response, "llm_output") and response.llm_output:
-                token_usage = response.llm_output.get("token_usage", {})
-                input_tokens = token_usage.get("prompt_tokens", 0)
-                output_tokens = token_usage.get("completion_tokens", 0)
-                
-                # Use config-based pricing
-                input_cost = (input_tokens / 1000) * self.config.llm_input_price_per_1k
-                output_cost = (output_tokens / 1000) * self.config.llm_output_price_per_1k
-                total_cost = input_cost + output_cost
-                
-                self.total_tokens += (input_tokens + output_tokens)
-                self.total_cost += total_cost
-                
-                # Record in cost tracker
-                self.cost_tracker.add_llm_cost(
-                    cost_usd=total_cost,
-                    context=f"{self.model} ({input_tokens}+{output_tokens} tokens)"
-                )
+                token_usage = response.llm_output.get("token_usage", {}) or {}
+                input_tokens = token_usage.get("prompt_tokens", 0) or token_usage.get("input_tokens", 0)
+                output_tokens = token_usage.get("completion_tokens", 0) or token_usage.get("output_tokens", 0)
+
+            # Format 2: generations[*][*].message.usage_metadata / response_metadata.token_usage
+            if (input_tokens + output_tokens) == 0 and hasattr(response, "generations") and response.generations:
+                try:
+                    gen0 = response.generations[0][0]
+                    msg = getattr(gen0, "message", None)
+
+                    if msg is not None:
+                        usage_meta = getattr(msg, "usage_metadata", None) or {}
+                        input_tokens = usage_meta.get("input_tokens", 0) or usage_meta.get("prompt_tokens", 0)
+                        output_tokens = usage_meta.get("output_tokens", 0) or usage_meta.get("completion_tokens", 0)
+
+                        if (input_tokens + output_tokens) == 0:
+                            resp_meta = getattr(msg, "response_metadata", None) or {}
+                            token_usage = resp_meta.get("token_usage", {}) or {}
+                            input_tokens = token_usage.get("prompt_tokens", 0) or token_usage.get("input_tokens", 0)
+                            output_tokens = token_usage.get("completion_tokens", 0) or token_usage.get("output_tokens", 0)
+                except Exception:
+                    pass
+
+            # Nothing to account for
+            if (input_tokens + output_tokens) == 0:
+                return
+
+            # Use config-based pricing
+            input_cost = (input_tokens / 1000) * self.config.llm_input_price_per_1k
+            output_cost = (output_tokens / 1000) * self.config.llm_output_price_per_1k
+            total_cost = input_cost + output_cost
+
+            self.total_tokens += (input_tokens + output_tokens)
+            self.total_cost += total_cost
+
+            # Record in cost tracker
+            self.cost_tracker.add_llm_cost(
+                cost_usd=total_cost,
+                context=f"{self.model} ({input_tokens}+{output_tokens} tokens)"
+            )
                 
         except Exception as e:
             logger.warning(f"Failed to track LLM cost: {e}")
@@ -117,6 +143,22 @@ class CostTracker:
             gas_price_wei: Gas price in wei (from transaction receipt)
             context: Description of transaction type
         """
+        gas_cost_mode = getattr(self.config, "gas_cost_mode", "receipt")
+
+        # fixed: always use configured average gas price (good for scenario modeling)
+        # receipt (default): use on-chain receipt price when available
+        if gas_cost_mode == "fixed":
+            gas_price_wei = int(self.config.gas_price_gwei * 1e9)
+        else:
+            # Some local/forked chains may return 0 effectiveGasPrice in receipts.
+            # Fall back to configured simulation gas price to avoid undercounting.
+            if not gas_price_wei or gas_price_wei <= 0:
+                gas_price_wei = int(self.config.gas_price_gwei * 1e9)
+                logger.debug(
+                    f"effectiveGasPrice missing for {context}; "
+                    f"falling back to config gas price {self.config.gas_price_gwei} gwei"
+                )
+
         # Convert wei to gwei
         gas_price_gwei = gas_price_wei / 1e9
         cost_eth = (gas_used * gas_price_gwei) / 1e9
@@ -192,11 +234,11 @@ class CostTracker:
 ╔══════════════════════════════════════════════════════════╗
 ║  Agent #{self.agent_id} - Financial Summary     
 ╠══════════════════════════════════════════════════════════╣
-║  Revenue:      ${self.total_revenue:>10.2f} USD         
-║  LLM Costs:    ${self.total_llm_costs:>10.2f} USD       
-║  Gas Costs:    ${self.total_gas_costs:>10.2f} USD       
+║  Revenue:      ${self.total_revenue:>10.4f} USD         
+║  LLM Costs:    ${self.total_llm_costs:>10.4f} USD       
+║  Gas Costs:    ${self.total_gas_costs:>10.4f} USD       
 ║  ────────────────────────────────────────────────        
-║  Total Costs:  ${total_costs:>10.2f} USD                
-║  NET BALANCE:  ${net_balance:>10.2f} USD                
+║  Total Costs:  ${total_costs:>10.4f} USD                
+║  NET BALANCE:  ${net_balance:>10.4f} USD                
 ╚══════════════════════════════════════════════════════════╝
         """)
