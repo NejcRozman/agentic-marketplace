@@ -39,7 +39,9 @@ Your goal: Maximize profit by bidding on profitable auctions.
 Available auctions:
 {auctions_context}
 
-Use your tools to analyze auctions and place bids where profitable."""
+Use your tools to analyze auctions and place bids where profitable.
+
+Important: when calling scoring tools, always pass the auction's max_price and reputation_weight so the score/outcome matches on-chain contract logic exactly."""
 
 
 def _prompt_arch_2(agent_id: int, auctions_context: str, **kwargs) -> str:

@@ -146,7 +146,6 @@ class BlockchainHandler:
         blockchain_client: Optional[BlockchainClient] = None,
         architecture: Optional[str] = None,
         system_prompt: Optional[str] = None,
-        llm_model: Optional[str] = None,
         llm_temperature: Optional[float] = None,
         llm_base_url: Optional[str] = None,
         llm_api_key: Optional[str] = None,
@@ -162,7 +161,6 @@ class BlockchainHandler:
             blockchain_client: Optional blockchain client instance
             architecture: Architecture name. If None, uses config.architecture
             system_prompt: System prompt for the ReAct agent (if None, uses architecture's template)
-            llm_model: LLM model identifier (if None, uses architecture's default)
             llm_temperature: LLM temperature (if None, uses architecture's default)
             llm_base_url: LLM API base URL (default: from config)
             llm_api_key: LLM API key (default: from config)
@@ -187,7 +185,7 @@ class BlockchainHandler:
         self.system_prompt = system_prompt
         
         # LLM configuration (with architecture defaults)
-        self.llm_model = llm_model or self.arch_config.llm_model
+        self.llm_model = self.arch_config.blockchain_llm
         self.llm_temperature = llm_temperature if llm_temperature is not None else self.arch_config.llm_temperature
         self.llm_base_url = llm_base_url or self.config.openrouter_base_url
         self.llm_api_key = llm_api_key or self.config.openrouter_api_key
@@ -272,45 +270,73 @@ class BlockchainHandler:
                 }
         
         @tool
-        def calculate_bid_score(bid_amount: int, agent_reputation: int) -> Dict[str, Any]:
+        def calculate_bid_score(
+            bid_amount: int,
+            agent_reputation: int,
+            max_price: int = 0,
+            reputation_weight: int = 25
+        ) -> Dict[str, Any]:
             """Calculate the bid score that will be used in auction ranking.
             
-            The contract calculates bid score as: bid * (100 + reputation) / 100
-            Lower scores win in reverse auctions. Higher reputation gives better (lower) scores.
+            Contract scoring (higher score wins):
+            - normalized_reputation = reputation (0-100)
+            - normalized_bid_score = ((max_price - bid_amount) * 100) / max_price
+            - score = (reputation_weight * normalized_reputation +
+                      (100 - reputation_weight) * normalized_bid_score) / 100
             
             Args:
                 bid_amount: The bid amount in USDC (with 6 decimals, e.g., 50000000 = 50 USDC)
                 agent_reputation: The reputation score (0-100, where 50 is neutral)
+                max_price: Auction max price (required for exact score)
+                reputation_weight: Auction reputation weight (0-100)
             
             Returns:
                 Dictionary with bid_score and explanation
             """
             try:
-                # Contract formula: bidScore = bid * (100 + reputation) / 100
-                bid_score = (bid_amount * (100 + agent_reputation)) // 100
-                
-                reputation_effect = agent_reputation - 50  # How much better/worse than neutral
-                if reputation_effect > 0:
-                    advantage = f"{reputation_effect} points above neutral gives you a {reputation_effect}% advantage"
-                elif reputation_effect < 0:
-                    advantage = f"{-reputation_effect} points below neutral gives you a {-reputation_effect}% disadvantage"
-                else:
-                    advantage = "neutral reputation (no advantage or disadvantage)"
-                
+                if max_price <= 0:
+                    return {
+                        "error": "max_price is required for exact contract score",
+                        "bid_amount": bid_amount,
+                        "agent_reputation": agent_reputation,
+                        "max_price": max_price,
+                        "reputation_weight": reputation_weight,
+                        "summary": "Provide max_price to calculate exact on-chain score."
+                    }
+
+                if bid_amount > max_price:
+                    return {
+                        "error": "bid exceeds max_price",
+                        "bid_amount": bid_amount,
+                        "max_price": max_price,
+                        "summary": "Bid exceeds auction max price and will revert (BidTooHigh)."
+                    }
+
+                rw = max(0, min(100, int(reputation_weight)))
+                normalized_reputation = int(agent_reputation)
+                normalized_bid_score = ((max_price - bid_amount) * 100) // max_price
+                bid_score = (rw * normalized_reputation + (100 - rw) * normalized_bid_score) // 100
+
                 return {
                     "bid_amount": bid_amount,
                     "agent_reputation": agent_reputation,
+                    "max_price": max_price,
+                    "reputation_weight": rw,
+                    "normalized_reputation": normalized_reputation,
+                    "normalized_bid_score": normalized_bid_score,
                     "bid_score": bid_score,
                     "bid_amount_usdc": round(bid_amount / 1e6, 2),
-                    "bid_score_usdc": round(bid_score / 1e6, 2),
-                    "reputation_effect": advantage,
-                    "summary": f"Bid {bid_amount/1e6:.2f} USDC with reputation {agent_reputation} = score {bid_score/1e6:.2f} USDC ({advantage})"
+                    "higher_is_better": True,
+                    "summary": (
+                        f"Score={bid_score} (higher is better): rep_component={normalized_reputation} "
+                        f"@w={rw}%, bid_component={normalized_bid_score} @w={100-rw}%"
+                    )
                 }
             except Exception as e:
                 logger.error(f"calculate_bid_score failed: {e}")
                 return {
                     "error": str(e),
-                    "bid_score": bid_amount  # Fallback to bid amount
+                    "bid_score": 0
                 }
         
         @tool
@@ -318,11 +344,13 @@ class BlockchainHandler:
             proposed_bid: int,
             your_reputation: int,
             current_winning_bid: int = 0,
-            current_winner_reputation: int = 50
+            current_winner_reputation: int = 50,
+            max_price: int = 0,
+            reputation_weight: int = 25
         ) -> Dict[str, Any]:
             """Simulate whether a proposed bid would win against the current winner.
             
-            Checks if your bid score (bid + reputation weight) would beat the current winning bid.
+            Uses the contract score formula and checks if your score beats current best score.
             Prevents wasting gas on bids that will revert with BidScoreNotCompetitive.
             
             Args:
@@ -330,39 +358,70 @@ class BlockchainHandler:
                 your_reputation: Your reputation score (0-100, from agent_reputation in state)
                 current_winning_bid: Current winning bid amount (0 if no bids yet, in USDC with 6 decimals)
                 current_winner_reputation: Current winner's reputation (default 50 if unknown)
+                max_price: Auction max price (required for exact simulation)
+                reputation_weight: Auction reputation weight (0-100)
             
             Returns:
                 Analysis of whether you would win and by what margin
             """
             try:
-                # Calculate our bid score: bid * (100 + reputation) / 100
-                our_score = (proposed_bid * (100 + your_reputation)) // 100
+                if max_price <= 0:
+                    return {
+                        "error": "max_price is required for exact simulation",
+                        "will_win": False,
+                        "summary": "Provide max_price to simulate on-chain outcome accurately."
+                    }
+
+                if proposed_bid > max_price:
+                    return {
+                        "proposed_bid": proposed_bid,
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "max_price": max_price,
+                        "will_win": False,
+                        "would_revert": True,
+                        "revert_reason": "BidTooHigh",
+                        "summary": "❌ WILL REVERT: proposed bid exceeds auction max_price"
+                    }
+
+                rw = max(0, min(100, int(reputation_weight)))
+                our_bid_component = ((max_price - proposed_bid) * 100) // max_price
+                our_score = (rw * int(your_reputation) + (100 - rw) * our_bid_component) // 100
                 
                 # If there's a current winner, compare scores
                 if current_winning_bid > 0:
-                    current_winner_score = (current_winning_bid * (100 + current_winner_reputation)) // 100
+                    if current_winning_bid > max_price:
+                        return {
+                            "error": "current_winning_bid exceeds max_price",
+                            "will_win": False,
+                            "summary": "Invalid auction data: current_winning_bid > max_price"
+                        }
+
+                    current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
+                    current_winner_score = (rw * int(current_winner_reputation) + (100 - rw) * current_bid_component) // 100
                     
-                    # In reverse auction, LOWER score wins
-                    will_win = our_score < current_winner_score
-                    margin = current_winner_score - our_score  # Positive = we're better
+                    # Higher score wins in this contract
+                    will_win = our_score > current_winner_score
+                    margin = our_score - current_winner_score  # Positive = we're better
                     margin_percent = (margin / current_winner_score * 100) if current_winner_score > 0 else 0
                     
                     return {
                         "proposed_bid": proposed_bid,
                         "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
                         "your_score": our_score,
-                        "your_score_usdc": round(our_score / 1e6, 2),
+                        "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
                         "current_winning_bid": current_winning_bid,
                         "current_winning_bid_usdc": round(current_winning_bid / 1e6, 2),
                         "current_winner_score": current_winner_score,
-                        "current_winner_score_usdc": round(current_winner_score / 1e6, 2),
+                        "current_winner_bid_component": current_bid_component,
                         "current_winner_reputation": current_winner_reputation,
+                        "max_price": max_price,
+                        "reputation_weight": rw,
+                        "higher_is_better": True,
                         "will_win": will_win,
                         "margin": margin,
-                        "margin_usdc": round(margin / 1e6, 2),
                         "margin_percent": round(margin_percent, 2),
-                        "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score/1e6:.2f} vs current {current_winner_score/1e6:.2f} (margin: {margin/1e6:.2f} USDC, {margin_percent:.1f}%)"
+                        "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score} vs current {current_winner_score} (margin: {margin}, {margin_percent:.1f}%)"
                     }
                 else:
                     # No current winner - we'll be first bid
@@ -370,8 +429,11 @@ class BlockchainHandler:
                         "proposed_bid": proposed_bid,
                         "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
                         "your_score": our_score,
-                        "your_score_usdc": round(our_score / 1e6, 2),
+                        "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
+                        "max_price": max_price,
+                        "reputation_weight": rw,
+                        "higher_is_better": True,
                         "current_winning_bid": 0,
                         "will_win": True,
                         "summary": "✅ WILL WIN: No current bids, you'll be the first bidder"
@@ -457,9 +519,9 @@ class BlockchainHandler:
                         "success": False,
                         "error": "BidScoreNotCompetitive",
                         "error_code": "0x29e8399d",
-                        "explanation": "Your bid score (combining bid amount and reputation) is not better than the current winning bid. In a reverse auction, LOWER bids win, but the bid score also factors in your reputation.",
+                        "explanation": "Your weighted score is not better than the current winning bid. In this contract, HIGHER score wins. Lower bids help by increasing the price component, and higher reputation also helps.",
                         "suggestion": "Try a significantly lower bid amount (10-30% less) to improve your competitiveness. Check the current winning bid and aim to beat it by a meaningful margin.",
-                        "retry_recommended": True
+                        "retry_recommended": False
                     }
                 
                 # BidTooHigh - 0xc9b80cd4
@@ -537,8 +599,8 @@ class BlockchainHandler:
         # Dynamically generate tool descriptions based on enabled tools
         tool_descriptions = {
             "validate_bid_profitability": "validate_bid_profitability(estimated_cost, proposed_bid): Check if a bid is profitable (returns profit/loss calculations)",
-            "calculate_bid_score": "calculate_bid_score(bid_amount, agent_reputation): Calculate bid score used in auction ranking",
-            "simulate_bid_outcome": "simulate_bid_outcome(proposed_bid, your_reputation, current_winning_bid, current_winner_reputation): Check if your bid would win against current winner",
+            "calculate_bid_score": "calculate_bid_score(bid_amount, agent_reputation, max_price, reputation_weight): Calculate exact contract bid score (higher score wins)",
+            "simulate_bid_outcome": "simulate_bid_outcome(proposed_bid, your_reputation, current_winning_bid, current_winner_reputation, max_price, reputation_weight): Check if your bid would beat current winner",
             "place_bid": "place_bid(auction_id, bid_amount): Submit a bid for an auction"
         }
         
@@ -557,7 +619,7 @@ BIDDING GUIDELINES:
 4. Use calculate_bid_score to understand how reputation affects your bid score
 5. Use simulate_bid_outcome to check if your bid will actually win (prevents BidScoreNotCompetitive reverts)
 6. Consider time remaining - urgent auctions may need immediate bids
-7. This is a reverse auction where LOWER bids win, and your bid score is weighted by reputation
+7. This contract ranks bids by weighted score where HIGHER score wins (lower bids improve score via bid component, reputation also improves score)
 8. You can bid on multiple auctions if profitable
 9. If no auctions are profitable, don't bid
 

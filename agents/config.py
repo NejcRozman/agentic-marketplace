@@ -22,7 +22,6 @@ class Config:
         # LLM API (OpenRouter)
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         self.openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        self.llm_model = os.getenv("LLM_MODEL", "openai/gpt-oss-20b")
         
         # Pinata IPFS
         self.pinata_api_key = os.getenv("PINATA_API_KEY")
@@ -183,7 +182,8 @@ class ArchitectureConfig:
     coupling_mode: str  # "isolated", "one_way", "two_way"
     prompt_template: str  # "minimal", "guided", "rich"
     enabled_tools: List[str]
-    llm_model: str = "openai/gpt-4o-mini"
+    blockchain_llm: str = "openai/gpt-oss-20b"
+    service_llm: str = "openai/gpt-oss-20b"
     llm_temperature: float = 0.3
 
 
@@ -198,7 +198,8 @@ ARCHITECTURES = {
         prompt_template="1",
         enabled_tools=["validate_bid_profitability", "calculate_bid_score", 
                       "simulate_bid_outcome", "place_bid"],
-        llm_model="openai/gpt-4o-mini",
+        blockchain_llm="openai/gpt-oss-20b",
+        service_llm="openai/gpt-oss-20b",
         llm_temperature=0.3,
     ),
     # Future architectures will be added here:

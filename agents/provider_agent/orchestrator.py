@@ -112,7 +112,8 @@ class Orchestrator:
         )
         self.service_executor = ServiceExecutor(
             str(self.config.agent_id),
-            cost_tracker=self.cost_tracker
+            cost_tracker=self.cost_tracker,
+            architecture=architecture
         )
         self.ipfs_client = IPFSClient()
         

@@ -14,9 +14,9 @@ from langchain_chroma import Chroma
 from langchain_core.tools import tool
 
 try:
-    from ..config import config
+    from ..config import config, get_architecture
 except ImportError:
-    from config import Config
+    from config import Config, get_architecture
     config = Config()
 
 logger = logging.getLogger(__name__)
@@ -58,7 +58,8 @@ Maintain professional academic tone and provide detailed, well-structured respon
         self,
         agent_id: str,
         workspace_dir: Optional[str] = None,
-        cost_tracker: Optional[Any] = None
+        cost_tracker: Optional[Any] = None,
+        architecture: Optional[str] = None
     ):
         """
         Initialize the Literature Analysis Agent.
@@ -67,11 +68,15 @@ Maintain professional academic tone and provide detailed, well-structured respon
             agent_id: Unique identifier for this agent instance
             workspace_dir: Directory for storing RAG databases (optional)
             cost_tracker: Optional CostTracker instance for tracking LLM costs
+            architecture: Architecture profile (uses config.architecture when omitted)
         """
         self.agent_id = agent_id
         self.workspace_dir = Path(workspace_dir or config.workspace_dir) / agent_id
         self.workspace_dir.mkdir(parents=True, exist_ok=True)
         self.cost_tracker = cost_tracker
+        self.architecture = architecture or config.architecture
+        self.arch_config = get_architecture(self.architecture)
+        self.llm_model = self.arch_config.service_llm
         
         # Initialize LLM and embeddings
         if not config.openrouter_api_key:
@@ -79,7 +84,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
         
         # Use config-based parameters (supports quality profiles)
         self.llm = ChatOpenAI(
-            model=config.llm_model,
+            model=self.llm_model,
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=config.rag_temperature
@@ -105,7 +110,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
         self.tools = []
         
         logger.info(f"Initialized ServiceExecutor: {agent_id} "
-                   f"(temp={config.rag_temperature}, k={config.rag_retrieval_k})")
+               f"(model={self.llm_model}, temp={config.rag_temperature}, k={config.rag_retrieval_k})")
     
     def _extract_paper_metadata(self, document: Any) -> Dict[str, str]:
         """Extract paper title and first author from filename format: Author-Title.pdf"""
