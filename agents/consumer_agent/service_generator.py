@@ -5,6 +5,7 @@ Uses LLM to generate custom prompts for literature review services based on pape
 """
 
 import logging
+import asyncio
 from typing import Dict, Any, List, Set
 from pathlib import Path
 import json
@@ -32,10 +33,11 @@ class ServiceGenerator:
         self.config = config
         self.ipfs_client = IPFSClient()
         self.processed_pdfs: Set[str] = set()  # Track processed PDFs in memory
+        self.service_generation_timeout = max(1, int(getattr(config, "service_generation_timeout", 180)))
         
         # Initialize OpenRouter LLM
         self.model = ChatOpenAI(
-            model="anthropic/claude-opus-4.6",
+            model="openai/gpt-oss-20b",
             api_key=config.openrouter_api_key,
             base_url=config.openrouter_base_url,
             temperature=0.7
@@ -76,6 +78,7 @@ class ServiceGenerator:
             return {"processed": [], "skipped": [], "failed": []}
         
         logger.info(f"Found {len(pdf_paths)} PDF files")
+        logger.info(f"Per-PDF service generation timeout: {self.service_generation_timeout}s")
         
         processed = []
         skipped = []
@@ -91,10 +94,23 @@ class ServiceGenerator:
                 continue
             
             try:
-                result = await self._generate_service_for_pdf(pdf_path)
+                result = await asyncio.wait_for(
+                    self._generate_service_for_pdf(pdf_path),
+                    timeout=self.service_generation_timeout
+                )
                 processed.append(result)
                 self.processed_pdfs.add(pdf_name)
                 logger.info(f"✓ Generated service for {pdf_name}")
+            except asyncio.TimeoutError:
+                logger.error(
+                    f"❌ Timeout generating service for {pdf_name} "
+                    f"after {self.service_generation_timeout}s"
+                )
+                failed.append({
+                    "pdf_name": pdf_name,
+                    "error": f"Service generation timeout after {self.service_generation_timeout}s"
+                })
+                continue
             except Exception as e:
                 logger.error(f"❌ Failed to generate service for {pdf_name}: {e}")
                 failed.append({"pdf_name": pdf_name, "error": str(e)})

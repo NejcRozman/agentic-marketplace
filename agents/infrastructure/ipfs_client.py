@@ -231,9 +231,10 @@ class IPFSClient:
             
             # Prepare multipart form data
             data = aiohttp.FormData()
+            file_handle = open(file_path, 'rb')
             data.add_field(
                 'file',
-                open(file_path, 'rb'),
+                file_handle,
                 filename=file_name,
                 content_type='application/octet-stream'
             )
@@ -248,32 +249,35 @@ class IPFSClient:
                 content_type='application/json'
             )
             
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    PINATA_PIN_FILE_URL,
-                    headers=headers,
-                    data=data,
-                    timeout=aiohttp.ClientTimeout(total=120)
-                ) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        cid = result.get("IpfsHash")
-                        size = result.get("PinSize", file_size)
-                        
-                        logger.info(f"✅ Pinned file to IPFS: {file_name} -> {cid}")
-                        return IPFSUploadResult(
-                            success=True,
-                            cid=cid,
-                            size=size,
-                            name=file_name
-                        )
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Pinata error: {response.status} - {error_text}")
-                        return IPFSUploadResult(
-                            success=False,
-                            error=f"Pinata API error: {response.status}"
-                        )
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(
+                        PINATA_PIN_FILE_URL,
+                        headers=headers,
+                        data=data,
+                        timeout=aiohttp.ClientTimeout(total=120)
+                    ) as response:
+                        if response.status == 200:
+                            result = await response.json()
+                            cid = result.get("IpfsHash")
+                            size = result.get("PinSize", file_size)
+                            
+                            logger.info(f"✅ Pinned file to IPFS: {file_name} -> {cid}")
+                            return IPFSUploadResult(
+                                success=True,
+                                cid=cid,
+                                size=size,
+                                name=file_name
+                            )
+                        else:
+                            error_text = await response.text()
+                            logger.error(f"Pinata error: {response.status} - {error_text}")
+                            return IPFSUploadResult(
+                                success=False,
+                                error=f"Pinata API error: {response.status}"
+                            )
+            finally:
+                file_handle.close()
                         
         except Exception as e:
             logger.error(f"Error pinning file: {e}")

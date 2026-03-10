@@ -1,12 +1,12 @@
-# H1 Heuristic Smoke Test (Homogeneous Providers)
-# Purpose: Fast end-to-end sanity check with only heuristic providers
+# H1 Heuristic Homogeneous Experiment (1 Consumer, 10 Providers, 50 Auctions)
+# Purpose: First non-smoke homogeneous run for heuristic provider agents
 
 experiment:
-  id: "h1_heuristic_smoke"
-  name: "Heuristic Homogeneous Smoke Test"
-  description: "Quick smoke test with 1 consumer and 10 homogeneous heuristic providers over 2 auctions"
-  research_question: "smoke_test"
-  duration_timeout: 1200  # 20 minutes max
+  id: "h1_heuristic_homogeneous_10p_50a"
+  name: "Heuristic Homogeneous 10P 50A"
+  description: "Homogeneous heuristic setup with 1 consumer and 10 providers over 50 auctions"
+  research_question: "homogeneous_heuristic_baseline"
+  duration_timeout: 21600  # 6 hours max
 
 blockchain:
   network: "anvil"
@@ -40,8 +40,8 @@ agents:
 
     config:
       check_interval: 5
-      max_budget: 10000000        # 10 USDC
-      auction_duration: 60        # 1 minute
+      max_budget: 10000000         # 10 USDC
+      auction_duration: 60         # 1 minute
       reputation_weight: 25
 
     behavior:
@@ -49,9 +49,9 @@ agents:
       service_selection: "sequential"
       service_complexity: "medium"
       auto_create_auction: true
-      num_auctions: 2
+      num_auctions: 50
       auto_monitor: true
-      inter_auction_delay: 5
+      inter_auction_delay: 3
 
   providers:
     count: 10
@@ -60,10 +60,10 @@ agents:
 
     config:
       check_interval: 5
-      bidding_base_cost: 1        # 1 USD estimated service cost
-      gas_cost_mode: "fixed"     # model with fixed network average gas price
-      gas_price_gwei: 0.04          # assumed average gas price
-      eth_price_usd: 2000         # ETH/USD for gas conversion
+      bidding_base_cost: 5         # 5 USD estimated service cost
+      gas_cost_mode: "fixed"      # model with fixed network average gas price
+      gas_price_gwei: 0.04         # assumed average gas price
+      eth_price_usd: 2000          # ETH/USD for gas conversion
 
     behavior:
       # Homogeneous heuristic setup
@@ -80,21 +80,21 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
-      timeout: 120
+      timeout: 180
 
     - name: "agents_start"
       description: "Launch consumer and provider agents"
-      timeout: 30
+      timeout: 60
 
     - name: "experiment_run"
       description: "Agents operate until target auctions complete"
       stopping_criteria:
         type: "completed_auctions"
-        target: 2
+        target: 50
         poll_interval: 5
-        max_timeout: 1200
+        max_timeout: 10800
 
-  target_auctions: 2
+  target_auctions: 50
 
 monitoring:
   metrics:
@@ -109,12 +109,12 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h1_heuristic_smoke"
+    directory: "experiments/data/logs/h1_heuristic_homogeneous_10p_50a"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h1_heuristic_smoke"
+    directory: "experiments/data/metrics/h1_heuristic_homogeneous_10p_50a"
     format: "json"
 
 api_keys:

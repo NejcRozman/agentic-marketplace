@@ -793,12 +793,27 @@ class ExperimentRunner:
         logger.info(f"Stopping criteria: {criteria_type}, target={target} auctions, max_timeout={max_timeout}s ({max_timeout/3600:.1f}h)")
         
         # Track reputation snapshots
-        reputation_snapshots_enabled = self.config['experiment_flow'].get('reputation_snapshots', {}).get('enabled', False)
+        reputation_snapshots_enabled = self.config['experiment_flow'].get('reputation_snapshots', {}).get('enabled', True)
         last_completed_count = 0
         
         start_time = time.time()
+
+        # Track consumer process to detect early crashes/exits
+        consumer_process = next(
+            (p for p in self.agent_processes if p.name.startswith("consumer_")),
+            None
+        )
         
         while True:
+            # If consumer exits unexpectedly, stop waiting immediately
+            if consumer_process and consumer_process.process.poll() is not None:
+                exit_code = consumer_process.process.returncode
+                logger.error(
+                    f"Consumer process exited unexpectedly with code {exit_code}. "
+                    f"See log: {consumer_process.log_file}"
+                )
+                break
+
             # Check timeout
             elapsed = time.time() - start_time
             if elapsed > max_timeout:
@@ -922,18 +937,34 @@ class ExperimentRunner:
                 address=Web3.to_checksum_address(self.config['blockchain']['contracts']['reputation_registry']),
                 abi=get_reputation_registry_abi()
             )
+
+            final_snapshot = {
+                "after_auction": "final",
+                "timestamp": datetime.now().isoformat(),
+                "source": "final_snapshot",
+                "reputations": {}
+            }
             
             for provider_id in self.provider_agent_ids:
                 try:
-                    reputation = reputation_contract.functions.getReputation(provider_id).call()
-                    self.metrics_collector.metrics["reputation_evolution"].append({
-                        "timestamp": datetime.now().isoformat(),
-                        "provider_id": provider_id,
-                        "reputation_score": reputation
-                    })
-                    logger.info(f"   Provider {provider_id}: {reputation}")
+                    feedback_count, average_score = reputation_contract.functions.getSummary(
+                        provider_id,
+                        [],
+                        bytes(32),
+                        bytes(32)
+                    ).call()
+
+                    reputation = int(average_score) if int(feedback_count) > 0 else 50
+                    final_snapshot["reputations"][str(provider_id)] = {
+                        "score": reputation,
+                        "feedback_count": int(feedback_count)
+                    }
+                    logger.info(f"   Provider {provider_id}: {reputation} (feedback_count={int(feedback_count)})")
                 except Exception as e:
                     logger.debug(f"   Could not get reputation for provider {provider_id}: {e}")
+
+            if final_snapshot["reputations"]:
+                self.metrics_collector.metrics["reputation_evolution"].append(final_snapshot)
                     
         except Exception as e:
             logger.error(f"   Failed to collect reputation: {e}")

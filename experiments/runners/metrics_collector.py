@@ -58,7 +58,14 @@ class MetricsCollector:
             },
             
             # Reputation tracking over time
-            "reputation_evolution": [],  # [{timestamp, provider_id, reputation_score, auction_id}]
+            # Snapshot schema: {after_auction, timestamp, reputations: {provider_id: {score, feedback_count}}, source?}
+            "reputation_evolution": [],
+
+            # Provider economics
+            "provider_financials": {
+                "by_provider": {},
+                "evolution": []
+            },
             
             # Timing data (raw data, not averages)
             "timing": {
@@ -263,35 +270,72 @@ class MetricsCollector:
                 if eligible_provider_ids and provider_id not in eligible_provider_ids:
                     continue
                 
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if not provider_log:
                     continue
                 
-                # Find all bid attempts for this auction - look for place_bid tool calls
-                # Format: place_bid({'auction_id': 1, 'bid_amount': 60000000})
-                # CRITICAL: Use word boundary after auction_id to avoid matching 1 with 10-19, 2 with 20-29, etc.
-                bid_pattern = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^\d][^}}]*'bid_amount':\s*(\d+)"
-                for match in re.finditer(bid_pattern, provider_log):
+                # ReAct traces: place_bid({'auction_id': X, 'bid_amount': Y})
+                bid_pattern_react = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^\d][^}}]*'bid_amount':\s*(\d+)"
+                for match in re.finditer(bid_pattern_react, provider_log):
                     bid_amount = int(match.group(1))
+                    auction_data["bids_attempted"].append({
+                        "provider_id": provider_id,
+                        "amount": bid_amount
+                    })
+
+                # Heuristic traces: "Auction X: ... bid=1.2 USDC"
+                bid_pattern_heuristic = rf"Auction\s+{auction_id}\b:.*?bid=(\d+(?:\.\d+)?)\s+USDC"
+                for match in re.finditer(bid_pattern_heuristic, provider_log):
+                    bid_amount = int(round(float(match.group(1)) * 1e6))
                     auction_data["bids_attempted"].append({
                         "provider_id": provider_id,
                         "amount": bid_amount
                     })
                 
                 # Track bid failures (only for eligible providers)
-                # CRITICAL: Use word boundary after auction_id
-                error_pattern = rf"Error placing bid.*auction.*{auction_id}\b"
-                for match in re.finditer(error_pattern, provider_log, re.IGNORECASE):
-                    context = provider_log[max(0, match.start()-200):match.end()+200]
-                    auction_data["bid_failures"].append({
-                        "provider_id": provider_id,
-                        "reason": context.strip(),
-                        "error_code": self._extract_error_code(context)
+                auction_data["bid_failures"].extend(
+                    self._extract_bid_failures(provider_log, auction_id, provider_id)
+                )
+
+            # Fallback: every successful on-chain bid was attempted.
+            if not auction_data["bids_attempted"] and auction_data["bids_on_chain"]:
+                for bid in auction_data["bids_on_chain"]:
+                    auction_data["bids_attempted"].append({
+                        "provider_id": bid.get("agent_id"),
+                        "amount": bid.get("amount"),
+                        "inferred_from_on_chain": True
                     })
+
+            # De-duplicate attempts while preserving insertion order
+            deduped_attempts = []
+            seen_attempts = set()
+            for bid in auction_data["bids_attempted"]:
+                key = (bid.get("provider_id"), bid.get("amount"))
+                if key in seen_attempts:
+                    continue
+                seen_attempts.add(key)
+                deduped_attempts.append(bid)
+            auction_data["bids_attempted"] = deduped_attempts
+
+            # De-duplicate failures while preserving insertion order
+            deduped_failures = []
+            seen_failures = set()
+            for failure in auction_data["bid_failures"]:
+                key = (
+                    failure.get("provider_id"),
+                    failure.get("error_code"),
+                    failure.get("timestamp"),
+                    failure.get("amount")
+                )
+                if key in seen_failures:
+                    continue
+                seen_failures.add(key)
+                deduped_failures.append(failure)
+            auction_data["bid_failures"] = deduped_failures
             
             # 5. Collect execution data from winner's log and job directory
             if auction_data["winner_id"]:
-                winner_log = self._load_log_file(f"provider_{auction_data['winner_id']}.log")
+                winner_log = self._load_provider_log(auction_data["winner_id"])
                 if winner_log:
                     # Extract auction-specific section to avoid cross-contamination
                     winner_section = self._extract_provider_auction_section(winner_log, auction_id)
@@ -385,7 +429,7 @@ class MetricsCollector:
                     auction_data["reputation_after"] = int(average_score)
                     
                     # Try to find initial reputation from winner's log
-                    winner_log = self._load_log_file(f"provider_{auction_data['winner_id']}.log")
+                    winner_log = self._load_provider_log(auction_data["winner_id"])
                     if winner_log:
                         # Look for get_reputation tool response: {"rating": 50, "feedback_count": 0}
                         # Use DOTALL flag to handle multiline logs
@@ -498,6 +542,40 @@ class MetricsCollector:
         """Extract error code from error message."""
         match = re.search(r"0x[0-9a-fA-F]+", text)
         return match.group(0) if match else None
+
+    def _extract_bid_failures(self, provider_log: str, auction_id: int, provider_id: int) -> List[Dict[str, Any]]:
+        """Extract structured bid failures for one provider/auction from log lines."""
+        failures: List[Dict[str, Any]] = []
+        lines = provider_log.splitlines()
+
+        error_pattern = re.compile(rf"Error placing bid on auction\s+{auction_id}\b", re.IGNORECASE)
+        ts_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
+        bid_pattern = re.compile(rf"Auction\s+{auction_id}\b:.*?bid=(\d+(?:\.\d+)?)\s+USDC", re.IGNORECASE)
+
+        for i, line in enumerate(lines):
+            if not error_pattern.search(line):
+                continue
+
+            error_code = self._extract_error_code(line)
+            ts_match = ts_pattern.search(line)
+            timestamp = ts_match.group(1) if ts_match else None
+
+            bid_amount = None
+            for j in range(max(0, i - 3), i):
+                bid_match = bid_pattern.search(lines[j])
+                if bid_match:
+                    bid_amount = int(round(float(bid_match.group(1)) * 1e6))
+                    break
+
+            failures.append({
+                "provider_id": provider_id,
+                "timestamp": timestamp,
+                "amount": bid_amount,
+                "reason": "bid_rejected",
+                "error_code": error_code
+            })
+
+        return failures
     
     def _validate_auction_data(self, auction_data: Dict[str, Any]):
         """
@@ -614,7 +692,7 @@ class MetricsCollector:
             
             # Check all provider logs
             for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if provider_log:
                     tx_count += len(re.findall(r'Sent transaction: (?:0x)?[0-9a-fA-F]{64}', provider_log))
             
@@ -656,7 +734,7 @@ class MetricsCollector:
             
             # Count bids from provider logs
             for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if provider_log and ("Bid submitted" in provider_log or "✅ Bid placed" in provider_log):
                     completeness["bids_received"] += 1
                 
@@ -719,7 +797,7 @@ class MetricsCollector:
             
             # Collect bids from provider logs
             for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if provider_log:
                     bid_match = re.search(r"(?:Bid|bid)[=:]?\s*(\d+)", provider_log)
                     if bid_match:
@@ -801,7 +879,7 @@ class MetricsCollector:
             # Get execution time from winner's log
             winner_id = self.metrics.get("auction_details", {}).get("winner_id")
             if winner_id:
-                winner_log = self._load_log_file(f"provider_{winner_id}.log")
+                winner_log = self._load_provider_log(winner_id)
                 if winner_log:
                     # Look for service completion timing
                     time_match = re.search(r"(?:execution|service).*?(\d+)\s*(?:seconds|s)", winner_log, re.IGNORECASE)
@@ -840,7 +918,7 @@ class MetricsCollector:
             reputation["winner_after"] = winner_reputation
             
             # Try to find initial reputation from logs or assume default
-            winner_log = self._load_log_file(f"provider_{winner_id}.log")
+            winner_log = self._load_provider_log(winner_id)
             if winner_log:
                 initial_match = re.search(r"(?:initial|starting).*reputation[=:]?\s*(\d+)", winner_log, re.IGNORECASE)
                 if initial_match:
@@ -1046,6 +1124,7 @@ class MetricsCollector:
         """
         self.calculate_duration()
         self._count_transactions_from_logs()
+        self.collect_provider_financials()
         
         metrics_file = self.metrics_dir / "experiment_metrics.json"
         with open(metrics_file, 'w') as f:
@@ -1075,6 +1154,73 @@ class MetricsCollector:
         except Exception as e:
             logger.warning(f"Failed to load log {filename}: {e}")
         return None
+
+    def _load_provider_log(self, provider_id: int) -> Optional[str]:
+        """Load provider log content with current and legacy filename support."""
+        content = self._load_log_file(f"provider_agent_{provider_id}.log")
+        if content:
+            return content
+        return self._load_log_file(f"provider_{provider_id}.log")
+
+    def collect_provider_financials(self) -> Dict[str, Any]:
+        """Collect provider balance data (revenue/costs/net) and evolution from logs."""
+        financials = {
+            "by_provider": {},
+            "evolution": []
+        }
+
+        summary_pattern = re.compile(
+            r"Revenue:\s*\$\s*([-\d\.]+)\s*USD.*?"
+            r"LLM Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
+            r"Gas Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
+            r"Total Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
+            r"NET BALANCE:\s*\$\s*([-\d\.]+)\s*USD",
+            re.DOTALL
+        )
+        ts_pattern = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+
+        for provider_id in self.metrics.get("agents", {}).get("provider_ids", []):
+            provider_log = self._load_provider_log(provider_id)
+            if not provider_log:
+                continue
+
+            matches = list(summary_pattern.finditer(provider_log))
+            if not matches:
+                continue
+
+            for m in matches:
+                before = provider_log[max(0, m.start() - 250):m.start()]
+                ts = ts_pattern.findall(before)
+                timestamp = ts[-1] if ts else None
+
+                revenue = float(m.group(1))
+                llm_costs = float(m.group(2))
+                gas_costs = float(m.group(3))
+                total_costs = float(m.group(4))
+                net_balance = float(m.group(5))
+
+                financials["evolution"].append({
+                    "timestamp": timestamp,
+                    "provider_id": provider_id,
+                    "revenue": revenue,
+                    "llm_costs": llm_costs,
+                    "gas_costs": gas_costs,
+                    "total_costs": total_costs,
+                    "net_balance": net_balance
+                })
+
+            last = matches[-1]
+            financials["by_provider"][provider_id] = {
+                "revenue": float(last.group(1)),
+                "llm_costs": float(last.group(2)),
+                "gas_costs": float(last.group(3)),
+                "total_costs": float(last.group(4)),
+                "net_balance": float(last.group(5)),
+                "snapshots": len(matches)
+            }
+
+        self.metrics["provider_financials"] = financials
+        return financials
     
     def _identify_operation(self, tx: Dict) -> Optional[str]:
         """Identify operation type from transaction data."""
@@ -1183,7 +1329,7 @@ class MetricsCollector:
             
             # Parse bids for this auction
             for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if provider_log:
                     # Find bid for this specific auction
                     # CRITICAL: Use word boundary after auction_id
@@ -1364,7 +1510,7 @@ class MetricsCollector:
         
         try:
             for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_log_file(f"provider_{provider_id}.log")
+                provider_log = self._load_provider_log(provider_id)
                 if not provider_log:
                     continue
                 

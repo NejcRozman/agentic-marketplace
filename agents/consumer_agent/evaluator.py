@@ -334,7 +334,7 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
 
             # Create ReAct agent without rate limiting (use API defaults)
             llm = ChatOpenAI(
-                model="anthropic/claude-opus-4.6",
+                model="openai/gpt-oss-20b",
                 api_key=self.config.openrouter_api_key,
                 base_url=self.config.openrouter_base_url,
                 temperature=0.3
