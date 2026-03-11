@@ -77,4 +77,5 @@ agents/data/
 # Experiment files
 experiments/data/
 workspaces/
-EXPERIMENT_PLAN.md
+experiments/analysis/output/
+experiments/analysis/figures/
