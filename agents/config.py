@@ -39,6 +39,7 @@ class Config:
         self.identity_registry_address = os.getenv("BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS")
         self.reputation_registry_address = os.getenv("BLOCKCHAIN_REPUTATION_REGISTRY_ADDRESS")
         self.payment_token_address = os.getenv("BLOCKCHAIN_PAYMENT_TOKEN_ADDRESS")  # USDC or mock USDC
+        self.initial_reputation_default = int(os.getenv("BLOCKCHAIN_INITIAL_REPUTATION_DEFAULT", "50"))
         
         # Provider Agent ID
         self.agent_id = int(os.getenv("BLOCKCHAIN_AGENT_ID", "4427"))

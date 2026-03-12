@@ -33,12 +33,14 @@ contract DeployScript is Script {
         // Load ERC-8004 addresses from environment
         address identityRegistry = vm.envAddress("IDENTITY_REGISTRY_ADDRESS");
         address reputationRegistry = vm.envAddress("REPUTATION_REGISTRY_ADDRESS");
+        uint256 initialReputationDefault = vm.envOr("INITIAL_REPUTATION_DEFAULT", uint256(50));
         
         console.log("=== Deploy Configuration ===");
         console.log("Deployer (Anvil default):", vm.addr(ANVIL_DEFAULT_PK));
         console.log("User Account (from PRIVATE_KEY):", userAccount);
         console.log("IdentityRegistry:", identityRegistry);
         console.log("ReputationRegistry:", reputationRegistry);
+        console.log("Initial reputation default:", initialReputationDefault);
         console.log("");
         
         // Use Anvil's default account for deployment (has funds)
@@ -52,7 +54,8 @@ contract DeployScript is Script {
         ReverseAuction auction = new ReverseAuction(
             address(usdc),
             identityRegistry,
-            reputationRegistry
+            reputationRegistry,
+            initialReputationDefault
         );
         console.log("ReverseAuction deployed at:", address(auction));
         

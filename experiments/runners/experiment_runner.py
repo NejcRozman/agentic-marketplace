@@ -320,7 +320,8 @@ class ExperimentRunner:
         env_vars = {
             "PRIVATE_KEY": private_key,
             "IDENTITY_REGISTRY_ADDRESS": self.config['blockchain']['contracts']['identity_registry'],
-            "REPUTATION_REGISTRY_ADDRESS": self.config['blockchain']['contracts']['reputation_registry']
+            "REPUTATION_REGISTRY_ADDRESS": self.config['blockchain']['contracts']['reputation_registry'],
+            "INITIAL_REPUTATION_DEFAULT": str(self.config['blockchain'].get('initial_reputation_default', 50))
         }
         
         # Run Deploy script
@@ -570,6 +571,7 @@ class ExperimentRunner:
             "BLOCKCHAIN_REVERSE_AUCTION_ADDRESS": self.reverse_auction_address,
             "BLOCKCHAIN_IDENTITY_REGISTRY_ADDRESS": self.config['blockchain']['contracts']['identity_registry'],
             "BLOCKCHAIN_REPUTATION_REGISTRY_ADDRESS": self.config['blockchain']['contracts']['reputation_registry'],
+            "BLOCKCHAIN_INITIAL_REPUTATION_DEFAULT": str(self.config['blockchain'].get('initial_reputation_default', 50)),
             "BLOCKCHAIN_PAYMENT_TOKEN_ADDRESS": self.payment_token_address,
             "BLOCKCHAIN_PRIVATE_KEY": private_key,
             "BLOCKCHAIN_AGENT_ID": str(agent_id),
@@ -954,7 +956,8 @@ class ExperimentRunner:
                         bytes(32)
                     ).call()
 
-                    reputation = int(average_score) if int(feedback_count) > 0 else 50
+                    initial_reputation_default = int(self.config['blockchain'].get('initial_reputation_default', 50))
+                    reputation = int(average_score) if int(feedback_count) > 0 else initial_reputation_default
                     final_snapshot["reputations"][str(provider_id)] = {
                         "score": reputation,
                         "feedback_count": int(feedback_count)

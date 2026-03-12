@@ -216,7 +216,7 @@ contract ReverseAuctionTest is Test {
         reputationRegistry = new MockReputationRegistry(address(identityRegistry));
 
         // Deploy auction contract
-        auction = new ReverseAuction(address(usdc), address(identityRegistry), address(reputationRegistry));
+        auction = new ReverseAuction(address(usdc), address(identityRegistry), address(reputationRegistry), 50);
 
         // Setup agents
         vm.startPrank(provider1);

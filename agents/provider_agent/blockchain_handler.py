@@ -171,6 +171,7 @@ class BlockchainHandler:
         self.agent_id = agent_id
         self.client = blockchain_client or BlockchainClient()
         self.config = config
+        self.initial_reputation_default = self.config.initial_reputation_default
         
         # Load architecture configuration
         arch_name = architecture or self.config.architecture
@@ -344,7 +345,7 @@ class BlockchainHandler:
             proposed_bid: int,
             your_reputation: int,
             current_winning_bid: int = 0,
-            current_winner_reputation: int = 50,
+            current_winner_reputation: Optional[int] = None,
             max_price: int = 0,
             reputation_weight: int = 25
         ) -> Dict[str, Any]:
@@ -357,7 +358,7 @@ class BlockchainHandler:
                 proposed_bid: Your proposed bid amount (in USDC with 6 decimals)
                 your_reputation: Your reputation score (0-100, from agent_reputation in state)
                 current_winning_bid: Current winning bid amount (0 if no bids yet, in USDC with 6 decimals)
-                current_winner_reputation: Current winner's reputation (default 50 if unknown)
+                current_winner_reputation: Current winner's reputation (uses configured default if unknown)
                 max_price: Auction max price (required for exact simulation)
                 reputation_weight: Auction reputation weight (0-100)
             
@@ -396,8 +397,9 @@ class BlockchainHandler:
                             "summary": "Invalid auction data: current_winning_bid > max_price"
                         }
 
+                    winner_rep = self.initial_reputation_default if current_winner_reputation is None else int(current_winner_reputation)
                     current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
-                    current_winner_score = (rw * int(current_winner_reputation) + (100 - rw) * current_bid_component) // 100
+                    current_winner_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
                     
                     # Higher score wins in this contract
                     will_win = our_score > current_winner_score
@@ -414,7 +416,7 @@ class BlockchainHandler:
                         "current_winning_bid_usdc": round(current_winning_bid / 1e6, 2),
                         "current_winner_score": current_winner_score,
                         "current_winner_bid_component": current_bid_component,
-                        "current_winner_reputation": current_winner_reputation,
+                        "current_winner_reputation": winner_rep,
                         "max_price": max_price,
                         "reputation_weight": rw,
                         "higher_is_better": True,
@@ -706,7 +708,7 @@ Analyze these auctions and decide which to bid on."""
         """
         try:
             if not self.reputation_registry_contract:
-                return {"rating": 50, "feedback_count": 0}
+                return {"rating": self.initial_reputation_default, "feedback_count": 0}
             
             empty_addresses = []
             zero_bytes32 = b'\x00' * 32
@@ -720,12 +722,12 @@ Analyze these auctions and decide which to bid on."""
                 zero_bytes32
             )
             feedback_count = result[0]
-            average_score = result[1] if feedback_count > 0 else 50
+            average_score = result[1] if feedback_count > 0 else self.initial_reputation_default
             
             return {"rating": average_score, "feedback_count": feedback_count}
         except Exception as e:
             logger.warning(f"Error fetching reputation for agent {agent_id}: {e}")
-            return {"rating": 50, "feedback_count": 0}
+            return {"rating": self.initial_reputation_default, "feedback_count": 0}
     
     def _route_action(self, state: AgentState) -> str:
         """Routing function for action field."""
@@ -1095,16 +1097,16 @@ Analyze these auctions and decide which to bid on."""
                     min_profitable_bid = int(estimated_cost * (1.0 + min_margin))
 
                     winning_bid = auction.get("winning_bid", 0) or 0
-                    winner_reputation = 50
+                    winner_reputation = self.initial_reputation_default
                     if winning_agent_id and winning_agent_id != self.agent_id:
                         for rep in state.get("competitors_reputation", []):
                             if rep.get("agent_id") == winning_agent_id:
-                                winner_reputation = rep.get("rating", 50)
+                                winner_reputation = rep.get("rating", self.initial_reputation_default)
                                 break
 
                     if winning_bid > 0:
                         current_winner_score = (winning_bid * (100 + winner_reputation)) // 100
-                        max_competitive_bid = int((current_winner_score * 100 - 1) // (100 + state.get("agent_reputation", {}).get("rating", 50)))
+                        max_competitive_bid = int((current_winner_score * 100 - 1) // (100 + state.get("agent_reputation", {}).get("rating", self.initial_reputation_default)))
                     else:
                         max_competitive_bid = max_price
 
@@ -1318,7 +1320,7 @@ Analyze these auctions and decide which to bid on."""
             "won_auctions": [],
             "eligible_active_auctions": [],
             "competitors_reputation": [],
-            "agent_reputation": {"rating": 50, "feedback_count": 0},
+            "agent_reputation": {"rating": self.initial_reputation_default, "feedback_count": 0},
             "estimated_service_cost": None,
             "bids_placed": [],
             "tx_hash": None,
@@ -1358,7 +1360,7 @@ Analyze these auctions and decide which to bid on."""
             "won_auctions": [],
             "eligible_active_auctions": [],
             "competitors_reputation": [],
-            "agent_reputation": {"rating": 50, "feedback_count": 0},
+            "agent_reputation": {"rating": self.initial_reputation_default, "feedback_count": 0},
             "estimated_service_cost": None,
             "bids_placed": [],
             "tx_hash": None,

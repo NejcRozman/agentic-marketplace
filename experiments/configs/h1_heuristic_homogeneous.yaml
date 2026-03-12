@@ -2,9 +2,9 @@
 # Purpose: First non-smoke homogeneous run for heuristic provider agents
 
 experiment:
-  id: "h1_heuristic_homogeneous_10p_50a"
-  name: "Heuristic Homogeneous 10P 50A"
-  description: "Homogeneous heuristic setup with 1 consumer and 10 providers over 50 auctions"
+  id: "h1_heuristic_homogeneous"
+  name: "Heuristic Homogeneous"
+  description: "Homogeneous heuristic setup with 1 consumer and X providers over Y auctions"
   research_question: "homogeneous_heuristic_baseline"
   duration_timeout: 21600  # 6 hours max
 
@@ -13,6 +13,7 @@ blockchain:
   rpc_url: "http://localhost:8545"
   fork_network: "sepolia"
   infura_key_env: "INFURA_API_KEY"
+  initial_reputation_default: 68
 
   contracts:
     reverse_auction: null
@@ -40,22 +41,22 @@ agents:
 
     config:
       check_interval: 5
-      max_budget: 10000000         # 10 USDC
+      max_budget: 500000         # 0.5 USDC
       auction_duration: 60         # 1 minute
-      reputation_weight: 25
+      reputation_weight: 20
 
     behavior:
       pdf_directory: "utils/files"
       service_selection: "sequential"
       service_complexity: "medium"
       auto_create_auction: true
-      num_auctions: 50
+      num_auctions: 12
       auto_monitor: true
       inter_auction_delay: 3
 
   providers:
-    count: 10
-    agent_ids: [null, null, null, null, null, null, null, null, null, null]
+    count: 3
+    agent_ids: [null, null, null]
     private_keys: null
 
     config:
@@ -90,11 +91,11 @@ experiment_flow:
       description: "Agents operate until target auctions complete"
       stopping_criteria:
         type: "completed_auctions"
-        target: 50
+        target: 12
         poll_interval: 5
         max_timeout: 10800
 
-  target_auctions: 50
+  target_auctions: 12
 
 monitoring:
   metrics:

@@ -13,6 +13,7 @@ blockchain:
   rpc_url: "http://localhost:8545"
   fork_network: "sepolia"
   infura_key_env: "INFURA_API_KEY"
+  initial_reputation_default: 68
 
   contracts:
     reverse_auction: null

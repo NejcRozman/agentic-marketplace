@@ -62,6 +62,9 @@ contract ReverseAuction is ReentrancyGuard {
     
     /// @dev ERC-8004 Reputation Registry for agent reputation
     IReputationRegistry public immutable REPUTATION_REGISTRY;
+
+    /// @dev Fallback reputation used when an agent has no ratings yet
+    uint256 public immutable INITIAL_REPUTATION_DEFAULT;
     
     /// @dev Counter for generating unique auction IDs (public for iteration)
     uint256 public auctionIdCounter;
@@ -150,6 +153,7 @@ contract ReverseAuction is ReentrancyGuard {
     error InvalidServiceCid();
     error ServiceAlreadyCompleted();
     error InvalidReputationWeight();
+    error InvalidInitialReputationDefault();
     error BidScoreNotCompetitive();
     error InvalidFeedbackAuth();
     error FeedbackAuthExpired();
@@ -162,19 +166,23 @@ contract ReverseAuction is ReentrancyGuard {
      * @param usdcTokenAddress Address of the USDC token contract
      * @param identityRegistry Address of the ERC-8004 Identity Registry
      * @param reputationRegistry Address of the ERC-8004 Reputation Registry
+     * @param initialReputationDefault Fallback reputation (0-100) for agents with no ratings
      */
     constructor(
         address usdcTokenAddress,
         address identityRegistry,
-        address reputationRegistry
+        address reputationRegistry,
+        uint256 initialReputationDefault
     ) {
         if (usdcTokenAddress == address(0)) revert ();
         if (identityRegistry == address(0)) revert ();
         if (reputationRegistry == address(0)) revert ();
+        if (initialReputationDefault > 100) revert InvalidInitialReputationDefault();
         
         USDC_TOKEN = IERC20(usdcTokenAddress);
         IDENTITY_REGISTRY = IIdentityRegistry(identityRegistry);
         REPUTATION_REGISTRY = IReputationRegistry(reputationRegistry);
+        INITIAL_REPUTATION_DEFAULT = initialReputationDefault;
         auctionIdCounter = 0;
     }
     
@@ -289,8 +297,8 @@ contract ReverseAuction is ReentrancyGuard {
             bytes32(0)   // tag2 - no filter
         );
         
-        // Use default reputation of 50 if agent has no feedback
-        uint256 reputation = feedbackCount > 0 ? averageScore : 50;
+        // Use configured default reputation if the agent has no feedback yet
+        uint256 reputation = feedbackCount > 0 ? averageScore : INITIAL_REPUTATION_DEFAULT;
         
         // Calculate weighted score for this bid
         uint256 score = _calculateScore(reputation, bidAmount, auction.maxPrice, auction.reputationWeight);
