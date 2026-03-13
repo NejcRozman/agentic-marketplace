@@ -436,6 +436,14 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
         Returns:
             Evaluation dict with rating (0-100) and quality_scores
         """
+        if isinstance(result, dict) and result.get("service_failed"):
+            logger.warning("Service result is marked as failed; assigning rating=0")
+            return {
+                "rating": 0,
+                "quality_scores": {"execution_failure": 0},
+                "error": result.get("error")
+            }
+
         logger.info("Evaluating service result with ReAct agent...")
         
         initial_state: EvaluatorState = {

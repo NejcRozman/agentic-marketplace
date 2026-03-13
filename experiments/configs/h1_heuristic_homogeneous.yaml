@@ -1,4 +1,4 @@
-# H1 Heuristic Homogeneous Experiment (1 Consumer, 10 Providers, 50 Auctions)
+# H1 Heuristic Homogeneous Experiment
 # Purpose: First non-smoke homogeneous run for heuristic provider agents
 
 experiment:
@@ -40,8 +40,8 @@ agents:
     eligible_providers: null
 
     config:
-      check_interval: 5
-      max_budget: 500000         # 0.5 USDC
+      check_interval: 10
+      max_budget: 100000         # 0.1 USDC
       auction_duration: 60         # 1 minute
       reputation_weight: 20
 
@@ -60,11 +60,11 @@ agents:
     private_keys: null
 
     config:
-      check_interval: 5
-      bidding_base_cost: 5         # 5 USD estimated service cost
+      check_interval: 10
+      bidding_base_cost: 0.05         # 0.05 USD estimated service cost
       gas_cost_mode: "fixed"      # model with fixed network average gas price
-      gas_price_gwei: 0.04         # assumed average gas price
-      eth_price_usd: 2000          # ETH/USD for gas conversion
+      gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
+      eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
 
     behavior:
       # Homogeneous heuristic setup

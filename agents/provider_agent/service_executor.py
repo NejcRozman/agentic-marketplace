@@ -392,7 +392,8 @@ Maintain professional academic tone and provide detailed, well-structured respon
             "pdf_directory": pdf_directory,
             "prompts": prompts,
             "responses": [],
-            "error": None
+            "error": None,
+            "partial_fallback_used": False
         }
         
         try:
@@ -430,14 +431,35 @@ Maintain professional academic tone and provide detailed, well-structured respon
                 return result
             
             # Process each prompt
+            recursion_limit = int(getattr(config, "service_recursion_limit", 25))
             for prompt in prompts:
                 logger.info(f"Processing prompt: {prompt[:100]}...")
                 
                 # Create initial state with the prompt
                 initial_state = {"messages": [HumanMessage(content=prompt)]}
-                
-                # Run the graph
-                graph_result = self.graph.invoke(initial_state)
+
+                # Run the graph (bounded to avoid infinite tool loops)
+                try:
+                    graph_result = self.graph.invoke(
+                        initial_state,
+                        config={"recursion_limit": recursion_limit}
+                    )
+                except Exception as e:
+                    err_text = str(e)
+                    if "GRAPH_RECURSION_LIMIT" in err_text or "Recursion limit" in err_text:
+                        logger.warning(
+                            "Service reasoning recursion limit reached for one prompt; "
+                            "falling back to retrieval-only answer"
+                        )
+                        response_text = self._retrieval_only_fallback(prompt)
+                        result["responses"].append({
+                            "prompt": prompt,
+                            "response": response_text,
+                            "fallback": "retrieval_only"
+                        })
+                        result["partial_fallback_used"] = True
+                        continue
+                    raise
                 
                 # Extract the final response
                 final_message = graph_result['messages'][-1]
@@ -461,3 +483,40 @@ Maintain professional academic tone and provide detailed, well-structured respon
             result["error"] = str(e)
         
         return result
+
+    def _retrieval_only_fallback(self, prompt: str) -> str:
+        """Build a deterministic answer from retriever output when agent reasoning loops."""
+        try:
+            if not self.retriever:
+                return (
+                    "Unable to complete full reasoning for this prompt due to recursion limits, "
+                    "and no retriever is available for fallback."
+                )
+
+            docs = self.retriever.invoke(prompt)
+            if not docs:
+                return (
+                    "Unable to complete full reasoning for this prompt due to recursion limits, "
+                    "and no relevant sources were retrieved."
+                )
+
+            lines = [
+                "Partial fallback answer (reasoning recursion limit reached).",
+                "Relevant evidence excerpts:"
+            ]
+            for i, doc in enumerate(docs[:3], 1):
+                title = doc.metadata.get("title", "Unknown Title")
+                author = doc.metadata.get("first_author", "Unknown Author")
+                citation = f"[{author}, '{title}']"
+                snippet = " ".join(str(doc.page_content).split())
+                if len(snippet) > 400:
+                    snippet = snippet[:400] + "..."
+                lines.append(f"{i}. {snippet} {citation}")
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"Retrieval-only fallback failed: {e}")
+            return (
+                "Unable to complete full reasoning for this prompt due to recursion limits. "
+                f"Fallback also failed: {e}"
+            )

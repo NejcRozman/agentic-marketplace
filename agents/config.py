@@ -75,9 +75,10 @@ class Config:
         self.rag_retrieval_k = int(os.getenv("RAG_RETRIEVAL_K", "3"))
         self.rag_chunk_size = int(os.getenv("RAG_CHUNK_SIZE", "10000"))
         self.rag_chunk_overlap = int(os.getenv("RAG_CHUNK_OVERLAP", "200"))
+        self.service_recursion_limit = int(os.getenv("SERVICE_RECURSION_LIMIT", "25"))
         
         # Provider bidding configuration
-        self.bidding_base_cost = int(os.getenv("BIDDING_BASE_COST", "5"))
+        self.bidding_base_cost = float(os.getenv("BIDDING_BASE_COST", "5"))
 
         # Heuristic bidding configuration
         self.heuristic_strategy = os.getenv("HEURISTIC_STRATEGY", "random_markup")

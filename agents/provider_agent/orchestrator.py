@@ -422,12 +422,39 @@ class Orchestrator:
         logger.warning(f"⚠️  Job {job.auction_id} error (attempt {job.retry_count}/{job.max_retries}): {error}")
         
         if job.retry_count >= job.max_retries:
+            if job.status == JobStatus.FETCHING_FILES:
+                logger.error(
+                    f"❌ Job {job.auction_id} service execution failed after {job.retry_count} attempts; "
+                    "continuing with failure-marked result to unblock workflow"
+                )
+                self._continue_after_service_failure(job)
+                return
+
             logger.error(f"❌ Job {job.auction_id} failed after {job.retry_count} attempts")
             job.status = JobStatus.FAILED
         else:
             # Retry: Reset status to previous step
             logger.info(f"🔄 Retrying job {job.auction_id}...")
             # Keep current status to retry the same step
+
+    def _continue_after_service_failure(self, job: Job):
+        """Create a synthetic failed result and continue pipeline to on-chain completion.
+
+        This keeps the marketplace flow moving even when local service execution repeatedly fails.
+        """
+        failure_result = {
+            "success": False,
+            "responses": [],
+            "error": job.error or "Service execution failed after max retries",
+            "service_failed": True,
+            "auction_id": job.auction_id,
+            "retry_count": job.retry_count,
+            "failure_timestamp": datetime.now().isoformat()
+        }
+
+        # Persist failure outcome so downstream analysis can treat this as poor delivery quality.
+        job.result = failure_result
+        job.status = JobStatus.PROCESSING
     
     def _cleanup_completed_jobs(self, max_completed: int = 100):
         """Clean up old completed jobs to prevent memory bloat."""
