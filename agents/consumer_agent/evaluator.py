@@ -224,73 +224,42 @@ class ServiceEvaluator:
                                 result_data = None
                         if isinstance(result_data, dict):
                             return result_data.get("overall_rating"), result_data.get("quality_scores")
+
+                # Tertiary: model returned plain text like "Overall Rating: 92"
+                if msg.__class__.__name__ == "AIMessage":
+                    content = getattr(msg, "content", "")
+                    if isinstance(content, str) and content.strip():
+                        parsed = self._parse_rating_from_text(content)
+                        if parsed[0] is not None:
+                            return parsed
             except Exception:
                 continue
 
         return None, None
 
-    def _local_fallback_evaluation(
-        self,
-        service_requirements: Dict[str, Any],
-        service_result: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Deterministic local fallback when agent doesn't return tool-based rating."""
-        responses = service_result.get("responses", []) if isinstance(service_result, dict) else []
-        prompts = service_requirements.get("prompts", []) if isinstance(service_requirements, dict) else []
-        criteria = service_requirements.get("quality_criteria", {}) if isinstance(service_requirements, dict) else {}
+    def _parse_rating_from_text(self, content: str) -> tuple[Optional[int], Optional[Dict[str, int]]]:
+        """Parse rating from non-JSON model output when tool/JSON output is absent."""
+        try:
+            # Common patterns: "Overall Rating: 92" or "rating=75/100"
+            m = re.search(r"overall\s*rating\s*[:=]\s*(\d{1,3})", content, flags=re.IGNORECASE)
+            if not m:
+                m = re.search(r"rating\s*[:=]\s*(\d{1,3})\s*(?:/\s*100)?", content, flags=re.IGNORECASE)
+            if not m:
+                return None, None
 
-        total_expected = max(len(prompts), len(responses), 1)
-        non_empty = [r for r in responses if str(r.get("response", "")).strip()]
-        coverage = len(non_empty) / total_expected
+            overall = max(0, min(100, int(m.group(1))))
 
-        avg_len = int(sum(len(str(r.get("response", ""))) for r in non_empty) / max(len(non_empty), 1))
-        if avg_len >= 600:
-            depth_base = 90
-        elif avg_len >= 300:
-            depth_base = 75
-        elif avg_len >= 120:
-            depth_base = 60
-        elif avg_len >= 40:
-            depth_base = 45
-        else:
-            depth_base = 25
+            # Try to recover per-dimension scores when present in text.
+            quality_scores: Dict[str, int] = {}
+            for dim in ["completeness", "depth", "citations", "clarity"]:
+                dm = re.search(rf"{dim}\s*[:=]\s*(\d{{1,3}})", content, flags=re.IGNORECASE)
+                if dm:
+                    quality_scores[dim] = max(0, min(100, int(dm.group(1))))
 
-        citation_hits = 0
-        for r in non_empty:
-            text = str(r.get("response", ""))
-            if re.search(r"\(\d{4}\)|\[\d+\]|et al\.", text, flags=re.IGNORECASE):
-                citation_hits += 1
-        citations = int(100 * citation_hits / max(len(non_empty), 1))
+            return overall, quality_scores
+        except Exception:
+            return None, None
 
-        completeness = int(100 * coverage)
-        depth = int(depth_base * coverage + 0.2 * completeness)
-        clarity = int(min(100, max(0, 0.7 * depth + 0.3 * completeness)))
-
-        default_dims = ["completeness", "depth", "clarity", "citations"]
-        dimensions = list(criteria.keys()) if isinstance(criteria, dict) and criteria else default_dims
-
-        quality_scores: Dict[str, int] = {}
-        for dim in dimensions:
-            key = str(dim).lower()
-            if "complete" in key:
-                quality_scores[dim] = max(0, min(100, completeness))
-            elif "depth" in key or "detail" in key:
-                quality_scores[dim] = max(0, min(100, depth))
-            elif "clar" in key or "struct" in key:
-                quality_scores[dim] = max(0, min(100, clarity))
-            elif "citation" in key or "reference" in key or "source" in key:
-                quality_scores[dim] = max(0, min(100, citations))
-            else:
-                quality_scores[dim] = max(0, min(100, int((completeness + depth + clarity) / 3)))
-
-        overall = int(sum(quality_scores.values()) / max(len(quality_scores), 1))
-        overall = max(0, min(100, overall))
-
-        return {
-            "overall_rating": overall,
-            "quality_scores": quality_scores
-        }
-    
     async def _react_evaluation_node(self, state: EvaluatorState) -> EvaluatorState:
         """Use ReAct agent to evaluate service quality."""
         logger.info("🤔 ReAct evaluation in progress...")
@@ -306,31 +275,31 @@ class ServiceEvaluator:
             # Build system prompt
             system_prompt = f"""You are an expert service quality evaluator for literature review services.
 
-**Your Task:**
-1. Use extract_prompt_response_pairs() to get structured data
-2. Analyze each prompt-response pair against the quality criteria
-3. Assign a score (0-100) for each quality dimension
-4. Use finalize_evaluation() to calculate the overall rating
+            **Your Task:**
+            1. Use extract_prompt_response_pairs() to get structured data
+            2. Analyze each prompt-response pair against the quality criteria
+            3. Assign a score (0-100) for each quality dimension
+            4. Use finalize_evaluation() to calculate the overall rating
 
-**Evaluation Process:**
-- Read the quality_criteria from the extracted data
-- For each criterion (e.g., completeness, depth, clarity):
-  * Review all prompt-response pairs
-  * Evaluate how well responses meet that criterion
-  * Assign a score 0-100
-- Be objective and fair - evaluate based on actual content quality
+            **Evaluation Process:**
+            - Read the quality_criteria from the extracted data
+            - For each criterion (e.g., completeness, depth, clarity):
+            * Review all prompt-response pairs
+            * Evaluate how well responses meet that criterion
+            * Assign a score 0-100
+            - Be objective and fair - evaluate based on actual content quality
 
-**Service Requirements:**
-```json
-{requirements_json}
-```
+            **Service Requirements:**
+            ```json
+            {requirements_json}
+            ```
 
-**Service Result:**
-```json
-{result_json}
-```
+            **Service Result:**
+            ```json
+            {result_json}
+            ```
 
-Start by extracting the prompt-response pairs, then evaluate systematically."""
+            Start by extracting the prompt-response pairs, then evaluate systematically."""
 
             # Create ReAct agent without rate limiting (use API defaults)
             llm = ChatOpenAI(
@@ -342,10 +311,12 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
             
             react_agent = create_agent(llm, self._tools)
             
+            recursion_limit = int(getattr(self.config, "evaluator_recursion_limit", 25))
+
             # Run agent
             agent_result = await react_agent.ainvoke({
                 "messages": [HumanMessage(content=system_prompt)]
-            })
+            }, config={"recursion_limit": recursion_limit})
             
             # Log reasoning trace
             logger.info("\n" + "=" * 80)
@@ -388,16 +359,58 @@ Start by extracting the prompt-response pairs, then evaluate systematically."""
                 ))
                 retry_result = await react_agent.ainvoke({
                     "messages": [HumanMessage(content=system_prompt), retry_msg]
-                })
+                }, config={"recursion_limit": recursion_limit})
                 agent_result = retry_result
                 overall_rating, quality_scores = self._parse_rating_from_messages(agent_result["messages"])
 
-            # Deterministic fallback if tool path still failed
+            # Final LLM-only strict JSON pass
             if overall_rating is None:
-                logger.warning("Agent still did not produce a valid rating; using deterministic local fallback evaluation")
-                fallback = self._local_fallback_evaluation(requirements, result)
-                overall_rating = fallback["overall_rating"]
-                quality_scores = fallback["quality_scores"]
+                logger.warning("Agent still did not produce a valid rating; retrying with strict JSON-only LLM pass")
+                strict_json_prompt = f"""You are an evaluator. Score this service result against requirements.
+
+                Return ONLY valid JSON with this exact schema:
+                {{
+                \"overall_rating\": <int 0-100>,
+                \"quality_scores\": {{
+                    \"completeness\": <int 0-100>,
+                    \"depth\": <int 0-100>,
+                    \"citations\": <int 0-100>,
+                    \"clarity\": <int 0-100>
+                }}
+                }}
+
+                Requirements JSON:
+                {requirements_json}
+
+                Result JSON:
+                {result_json}
+                """
+                strict_resp = await llm.ainvoke([HumanMessage(content=strict_json_prompt)])
+                strict_text = strict_resp.content if isinstance(strict_resp.content, str) else str(strict_resp.content)
+
+                try:
+                    parsed = json.loads(strict_text)
+                except Exception:
+                    try:
+                        parsed = ast.literal_eval(strict_text)
+                    except Exception:
+                        parsed = None
+
+                if isinstance(parsed, dict):
+                    overall_rating = parsed.get("overall_rating")
+                    quality_scores = parsed.get("quality_scores")
+
+                if overall_rating is None:
+                    txt_rating, txt_scores = self._parse_rating_from_text(strict_text)
+                    overall_rating = txt_rating
+                    quality_scores = txt_scores
+
+            # If all LLM attempts fail, set explicit error and neutral empty scores.
+            if overall_rating is None:
+                logger.error("Evaluator failed to produce valid rating after all LLM passes")
+                state["error"] = "LLM evaluator did not return a valid rating"
+                overall_rating = 0
+                quality_scores = {}
             
             state["overall_rating"] = overall_rating
             state["quality_scores"] = quality_scores

@@ -359,6 +359,21 @@ class Consumer:
         
         tracker.evaluation = evaluation
         tracker.status = AuctionStatus.EVALUATED
+
+        # If evaluator explicitly failed to produce a valid LLM rating, skip feedback
+        # but keep orchestration moving by finalizing this auction locally.
+        eval_error = evaluation.get("error")
+        if eval_error and "LLM evaluator did not return a valid rating" in str(eval_error):
+            logger.warning(
+                f"⚠️ Skipping feedback for auction {tracker.auction_id}: evaluator could not produce valid rating"
+            )
+            tracker.error = str(eval_error)
+            tracker.feedback_submitted = False
+            tracker.status = AuctionStatus.COMPLETED
+            self.completed_auctions.append(tracker)
+            if tracker.auction_id in self.active_auctions:
+                del self.active_auctions[tracker.auction_id]
+            return
         
         logger.info(f"✓ Evaluation complete: rating={evaluation['rating']}/100")
         if evaluation.get('quality_scores'):
@@ -372,6 +387,18 @@ class Consumer:
         logger.info(f"📤 Submitting feedback for auction {tracker.auction_id}...")
         
         try:
+            rating = tracker.evaluation.get('rating') if tracker.evaluation else None
+            if not isinstance(rating, int):
+                logger.warning(
+                    f"⚠️ Skipping feedback for auction {tracker.auction_id}: invalid rating value {rating!r}"
+                )
+                tracker.feedback_submitted = False
+                tracker.status = AuctionStatus.COMPLETED
+                self.completed_auctions.append(tracker)
+                if tracker.auction_id in self.active_auctions:
+                    del self.active_auctions[tracker.auction_id]
+                return
+
             # Query for FeedbackAuthProvided event (already emitted by provider)
             # Use ended_block as starting point to minimize search range
             from_block = tracker.ended_block if tracker.ended_block else None
@@ -400,7 +427,7 @@ class Consumer:
             result = await self.blockchain_handler.submit_feedback(
                 auction_id=tracker.auction_id,
                 agent_id=tracker.winning_agent_id,
-                rating=tracker.evaluation['rating'],
+                rating=rating,
                 feedback_text=feedback_text,
                 feedback_auth=feedback_auth
             )

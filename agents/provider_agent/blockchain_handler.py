@@ -261,7 +261,7 @@ class BlockchainHandler:
                     "proposed_bid": proposed_bid,
                     "profit": profit,
                     "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
-                    "summary": f"{proposed_bid/1e6:.1f} USDC bid - {estimated_cost/1e6:.1f} USDC cost = {profit/1e6:.1f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.1f}%)"
+                    "summary": f"{proposed_bid/1e6:.3f} USDC bid - {estimated_cost/1e6:.3f} USDC cost = {profit/1e6:.3f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.3f}%)"
                 }
             except Exception as e:
                 logger.error(f"validate_bid_profitability failed: {e}")
@@ -376,7 +376,7 @@ class BlockchainHandler:
                 if proposed_bid > max_price:
                     return {
                         "proposed_bid": proposed_bid,
-                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
                         "max_price": max_price,
                         "will_win": False,
                         "would_revert": True,
@@ -413,7 +413,7 @@ class BlockchainHandler:
                         "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
                         "current_winning_bid": current_winning_bid,
-                        "current_winning_bid_usdc": round(current_winning_bid / 1e6, 2),
+                        "current_winning_bid_usdc": round(current_winning_bid / 1e6, 3),
                         "current_winner_score": current_winner_score,
                         "current_winner_bid_component": current_bid_component,
                         "current_winner_reputation": winner_rep,
@@ -422,14 +422,14 @@ class BlockchainHandler:
                         "higher_is_better": True,
                         "will_win": will_win,
                         "margin": margin,
-                        "margin_percent": round(margin_percent, 2),
-                        "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score} vs current {current_winner_score} (margin: {margin}, {margin_percent:.1f}%)"
+                        "margin_percent": round(margin_percent, 3),
+                        "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score} vs current {current_winner_score} (margin: {margin}, {margin_percent:.3f}%)"
                     }
                 else:
                     # No current winner - we'll be first bid
                     return {
                         "proposed_bid": proposed_bid,
-                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
                         "your_score": our_score,
                         "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
@@ -1138,8 +1138,8 @@ Analyze these auctions and decide which to bid on."""
                 profit_margin = (profit / estimated_cost) * 100
                 
                 logger.info(
-                    f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.1f} USDC, "
-                    f"bid={bid_amount/1e6:.1f} USDC, margin={profit_margin:.1f}%"
+                    f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.3f} USDC, "
+                    f"bid={bid_amount/1e6:.3f} USDC, margin={profit_margin:.3f}%"
                 )
                 
                 # Place bid

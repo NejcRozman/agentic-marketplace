@@ -165,7 +165,7 @@ class CostTracker:
         cost_usd = cost_eth * self.config.eth_price_usd
         
         self.total_gas_costs += cost_usd
-        logger.debug(f"⛽ Gas cost: ${cost_usd:.4f} ({context}, {gas_used} gas @ {gas_price_gwei:.2f} gwei)")
+        logger.debug(f"⛽ Gas cost: ${cost_usd:.4f} ({context}, {gas_used} gas @ {gas_price_gwei:.4f} gwei)")
     
     def add_revenue(self, revenue_usd: float, context: str = "service_completion"):
         """
@@ -176,7 +176,7 @@ class CostTracker:
             context: Description of revenue source
         """
         self.total_revenue += revenue_usd
-        logger.info(f"💵 Revenue: ${revenue_usd:.2f} USD ({context})")
+        logger.info(f"💵 Revenue: ${revenue_usd:.4f} USD ({context})")
     
     def end_service_execution(self) -> float:
         """
@@ -197,7 +197,7 @@ class CostTracker:
         
         logger.info(
             f"📊 Service execution complete: "
-            f"${raw_cost:.6f} raw → ${scaled_cost:.2f} scaled "
+            f"${raw_cost:.6f} raw → ${scaled_cost:.4f} scaled "
             f"({self.service_cost_multiplier}x multiplier)"
         )
         

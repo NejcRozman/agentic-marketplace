@@ -13,7 +13,7 @@ blockchain:
   rpc_url: "http://localhost:8545"
   fork_network: "sepolia"
   infura_key_env: "INFURA_API_KEY"
-  initial_reputation_default: 68
+  initial_reputation_default: 75
 
   contracts:
     reverse_auction: null
@@ -40,10 +40,10 @@ agents:
     eligible_providers: null
 
     config:
-      check_interval: 5
-      max_budget: 10000000        # 10 USDC
+      check_interval: 10
+      max_budget: 100000        # 10 USDC
       auction_duration: 60        # 1 minute
-      reputation_weight: 25
+      reputation_weight: 20
 
     behavior:
       pdf_directory: "utils/files"
@@ -55,16 +55,16 @@ agents:
       inter_auction_delay: 5
 
   providers:
-    count: 10
-    agent_ids: [null, null, null, null, null, null, null, null, null, null]
+    count: 3
+    agent_ids: [null, null, null]
     private_keys: null
 
     config:
-      check_interval: 5
-      bidding_base_cost: 1        # 1 USD estimated service cost
-      gas_cost_mode: "fixed"     # model with fixed network average gas price
-      gas_price_gwei: 0.04          # assumed average gas price
-      eth_price_usd: 2000         # ETH/USD for gas conversion
+      check_interval: 10
+      bidding_base_cost: 0.05         # 0.05 USD estimated service cost
+      gas_cost_mode: "fixed"      # model with fixed network average gas price
+      gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
+      eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
 
     behavior:
       # Homogeneous heuristic setup
