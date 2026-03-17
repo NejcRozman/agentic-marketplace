@@ -13,12 +13,14 @@ import logging
 import json
 import time
 import random
+import re
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 from typing_extensions import TypedDict
 
 from langgraph.graph import StateGraph, END
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 from langchain_core.tools import tool
 from langchain_core.rate_limiters import InMemoryRateLimiter
@@ -210,6 +212,10 @@ class BlockchainHandler:
         
         # Bids placed tracker (for ReAct tool results)
         self._bids_placed: List[Dict[str, Any]] = []
+        self._react_stop_after_bid_attempt: bool = False
+
+        # Per-cycle state snapshot used by tool-call logging
+        self._tool_audit_context: Dict[str, Any] = {}
         
         # Build tools for ReAct agent
         self._tools = self._build_tools()
@@ -224,6 +230,7 @@ class BlockchainHandler:
             f"coupling_mode={self.coupling_mode}, prompt={prompt_info}, "
             f"model={self.llm_model}, temp={self.llm_temperature}, tools={len(self._tools)})"
         )
+        logger.info("Tool-call logging enabled (state snapshot + raw tool args)")
     
     def _build_tools(self) -> List:
         """Build tools for the ReAct agent."""
@@ -244,6 +251,10 @@ class BlockchainHandler:
             Returns:
                 Profitability analysis with verdict and profit margin
             """
+            raw_args = {
+                "estimated_cost": estimated_cost,
+                "proposed_bid": proposed_bid,
+            }
             try:
                 profit = proposed_bid - estimated_cost
                 is_profitable = proposed_bid > estimated_cost
@@ -255,7 +266,7 @@ class BlockchainHandler:
                     margin_percent = 0
                     loss_percent = 0
                 
-                return {
+                result = {
                     "is_profitable": is_profitable,
                     "estimated_cost": estimated_cost,
                     "proposed_bid": proposed_bid,
@@ -263,19 +274,37 @@ class BlockchainHandler:
                     "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
                     "summary": f"{proposed_bid/1e6:.3f} USDC bid - {estimated_cost/1e6:.3f} USDC cost = {profit/1e6:.3f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.3f}%)"
                 }
+                handler._audit_tool_call(
+                    tool_name="validate_bid_profitability",
+                    llm_args=raw_args,
+                    normalized_args={
+                        "estimated_cost": estimated_cost,
+                        "proposed_bid": proposed_bid,
+                    },
+                    result=result,
+                )
+                return result
             except Exception as e:
                 logger.error(f"validate_bid_profitability failed: {e}")
-                return {
+                result = {
                     "error": str(e),
                     "is_profitable": False
                 }
+                handler._audit_tool_call(
+                    tool_name="validate_bid_profitability",
+                    llm_args=raw_args,
+                    normalized_args=raw_args,
+                    result=result,
+                    error=str(e),
+                )
+                return result
         
         @tool
         def calculate_bid_score(
             bid_amount: int,
             agent_reputation: int,
             max_price: int = 0,
-            reputation_weight: int = 25
+            reputation_weight: int = 20
         ) -> Dict[str, Any]:
             """Calculate the bid score that will be used in auction ranking.
             
@@ -286,7 +315,7 @@ class BlockchainHandler:
                       (100 - reputation_weight) * normalized_bid_score) / 100
             
             Args:
-                bid_amount: The bid amount in USDC (with 6 decimals, e.g., 50000000 = 50 USDC)
+                bid_amount: The bid amount in USDC (with 6 decimals)
                 agent_reputation: The reputation score (0-100, where 50 is neutral)
                 max_price: Auction max price (required for exact score)
                 reputation_weight: Auction reputation weight (0-100)
@@ -294,9 +323,15 @@ class BlockchainHandler:
             Returns:
                 Dictionary with bid_score and explanation
             """
+            raw_args = {
+                "bid_amount": bid_amount,
+                "agent_reputation": agent_reputation,
+                "max_price": max_price,
+                "reputation_weight": reputation_weight,
+            }
             try:
                 if max_price <= 0:
-                    return {
+                    result = {
                         "error": "max_price is required for exact contract score",
                         "bid_amount": bid_amount,
                         "agent_reputation": agent_reputation,
@@ -304,21 +339,37 @@ class BlockchainHandler:
                         "reputation_weight": reputation_weight,
                         "summary": "Provide max_price to calculate exact on-chain score."
                     }
+                    handler._audit_tool_call(
+                        tool_name="calculate_bid_score",
+                        llm_args=raw_args,
+                        normalized_args=raw_args,
+                        result=result,
+                        error=result["error"],
+                    )
+                    return result
 
                 if bid_amount > max_price:
-                    return {
+                    result = {
                         "error": "bid exceeds max_price",
                         "bid_amount": bid_amount,
                         "max_price": max_price,
                         "summary": "Bid exceeds auction max price and will revert (BidTooHigh)."
                     }
+                    handler._audit_tool_call(
+                        tool_name="calculate_bid_score",
+                        llm_args=raw_args,
+                        normalized_args=raw_args,
+                        result=result,
+                        error=result["error"],
+                    )
+                    return result
 
                 rw = max(0, min(100, int(reputation_weight)))
                 normalized_reputation = int(agent_reputation)
                 normalized_bid_score = ((max_price - bid_amount) * 100) // max_price
                 bid_score = (rw * normalized_reputation + (100 - rw) * normalized_bid_score) // 100
 
-                return {
+                result = {
                     "bid_amount": bid_amount,
                     "agent_reputation": agent_reputation,
                     "max_price": max_price,
@@ -333,12 +384,32 @@ class BlockchainHandler:
                         f"@w={rw}%, bid_component={normalized_bid_score} @w={100-rw}%"
                     )
                 }
+                handler._audit_tool_call(
+                    tool_name="calculate_bid_score",
+                    llm_args=raw_args,
+                    normalized_args={
+                        "bid_amount": bid_amount,
+                        "agent_reputation": agent_reputation,
+                        "max_price": max_price,
+                        "reputation_weight": rw,
+                    },
+                    result=result,
+                )
+                return result
             except Exception as e:
                 logger.error(f"calculate_bid_score failed: {e}")
-                return {
+                result = {
                     "error": str(e),
                     "bid_score": 0
                 }
+                handler._audit_tool_call(
+                    tool_name="calculate_bid_score",
+                    llm_args=raw_args,
+                    normalized_args=raw_args,
+                    result=result,
+                    error=str(e),
+                )
+                return result
         
         @tool
         def simulate_bid_outcome(
@@ -365,16 +436,32 @@ class BlockchainHandler:
             Returns:
                 Analysis of whether you would win and by what margin
             """
+            raw_args = {
+                "proposed_bid": proposed_bid,
+                "your_reputation": your_reputation,
+                "current_winning_bid": current_winning_bid,
+                "current_winner_reputation": current_winner_reputation,
+                "max_price": max_price,
+                "reputation_weight": reputation_weight,
+            }
             try:
                 if max_price <= 0:
-                    return {
+                    result = {
                         "error": "max_price is required for exact simulation",
                         "will_win": False,
                         "summary": "Provide max_price to simulate on-chain outcome accurately."
                     }
+                    handler._audit_tool_call(
+                        tool_name="simulate_bid_outcome",
+                        llm_args=raw_args,
+                        normalized_args=raw_args,
+                        result=result,
+                        error=result["error"],
+                    )
+                    return result
 
                 if proposed_bid > max_price:
-                    return {
+                    result = {
                         "proposed_bid": proposed_bid,
                         "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
                         "max_price": max_price,
@@ -383,6 +470,14 @@ class BlockchainHandler:
                         "revert_reason": "BidTooHigh",
                         "summary": "❌ WILL REVERT: proposed bid exceeds auction max_price"
                     }
+                    handler._audit_tool_call(
+                        tool_name="simulate_bid_outcome",
+                        llm_args=raw_args,
+                        normalized_args=raw_args,
+                        result=result,
+                        error=result.get("revert_reason"),
+                    )
+                    return result
 
                 rw = max(0, min(100, int(reputation_weight)))
                 our_bid_component = ((max_price - proposed_bid) * 100) // max_price
@@ -391,11 +486,19 @@ class BlockchainHandler:
                 # If there's a current winner, compare scores
                 if current_winning_bid > 0:
                     if current_winning_bid > max_price:
-                        return {
+                        result = {
                             "error": "current_winning_bid exceeds max_price",
                             "will_win": False,
                             "summary": "Invalid auction data: current_winning_bid > max_price"
                         }
+                        handler._audit_tool_call(
+                            tool_name="simulate_bid_outcome",
+                            llm_args=raw_args,
+                            normalized_args=raw_args,
+                            result=result,
+                            error=result["error"],
+                        )
+                        return result
 
                     winner_rep = self.initial_reputation_default if current_winner_reputation is None else int(current_winner_reputation)
                     current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
@@ -406,7 +509,7 @@ class BlockchainHandler:
                     margin = our_score - current_winner_score  # Positive = we're better
                     margin_percent = (margin / current_winner_score * 100) if current_winner_score > 0 else 0
                     
-                    return {
+                    result = {
                         "proposed_bid": proposed_bid,
                         "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
                         "your_score": our_score,
@@ -425,9 +528,23 @@ class BlockchainHandler:
                         "margin_percent": round(margin_percent, 3),
                         "summary": f"{'✅ WILL WIN' if will_win else '❌ WILL LOSE'}: Your score {our_score} vs current {current_winner_score} (margin: {margin}, {margin_percent:.3f}%)"
                     }
+                    handler._audit_tool_call(
+                        tool_name="simulate_bid_outcome",
+                        llm_args=raw_args,
+                        normalized_args={
+                            "proposed_bid": proposed_bid,
+                            "your_reputation": int(your_reputation),
+                            "current_winning_bid": int(current_winning_bid),
+                            "current_winner_reputation": winner_rep,
+                            "max_price": max_price,
+                            "reputation_weight": rw,
+                        },
+                        result=result,
+                    )
+                    return result
                 else:
                     # No current winner - we'll be first bid
-                    return {
+                    result = {
                         "proposed_bid": proposed_bid,
                         "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
                         "your_score": our_score,
@@ -440,134 +557,221 @@ class BlockchainHandler:
                         "will_win": True,
                         "summary": "✅ WILL WIN: No current bids, you'll be the first bidder"
                     }
+                    handler._audit_tool_call(
+                        tool_name="simulate_bid_outcome",
+                        llm_args=raw_args,
+                        normalized_args={
+                            "proposed_bid": proposed_bid,
+                            "your_reputation": int(your_reputation),
+                            "current_winning_bid": int(current_winning_bid),
+                            "current_winner_reputation": current_winner_reputation,
+                            "max_price": max_price,
+                            "reputation_weight": rw,
+                        },
+                        result=result,
+                    )
+                    return result
                     
             except Exception as e:
                 logger.error(f"simulate_bid_outcome failed: {e}")
-                return {
+                result = {
                     "error": str(e),
                     "will_win": False,
                     "explanation": "Failed to simulate bid outcome."
                 }
+                handler._audit_tool_call(
+                    tool_name="simulate_bid_outcome",
+                    llm_args=raw_args,
+                    normalized_args=raw_args,
+                    result=result,
+                    error=str(e),
+                )
+                return result
 
         # ============================================================================
         # ACTUATION TOOLS - perform actions that affect the world (e.g., placing bids)
         # ============================================================================
                 
-        @tool
+        @tool(return_direct=True)
         def place_bid(auction_id: int, bid_amount: int) -> Dict[str, Any]:
-            """Submit a bid for an auction on the blockchain.
-            
-            Args:
-                auction_id: The auction ID to bid on
-                bid_amount: The bid amount in USDC (with decimals)
-                
-            Returns:
-                Dictionary with transaction result
-            """
+            """Submit a bid for an auction on the blockchain."""
+            raw_args = {"auction_id": auction_id, "bid_amount": bid_amount}
+            handler._react_stop_after_bid_attempt = True
             try:
                 logger.info(f"📤 Placing bid: auction={auction_id}, amount={bid_amount}")
-                
-                estimated_gas = asyncio.run(handler.client.estimate_gas(
-                    "ReverseAuction",
-                    "placeBid",
-                    auction_id,
-                    bid_amount,
-                    handler.agent_id
-                ))
-                
-                tx_hash = asyncio.run(handler.client.send_transaction(
-                    "ReverseAuction",
-                    "placeBid",
-                    auction_id,
-                    bid_amount,
-                    handler.agent_id,
-                    gas_limit=estimated_gas + 50000
-                ))
-                
-                receipt = asyncio.run(handler.client.wait_for_transaction(tx_hash))
-                
-                if receipt['status'] == 1:
-                    # Track gas cost
-                    gas_used = receipt.get('gasUsed', 0)
-                    gas_price_wei = receipt.get('effectiveGasPrice', 0)
-                    handler.cost_tracker.add_gas_cost(
-                        gas_used=gas_used,
-                        gas_price_wei=gas_price_wei,
-                        context="place_bid"
+
+                fresh_auction = asyncio.run(
+                    handler.client.call_contract_method("ReverseAuction", "getAuctionDetails", auction_id)
+                )
+                max_price = int(fresh_auction[3])
+                duration = int(fresh_auction[4])
+                start_time = int(fresh_auction[5])
+                current_winning_agent = int(fresh_auction[7])
+                current_winning_bid = int(fresh_auction[8])
+                is_active = bool(fresh_auction[9])
+                reputation_weight = int(fresh_auction[12])
+
+                latest_block = asyncio.run(handler.client.get_block("latest"))
+                current_time = int(latest_block["timestamp"])
+                end_time = start_time + duration
+
+                if (not is_active) or current_time >= end_time:
+                    result = {
+                        "success": False,
+                        "error": "AuctionNotActive",
+                        "error_code": "0x69b8d0fe",
+                        "explanation": "Auction ended before bid submission. State refreshed and tx skipped.",
+                        "retry_recommended": False,
+                    }
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+
+                if bid_amount > max_price:
+                    result = {
+                        "success": False,
+                        "error": "BidTooHigh",
+                        "error_code": "0xc9b80cd4",
+                        "explanation": "Bid exceeds current auction max_price. State refreshed and tx skipped.",
+                        "retry_recommended": True,
+                    }
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+
+                if current_winning_agent == handler.agent_id:
+                    result = {
+                        "success": False,
+                        "error": "AlreadyWinning",
+                        "explanation": "You are already the current winner. No tx sent.",
+                        "retry_recommended": False,
+                    }
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error"))
+                    return result
+
+                rw = max(0, min(100, reputation_weight))
+                our_rep = (handler._tool_audit_context or {}).get("agent_reputation")
+                if not isinstance(our_rep, int):
+                    our_rep = handler.initial_reputation_default
+                our_bid_component = ((max_price - bid_amount) * 100) // max_price
+                our_score = (rw * int(our_rep) + (100 - rw) * our_bid_component) // 100
+
+                if current_winning_bid > 0:
+                    winner_rep = handler.initial_reputation_default
+                    if current_winning_agent and current_winning_agent != handler.agent_id:
+                        try:
+                            winner_rep = int(
+                                asyncio.run(handler._fetch_reputation(current_winning_agent)).get(
+                                    "rating", handler.initial_reputation_default
+                                )
+                            )
+                        except Exception:
+                            winner_rep = handler.initial_reputation_default
+                    current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
+                    current_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
+                    if our_score <= current_score:
+                        result = {
+                            "success": False,
+                            "error": "BidScoreNotCompetitive",
+                            "error_code": "0x29e8399d",
+                            "explanation": "Refreshed on-chain state shows bid is not competitive; tx skipped.",
+                            "current_winning_bid": current_winning_bid,
+                            "current_winning_agent": current_winning_agent,
+                            "retry_recommended": False,
+                        }
+                        handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                        return result
+
+                estimated_gas = asyncio.run(
+                    handler.client.estimate_gas("ReverseAuction", "placeBid", auction_id, bid_amount, handler.agent_id)
+                )
+                tx_hash = asyncio.run(
+                    handler.client.send_transaction(
+                        "ReverseAuction",
+                        "placeBid",
+                        auction_id,
+                        bid_amount,
+                        handler.agent_id,
+                        gas_limit=estimated_gas + 50000,
                     )
-                    
+                )
+                receipt = asyncio.run(handler.client.wait_for_transaction(tx_hash))
+
+                if receipt["status"] == 1:
+                    handler.cost_tracker.add_gas_cost(
+                        gas_used=receipt.get("gasUsed", 0),
+                        gas_price_wei=receipt.get("effectiveGasPrice", 0),
+                        context="place_bid",
+                    )
                     logger.info(f"✅ Bid placed successfully: {tx_hash}")
                     result = {
                         "success": True,
                         "tx_hash": tx_hash,
                         "auction_id": auction_id,
                         "bid_amount": bid_amount,
-                        "block_number": receipt['blockNumber']
+                        "block_number": receipt["blockNumber"],
                     }
                     handler._bids_placed.append(result)
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result)
                     return result
-                else:
-                    return {"success": False, "error": "Transaction failed"}
-                    
+
+                result = {"success": False, "error": "Transaction failed"}
+                handler._audit_tool_call("place_bid", raw_args, raw_args, result, result["error"])
+                return result
+
             except Exception as e:
                 logger.error(f"Error placing bid: {e}")
-                
-                # Decode common smart contract errors for better agent understanding
                 error_msg = str(e)
-                
-                # BidScoreNotCompetitive - 0x29e8399d
+
                 if "0x29e8399d" in error_msg or "BidScoreNotCompetitive" in error_msg:
-                    return {
+                    result = {
                         "success": False,
                         "error": "BidScoreNotCompetitive",
                         "error_code": "0x29e8399d",
-                        "explanation": "Your weighted score is not better than the current winning bid. In this contract, HIGHER score wins. Lower bids help by increasing the price component, and higher reputation also helps.",
-                        "suggestion": "Try a significantly lower bid amount (10-30% less) to improve your competitiveness. Check the current winning bid and aim to beat it by a meaningful margin.",
-                        "retry_recommended": False
+                        "explanation": "Your weighted score is not better than the current winning bid.",
+                        "suggestion": "Try a lower bid amount to improve competitiveness.",
+                        "retry_recommended": False,
                     }
-                
-                # BidTooHigh - 0xc9b80cd4
-                elif "0xc9b80cd4" in error_msg or "BidTooHigh" in error_msg:
-                    return {
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+                if "0xc9b80cd4" in error_msg or "BidTooHigh" in error_msg:
+                    result = {
                         "success": False,
                         "error": "BidTooHigh",
                         "error_code": "0xc9b80cd4",
-                        "explanation": "Your bid amount exceeds the maximum price set by the consumer for this auction.",
-                        "suggestion": "Bid below the max_price shown in the auction details.",
-                        "retry_recommended": True
+                        "explanation": "Your bid amount exceeds auction max price.",
+                        "retry_recommended": True,
                     }
-                
-                # AuctionNotActive - 0x15e5e7f5
-                elif "0x15e5e7f5" in error_msg or "AuctionNotActive" in error_msg:
-                    return {
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+                if "0x69b8d0fe" in error_msg or "AuctionNotActive" in error_msg:
+                    result = {
                         "success": False,
                         "error": "AuctionNotActive",
-                        "error_code": "0x15e5e7f5",
-                        "explanation": "The auction has already ended or been cancelled. You can no longer place bids.",
-                        "suggestion": "Look for other active auctions to bid on.",
-                        "retry_recommended": False
+                        "error_code": "0x69b8d0fe",
+                        "explanation": "Auction is no longer active.",
+                        "retry_recommended": False,
                     }
-                
-                # AgentNotEligible - 0x5c427cd9
-                elif "0x5c427cd9" in error_msg or "AgentNotEligible" in error_msg:
-                    return {
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+                if "0x5c427cd9" in error_msg or "AgentNotEligible" in error_msg:
+                    result = {
                         "success": False,
                         "error": "AgentNotEligible",
                         "error_code": "0x5c427cd9",
-                        "explanation": "You are not eligible to bid on this auction. The consumer may have restricted bidding to specific agents.",
-                        "suggestion": "This auction is not available to you. Look for other auctions without eligibility restrictions.",
-                        "retry_recommended": False
+                        "explanation": "Agent is not eligible for this auction.",
+                        "retry_recommended": False,
                     }
-                
-                # Generic error
-                else:
-                    return {
-                        "success": False,
-                        "error": str(e),
-                        "explanation": "An unexpected error occurred while placing the bid.",
-                        "suggestion": "Review the error message and check if the auction is still active and you meet all requirements."
-                    }
-        
+                    handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
+                    return result
+
+                result = {
+                    "success": False,
+                    "error": str(e),
+                    "explanation": "An unexpected error occurred while placing the bid.",
+                    "suggestion": "Check auction status and eligibility before retrying.",
+                }
+                handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error"))
+                return result
+
         # Build tool list based on enabled_tools configuration
         all_tools = {
             "validate_bid_profitability": validate_bid_profitability,
@@ -576,7 +780,11 @@ class BlockchainHandler:
             "place_bid": place_bid
         }
         
-        enabled = [all_tools[name] for name in self.enabled_tools if name in all_tools]
+        enabled = []
+        for name in self.enabled_tools:
+            if name not in all_tools:
+                continue
+            enabled.append(all_tools[name])
         
         if len(enabled) < len(self.enabled_tools):
             missing = set(self.enabled_tools) - set(all_tools.keys())
@@ -584,6 +792,101 @@ class BlockchainHandler:
         
         logger.info(f"Enabled tools: {[t.name for t in enabled]}")
         return enabled
+
+    @staticmethod
+    def _normalize_tool_name(raw_name: str) -> str:
+        """Normalize malformed tool names emitted by the model.
+
+        Keeps canonical names intact while stripping known transport artifacts.
+        """
+        if not raw_name:
+            return raw_name
+
+        name = str(raw_name).strip().strip("`").strip('"').strip("'")
+        name = re.sub(r"\s+", "", name)
+
+        # Common malformed suffix pattern: tool_name<|channel|>commentary
+        if "<|" in name:
+            name = name.split("<|", 1)[0]
+
+        return name
+
+    class _ToolNameCanonicalizationMiddleware(AgentMiddleware):
+        """Canonicalize malformed tool names before ToolNode dispatch."""
+
+        def __init__(self, tool_lookup: Dict[str, Any], normalize_fn):
+            self._tool_lookup = tool_lookup
+            self._normalize_fn = normalize_fn
+
+        def wrap_tool_call(self, request, handler):
+            call = request.tool_call or {}
+            raw_name = call.get("name", "")
+            canonical_name = self._normalize_fn(raw_name)
+
+            if not canonical_name or canonical_name == raw_name:
+                return handler(request)
+
+            tool_obj = self._tool_lookup.get(canonical_name)
+            if tool_obj is None:
+                return handler(request)
+
+            updated_call = dict(call)
+            updated_call["name"] = canonical_name
+            updated_request = request.override(tool_call=updated_call)
+
+            # ToolCallRequest.override does not include `tool`; set it explicitly
+            # so ToolNode can execute the resolved canonical tool.
+            object.__setattr__(updated_request, "tool", tool_obj)
+
+            logger.warning(f"Normalized malformed tool name '{raw_name}' -> '{canonical_name}'")
+            return handler(updated_request)
+
+    def _build_tool_audit_context(self, state: AgentState) -> Dict[str, Any]:
+        """Build per-cycle state snapshot to include in each tool-call audit event."""
+        auctions = state.get("eligible_active_auctions", []) or []
+        auction_map = {}
+        for a in auctions:
+            auction_id = a.get("auction_id")
+            if auction_id is None:
+                continue
+            auction_map[str(auction_id)] = {
+                "max_price": a.get("max_price"),
+                "winning_bid": a.get("winning_bid"),
+                "reputation_weight": a.get("reputation_weight"),
+                "time_remaining": a.get("time_remaining"),
+            }
+
+        estimated_cost_usd = state.get("estimated_service_cost")
+        estimated_cost_micro = None
+        if isinstance(estimated_cost_usd, (int, float)):
+            estimated_cost_micro = int(float(estimated_cost_usd) * 1e6)
+
+        return {
+            "agent_id": self.agent_id,
+            "agent_reputation": (state.get("agent_reputation") or {}).get("rating"),
+            "estimated_service_cost_usd": estimated_cost_usd,
+            "estimated_service_cost_micro": estimated_cost_micro,
+            "auctions": auction_map,
+            "auction_count": len(auctions),
+        }
+
+    def _audit_tool_call(
+        self,
+        tool_name: str,
+        llm_args: Dict[str, Any],
+        normalized_args: Optional[Dict[str, Any]] = None,
+        result: Optional[Dict[str, Any]] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Record a structured tool-call event with state snapshot and raw LLM args."""
+        event = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "agent_id": self.agent_id,
+            "tool": tool_name,
+            "llm_args": llm_args,
+            "current_state": self._tool_audit_context or {},
+        }
+        logger.info(f"TOOL_AUDIT {json.dumps(event, default=str)}")
     
     def _get_default_system_prompt(self, auctions_context: str) -> str:
         """
@@ -1097,16 +1400,43 @@ Analyze these auctions and decide which to bid on."""
                     min_profitable_bid = int(estimated_cost * (1.0 + min_margin))
 
                     winning_bid = auction.get("winning_bid", 0) or 0
+                    reputation_weight = int(auction.get("reputation_weight", 50) or 50)
+                    our_reputation = int(
+                        (state.get("agent_reputation") or {}).get(
+                            "rating", self.initial_reputation_default
+                        )
+                    )
                     winner_reputation = self.initial_reputation_default
                     if winning_agent_id and winning_agent_id != self.agent_id:
                         for rep in state.get("competitors_reputation", []):
-                            if rep.get("agent_id") == winning_agent_id:
-                                winner_reputation = rep.get("rating", self.initial_reputation_default)
+                            if int(rep.get("agent_id", 0) or 0) == int(winning_agent_id):
+                                winner_reputation = int(rep.get("rating", self.initial_reputation_default))
                                 break
+                        else:
+                            rep_data = await self._fetch_reputation(int(winning_agent_id))
+                            winner_reputation = int(rep_data.get("rating", self.initial_reputation_default))
 
                     if winning_bid > 0:
-                        current_winner_score = (winning_bid * (100 + winner_reputation)) // 100
-                        max_competitive_bid = int((current_winner_score * 100 - 1) // (100 + state.get("agent_reputation", {}).get("rating", self.initial_reputation_default)))
+                        rw = max(0, min(100, reputation_weight))
+                        current_bid_component = ((max_price - winning_bid) * 100) // max_price
+                        current_winner_score = (rw * winner_reputation + (100 - rw) * current_bid_component) // 100
+
+                        if rw >= 100:
+                            # Bid component has zero effect when reputation is fully weighted.
+                            max_competitive_bid = max_price if our_reputation > winner_reputation else -1
+                        else:
+                            required_numerator = 100 * (current_winner_score + 1) - (rw * our_reputation)
+                            if required_numerator <= 0:
+                                min_required_bid_component = 0
+                            else:
+                                min_required_bid_component = (required_numerator + (100 - rw) - 1) // (100 - rw)
+
+                            if min_required_bid_component > 100:
+                                max_competitive_bid = -1
+                            else:
+                                # Enforce ((max_price - bid) * 100 // max_price) >= min_required_bid_component
+                                min_delta = (min_required_bid_component * max_price + 99) // 100
+                                max_competitive_bid = max_price - min_delta
                     else:
                         max_competitive_bid = max_price
 
@@ -1141,6 +1471,81 @@ Analyze these auctions and decide which to bid on."""
                     f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.3f} USDC, "
                     f"bid={bid_amount/1e6:.3f} USDC, margin={profit_margin:.3f}%"
                 )
+
+                # Strict pre-bid refresh gate: if refresh fails, skip bid.
+                try:
+                    fresh_auction = await self.client.call_contract_method(
+                        "ReverseAuction",
+                        "getAuctionDetails",
+                        auction_id,
+                    )
+                    if not isinstance(fresh_auction, (list, tuple)) or len(fresh_auction) < 13:
+                        raise ValueError("invalid getAuctionDetails payload")
+
+                    fresh_max_price = int(fresh_auction[3])
+                    fresh_duration = int(fresh_auction[4])
+                    fresh_start_time = int(fresh_auction[5])
+                    fresh_winning_agent = int(fresh_auction[7])
+                    fresh_winning_bid = int(fresh_auction[8])
+                    fresh_is_active = bool(fresh_auction[9])
+                    fresh_reputation_weight = int(fresh_auction[12])
+
+                    latest_block = await self.client.get_block("latest")
+                    current_time = int(latest_block["timestamp"])
+                    end_time = fresh_start_time + fresh_duration
+                except Exception as e:
+                    logger.warning(
+                        f"Pre-bid refresh check failed for auction {auction_id}: {e}. Skipping bid."
+                    )
+                    continue
+
+                if (not fresh_is_active) or (current_time >= end_time):
+                    logger.info(
+                        f"⏭️ Skipping auction {auction_id}: auction no longer active"
+                    )
+                    continue
+
+                if bid_amount > fresh_max_price:
+                    logger.info(
+                        f"⏭️ Skipping auction {auction_id}: bid {bid_amount} exceeds max_price {fresh_max_price}"
+                    )
+                    continue
+
+                if fresh_winning_agent == self.agent_id:
+                    logger.info(
+                        f"⏭️ Skipping auction {auction_id}: already winning"
+                    )
+                    continue
+
+                rw = max(0, min(100, fresh_reputation_weight))
+                our_rep = int(
+                    (state.get("agent_reputation") or {}).get(
+                        "rating", self.initial_reputation_default
+                    )
+                )
+                our_bid_component = ((fresh_max_price - bid_amount) * 100) // fresh_max_price
+                our_score = (rw * our_rep + (100 - rw) * our_bid_component) // 100
+
+                if fresh_winning_bid > 0:
+                    winner_rep = self.initial_reputation_default
+                    if fresh_winning_agent and fresh_winning_agent != self.agent_id:
+                        for rep in state.get("competitors_reputation", []):
+                            if int(rep.get("agent_id", 0) or 0) == int(fresh_winning_agent):
+                                winner_rep = int(rep.get("rating", self.initial_reputation_default))
+                                break
+                        else:
+                            rep_data = await self._fetch_reputation(fresh_winning_agent)
+                            winner_rep = int(rep_data.get("rating", self.initial_reputation_default))
+
+                    current_bid_component = ((fresh_max_price - fresh_winning_bid) * 100) // fresh_max_price
+                    current_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
+
+                    if our_score <= current_score:
+                        logger.info(
+                            f"⏭️ Skipping auction {auction_id}: non-competitive "
+                            f"(our_score={our_score}, current_score={current_score})"
+                        )
+                        continue
                 
                 # Place bid
                 try:
@@ -1212,6 +1617,8 @@ Analyze these auctions and decide which to bid on."""
         
         # Reset bids tracker
         self._bids_placed = []
+        self._react_stop_after_bid_attempt = False
+        self._tool_audit_context = self._build_tool_audit_context(state)
         
         try:
             auctions_context = json.dumps(eligible_auctions, indent=2)
@@ -1228,10 +1635,7 @@ Analyze these auctions and decide which to bid on."""
                 # Use architecture's prompt template
                 prompt = get_prompt(
                     architecture=self.arch_config.prompt_template,
-                    agent_id=self.agent_id,
-                    auctions_context=auctions_context,
-                    past_execution_costs=state.get("past_execution_costs"),
-                    # past_winning_bids=state.get("past_winning_bids"),  # For future architectures
+                    agent_state=state,
                 )
                 logger.info(f"Using {self.arch_config.name} prompt")
             
@@ -1250,9 +1654,16 @@ Analyze these auctions and decide which to bid on."""
                 callbacks=[callback]
             )
             
-            react_agent = create_agent(llm, self._tools)
+            tool_lookup = {tool.name: tool for tool in self._tools}
+            middleware = [
+                self._ToolNameCanonicalizationMiddleware(
+                    tool_lookup=tool_lookup,
+                    normalize_fn=self._normalize_tool_name,
+                )
+            ]
+            react_agent = create_agent(llm, self._tools, middleware=middleware)
             
-            recursion_limit = int(getattr(self.config, "react_recursion_limit", 12))
+            recursion_limit = int(getattr(self.config, "react_recursion_limit", 20))
             result = await react_agent.ainvoke(
                 {"messages": [HumanMessage(content=prompt)]},
                 config={"recursion_limit": recursion_limit}
@@ -1286,7 +1697,10 @@ Analyze these auctions and decide which to bid on."""
                     logger.info(f"\n[{i}] ToolMessage:\n  ✅ {tool_output}")
             
             logger.info("=" * 80 + "\n")
-            
+
+            if self._react_stop_after_bid_attempt:
+                logger.info("ReAct cycle ended after place_bid attempt; next monitor cycle will use refreshed blockchain state.")
+
             state["bids_placed"] = self._bids_placed
             logger.info(f"✅ ReAct completed: {len(self._bids_placed)} bids placed")
             
@@ -1301,6 +1715,9 @@ Analyze these auctions and decide which to bid on."""
             logger.error(f"Error in ReAct reasoning: {e}")
             state["error"] = err_text
             state["bids_placed"] = []
+        finally:
+            # Avoid stale cross-cycle context
+            self._tool_audit_context = {}
         
         return state
     

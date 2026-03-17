@@ -48,8 +48,11 @@ def _make_config(
     return cfg
 
 
-def _make_mock_client() -> MagicMock:
-    """Async-capable mock client that simulates a successful on-chain bid."""
+def _make_mock_client(auctions=None) -> MagicMock:
+    """Async-capable mock client that simulates a successful on-chain bid.
+
+    For strict pre-bid refresh, this mock also serves getAuctionDetails/get_block.
+    """
     client = MagicMock()
     client.estimate_gas         = AsyncMock(return_value=200_000)
     client.send_transaction      = AsyncMock(return_value="0xdeadbeef")
@@ -59,6 +62,35 @@ def _make_mock_client() -> MagicMock:
         "gasUsed": 150_000,
         "effectiveGasPrice": 2_000_000_000,   # 2 gwei
     })
+
+    auction_map = {int(a["auction_id"]): a for a in (auctions or [])}
+
+    async def _call_contract_method(contract_name, method_name, *args):
+        if contract_name == "ReverseAuction" and method_name == "getAuctionDetails":
+            auction_id = int(args[0])
+            if auction_id not in auction_map:
+                raise ValueError(f"unknown auction_id in mock: {auction_id}")
+            a = auction_map[auction_id]
+            # Match the expected tuple layout used by BlockchainHandler.
+            return [
+                auction_id,                                 # 0 id
+                a.get("buyer", "0xBuyer"),                # 1 buyer
+                a.get("service_description_cid", "QmTest"),  # 2 cid
+                int(a.get("max_price", 0)),               # 3 maxPrice
+                int(a.get("duration", 3600)),             # 4 duration
+                int(a.get("start_time", 1_000_000)),      # 5 startTime
+                [],                                         # 6 eligible ids (unused)
+                int(a.get("winning_agent_id", 0) or 0),   # 7 winningAgentId
+                int(a.get("winning_bid", 0) or 0),        # 8 winningBid
+                bool(a.get("is_active", True)),           # 9 isActive
+                False,                                      # 10 isCompleted
+                0,                                          # 11 escrowAmount
+                int(a.get("reputation_weight", 50) or 50),# 12 reputationWeight
+            ]
+        raise ValueError(f"unexpected mocked call: {contract_name}.{method_name}")
+
+    client.call_contract_method = AsyncMock(side_effect=_call_contract_method)
+    client.get_block = AsyncMock(return_value={"timestamp": 1_000_100})
     return client
 
 
@@ -139,7 +171,7 @@ class TestRandomMarkupStrategy(unittest.TestCase):
 
     def _run(self, state, cfg=None):
         cfg = cfg or _make_config(strategy="random_markup", min_margin=0.10, max_margin=0.30)
-        client = _make_mock_client()
+        client = _make_mock_client(auctions=state.get("eligible_active_auctions", []))
         handler = _make_handler(cfg, client)
         return run_async(handler._heuristic_reasoning(state)), handler, cfg
 
@@ -213,7 +245,7 @@ class TestFeasibleRandomStrategy(unittest.TestCase):
 
     def _run(self, state, cfg=None):
         cfg = cfg or _make_config(strategy="feasible_random", min_margin=0.10, max_margin=0.30)
-        client = _make_mock_client()
+        client = _make_mock_client(auctions=state.get("eligible_active_auctions", []))
         handler = _make_handler(cfg, client)
         return run_async(handler._heuristic_reasoning(state)), handler, cfg
 
@@ -309,9 +341,10 @@ class TestFeasibleRandomStrategy(unittest.TestCase):
         max_price      = int(200 * 1e6)
 
         for trial in range(20):
-            client  = _make_mock_client()
+            auctions = [_auction(max_price_usdc=200.0, winning_bid=0)]
+            client  = _make_mock_client(auctions=auctions)
             handler = _make_handler(cfg, client)
-            state   = _base_state(auctions=[_auction(max_price_usdc=200.0, winning_bid=0)])
+            state   = _base_state(auctions=auctions)
             result  = run_async(handler._heuristic_reasoning(state))
 
             self.assertEqual(len(result["bids_placed"]), 1,
@@ -337,8 +370,9 @@ class TestEdgeCases(unittest.TestCase):
         """
         cfg    = _make_config(strategy="nonexistent_strategy",
                               min_margin=0.10, max_margin=0.30, base_cost=40)
-        client = _make_mock_client()
-        state  = _base_state(auctions=[_auction(max_price_usdc=200.0)])
+        auctions = [_auction(max_price_usdc=200.0)]
+        client = _make_mock_client(auctions=auctions)
+        state  = _base_state(auctions=auctions)
         result = run_async(_make_handler(cfg, client)._heuristic_reasoning(state))
 
         self.assertEqual(len(result["bids_placed"]), 1)
@@ -350,14 +384,15 @@ class TestEdgeCases(unittest.TestCase):
     def test_failed_transaction_not_added_to_bids_placed(self):
         """If the on-chain tx returns status=0 it must NOT appear in bids_placed."""
         cfg    = _make_config(strategy="random_markup")
-        client = _make_mock_client()
+        auctions = [_auction(max_price_usdc=200.0)]
+        client = _make_mock_client(auctions=auctions)
         client.wait_for_transaction = AsyncMock(return_value={
             "status": 0,        # ← failure
             "blockNumber": 99,
             "gasUsed": 50_000,
             "effectiveGasPrice": 2_000_000_000,
         })
-        state  = _base_state(auctions=[_auction(max_price_usdc=200.0)])
+        state  = _base_state(auctions=auctions)
         result = run_async(_make_handler(cfg, client)._heuristic_reasoning(state))
 
         self.assertEqual(len(result["bids_placed"]), 0)
@@ -369,7 +404,11 @@ class TestEdgeCases(unittest.TestCase):
         a successful bid on auction 2.
         """
         cfg    = _make_config(strategy="random_markup")
-        client = _make_mock_client()
+        auctions = [
+            _auction(auction_id=1, max_price_usdc=200.0),
+            _auction(auction_id=2, max_price_usdc=200.0),
+        ]
+        client = _make_mock_client(auctions=auctions)
 
         _call = {"n": 0}
 
@@ -381,10 +420,6 @@ class TestEdgeCases(unittest.TestCase):
 
         client.send_transaction = AsyncMock(side_effect=flaky_send)
 
-        auctions = [
-            _auction(auction_id=1, max_price_usdc=200.0),
-            _auction(auction_id=2, max_price_usdc=200.0),
-        ]
         state  = _base_state(auctions=auctions)
         result = run_async(_make_handler(cfg, client)._heuristic_reasoning(state))
 
@@ -396,8 +431,9 @@ class TestEdgeCases(unittest.TestCase):
     def test_bids_placed_contains_expected_keys(self):
         """Each bid record must contain success, tx_hash, auction_id, bid_amount, block_number."""
         cfg    = _make_config(strategy="random_markup")
-        client = _make_mock_client()
-        state  = _base_state(auctions=[_auction(max_price_usdc=200.0)])
+        auctions = [_auction(max_price_usdc=200.0)]
+        client = _make_mock_client(auctions=auctions)
+        state  = _base_state(auctions=auctions)
         result = run_async(_make_handler(cfg, client)._heuristic_reasoning(state))
 
         self.assertEqual(len(result["bids_placed"]), 1)
