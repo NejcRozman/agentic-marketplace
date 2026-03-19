@@ -274,15 +274,21 @@ class TestFeasibleRandomStrategy(unittest.TestCase):
     def test_bid_beats_current_winner_score(self):
         """
         With winner_bid=80 USDC and winner_rep=50:
-          winner_score      = (80e6 × 150) // 100 = 120_000_000
-          max_competitive   = (120e6×100 - 1) // 150 = 79_999_999
-        Any bid drawn from [min_profitable, 79_999_999] must produce a
-        score strictly below winner_score.
+          normalized_rep    = 50 * 100 = 5000
+          winner_bid_comp   = ((200e6 - 80e6) * 10000) // 200e6 = 6000
+          winner_score      = (50*5000 + 50*6000) // 100 = 5500
+          max_competitive   = 79_980_000 (strictly better score required)
+        Any bid drawn from [min_profitable, 79_980_000] must produce a
+        score strictly above winner_score.
         """
         agent_rep    = 50
         winner_rep   = 50
         winner_bid   = int(80 * 1e6)
-        winner_score = (winner_bid * (100 + winner_rep)) // 100   # 120_000_000
+        max_price    = int(200 * 1e6)
+        score_precision = 10_000
+        rep_component = winner_rep * (score_precision // 100)
+        bid_component = ((max_price - winner_bid) * score_precision) // max_price
+        winner_score = (50 * rep_component + 50 * bid_component) // 100
 
         state = _base_state(
             auctions    = [_auction(max_price_usdc=200.0,
@@ -294,26 +300,28 @@ class TestFeasibleRandomStrategy(unittest.TestCase):
 
         self.assertEqual(len(result["bids_placed"]), 1)
         bid       = result["bids_placed"][0]["bid_amount"]
-        our_score = (bid * (100 + agent_rep)) // 100
-        self.assertLess(our_score, winner_score,
-                        f"our_score {our_score} should be < winner_score {winner_score}")
+        our_rep_component = agent_rep * (score_precision // 100)
+        our_bid_component = ((max_price - bid) * score_precision) // max_price
+        our_score = (50 * our_rep_component + 50 * our_bid_component) // 100
+        self.assertGreater(our_score, winner_score,
+                           f"our_score {our_score} should be > winner_score {winner_score}")
 
     # ------------------------------------------------------------------
     def test_infeasible_region_skips_auction(self):
         """
-        winner_bid=30 USDC, winner_rep=50:
-          winner_score    = (30e6 × 150) // 100 = 45_000_000
-          max_competitive = (45e6×100 - 1) // 150 = 29_999_999
-          min_profitable  = int(40e6 × 1.10)      = 44_000_000
-        max_competitive (29.99 USDC) < min_profitable (44 USDC) → skip.
+        Force infeasible region with high reputation weight and stronger current winner.
+        With rep_weight=80, winner_rep=100, winner_bid=50 USDC:
+          winner_score is so high that required bid_component exceeds SCORE_PRECISION,
+          so max_competitive becomes -1 and auction must be skipped.
         """
-        winner_bid = int(30 * 1e6)
+        winner_bid = int(50 * 1e6)
+        auction = _auction(max_price_usdc=200.0, winning_bid=winner_bid, winning_agent_id=99)
+        auction["reputation_weight"] = 80
 
         state = _base_state(
-            auctions    = [_auction(max_price_usdc=200.0,
-                                    winning_bid=winner_bid, winning_agent_id=99)],
-            agent_rep   = 50,
-            competitors = [{"agent_id": 99, "rating": 50, "feedback_count": 0}],
+            auctions=[auction],
+            agent_rep=50,
+            competitors=[{"agent_id": 99, "rating": 100, "feedback_count": 0}],
         )
         result, handler, _ = self._run(state)
 

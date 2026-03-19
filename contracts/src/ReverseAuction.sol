@@ -37,7 +37,7 @@ contract ReverseAuction is ReentrancyGuard {
         bool isActive;                // Whether auction is currently active
         bool isCompleted;             // Whether service has been completed
         uint256 escrowAmount;         // Amount held in escrow
-        uint256 reputationWeight;     // Weight for reputation (0-100, represents 0.00-1.00)
+        uint256 reputationWeight;     // Weight for reputation in percent (0-100)
     }
     
     /**
@@ -85,8 +85,8 @@ contract ReverseAuction is ReentrancyGuard {
     /// @dev Mapping to track the highest score for each auction
     mapping(uint256 => uint256) public highestScore;
     
-    /// @dev Precision constant for score calculations (2 decimal places)
-    uint256 private constant SCORE_PRECISION = 100;
+    /// @dev Precision constant for score calculations (4 decimal places)
+    uint256 private constant SCORE_PRECISION = 10_000;
     
     // ============ EVENTS ============
     
@@ -194,7 +194,7 @@ contract ReverseAuction is ReentrancyGuard {
      * @param maxPrice Maximum price buyer is willing to pay (also escrow amount) in USDC
      * @param duration Auction duration in seconds
      * @param eligibleAgentIds Array of preselected agent IDs from ERC-8004 Identity Registry
-     * @param reputationWeight Weight for reputation in scoring (0-100, represents 0.00-1.00)
+    * @param reputationWeight Weight for reputation in scoring, percent (0-100)
      * @return auctionId The ID of the created auction
      */
     function createAuction(
@@ -470,16 +470,16 @@ contract ReverseAuction is ReentrancyGuard {
      * @param reputation Provider's reputation score (0-100)
      * @param bidAmount The bid amount
      * @param maxPrice Maximum price from auction
-     * @param reputationWeight Weight for reputation (0-100, represents 0.00-1.00)
+    * @param reputationWeight Weight for reputation in percent (0-100)
      * @return score The calculated weighted score (0-10000)
      * 
-     * Formula: score = w * normalize(reputation) + (1 - w) * normalize(1 / bidAmount)
+    * Formula: score = w * normalize(reputation) + (1 - w) * normalize(1 / bidAmount)
      * where:
-     *   - w = reputationWeight / 100
+    *   - w = reputationWeight / 100
      *   - normalize(reputation) = reputation / 100
      *   - normalize(1 / bidAmount) = 1 - (bidAmount / maxPrice)
      * 
-     * Higher score is better
+    * Higher score is better
      */
     function _calculateScore(
         uint256 reputation,
@@ -487,20 +487,20 @@ contract ReverseAuction is ReentrancyGuard {
         uint256 maxPrice,
         uint256 reputationWeight
     ) internal pure returns (uint256 score) {
-        // Normalize reputation: reputation is already 0-100, so we just use it
-        // For precision, we multiply by SCORE_PRECISION (100)
-        uint256 normalizedReputation = reputation; // Already 0-100
+        // Keep reputationWeight external semantics as percent (0-100).
+        // Convert reputation (0-100) into SCORE_PRECISION space (0-10000).
+        uint256 normalizedReputation = (reputation * SCORE_PRECISION) / 100;
+        uint256 weightPercent = reputationWeight;
         
         // Normalize bid amount (inverted so lower price = higher score)
-        // Formula: (1 - bidAmount/maxPrice) * 100
-        // To avoid division precision issues: (maxPrice - bidAmount) * 100 / maxPrice
+        // Formula: (1 - bidAmount/maxPrice) scaled to SCORE_PRECISION.
         uint256 normalizedBidScore = ((maxPrice - bidAmount) * SCORE_PRECISION) / maxPrice;
         
         // Calculate weighted score
-        // score = w * normalizedReputation + (100 - w) * normalizedBidScore
-        // All values are already scaled by 100, so result is in range 0-10000
-        score = (reputationWeight * normalizedReputation + 
-                (SCORE_PRECISION - reputationWeight) * normalizedBidScore) / SCORE_PRECISION;
+        // score = w * normalizedReputation + (1 - w) * normalizedBidScore
+        // where w is percent in [0, 100]. Result remains in [0, SCORE_PRECISION].
+        score = (weightPercent * normalizedReputation +
+            (100 - weightPercent) * normalizedBidScore) / 100;
         
         return score;
     }

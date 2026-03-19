@@ -141,6 +141,10 @@ class BlockchainHandler:
     - complete_service: Deterministic path for service completion
     - monitor: Heuristic or ReAct agent for intelligent bidding decisions
     """
+
+    # Keep weight semantics in percent (0-100) while increasing score precision.
+    SCORE_PRECISION = 10_000
+    WEIGHT_SCALE = 100
     
     def __init__(
         self, 
@@ -310,7 +314,7 @@ class BlockchainHandler:
             
             Contract scoring (higher score wins):
             - normalized_reputation = reputation (0-100)
-            - normalized_bid_score = ((max_price - bid_amount) * 100) / max_price
+            - normalized_bid_score = ((max_price - bid_amount) * SCORE_PRECISION) / max_price
             - score = (reputation_weight * normalized_reputation +
                       (100 - reputation_weight) * normalized_bid_score) / 100
             
@@ -364,10 +368,12 @@ class BlockchainHandler:
                     )
                     return result
 
-                rw = max(0, min(100, int(reputation_weight)))
-                normalized_reputation = int(agent_reputation)
-                normalized_bid_score = ((max_price - bid_amount) * 100) // max_price
-                bid_score = (rw * normalized_reputation + (100 - rw) * normalized_bid_score) // 100
+                rw = max(0, min(handler.WEIGHT_SCALE, int(reputation_weight)))
+                normalized_reputation = int(agent_reputation) * (handler.SCORE_PRECISION // handler.WEIGHT_SCALE)
+                normalized_bid_score = ((max_price - bid_amount) * handler.SCORE_PRECISION) // max_price
+                bid_score = (
+                    rw * normalized_reputation + (handler.WEIGHT_SCALE - rw) * normalized_bid_score
+                ) // handler.WEIGHT_SCALE
 
                 result = {
                     "bid_amount": bid_amount,
@@ -479,9 +485,12 @@ class BlockchainHandler:
                     )
                     return result
 
-                rw = max(0, min(100, int(reputation_weight)))
-                our_bid_component = ((max_price - proposed_bid) * 100) // max_price
-                our_score = (rw * int(your_reputation) + (100 - rw) * our_bid_component) // 100
+                rw = max(0, min(handler.WEIGHT_SCALE, int(reputation_weight)))
+                our_rep_scaled = int(your_reputation) * (handler.SCORE_PRECISION // handler.WEIGHT_SCALE)
+                our_bid_component = ((max_price - proposed_bid) * handler.SCORE_PRECISION) // max_price
+                our_score = (
+                    rw * our_rep_scaled + (handler.WEIGHT_SCALE - rw) * our_bid_component
+                ) // handler.WEIGHT_SCALE
                 
                 # If there's a current winner, compare scores
                 if current_winning_bid > 0:
@@ -501,8 +510,11 @@ class BlockchainHandler:
                         return result
 
                     winner_rep = self.initial_reputation_default if current_winner_reputation is None else int(current_winner_reputation)
-                    current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
-                    current_winner_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
+                    winner_rep_scaled = winner_rep * (handler.SCORE_PRECISION // handler.WEIGHT_SCALE)
+                    current_bid_component = ((max_price - current_winning_bid) * handler.SCORE_PRECISION) // max_price
+                    current_winner_score = (
+                        rw * winner_rep_scaled + (handler.WEIGHT_SCALE - rw) * current_bid_component
+                    ) // handler.WEIGHT_SCALE
                     
                     # Higher score wins in this contract
                     will_win = our_score > current_winner_score
@@ -647,12 +659,15 @@ class BlockchainHandler:
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error"))
                     return result
 
-                rw = max(0, min(100, reputation_weight))
+                rw = max(0, min(handler.WEIGHT_SCALE, reputation_weight))
                 our_rep = (handler._tool_audit_context or {}).get("agent_reputation")
                 if not isinstance(our_rep, int):
                     our_rep = handler.initial_reputation_default
-                our_bid_component = ((max_price - bid_amount) * 100) // max_price
-                our_score = (rw * int(our_rep) + (100 - rw) * our_bid_component) // 100
+                our_rep_scaled = int(our_rep) * (handler.SCORE_PRECISION // handler.WEIGHT_SCALE)
+                our_bid_component = ((max_price - bid_amount) * handler.SCORE_PRECISION) // max_price
+                our_score = (
+                    rw * our_rep_scaled + (handler.WEIGHT_SCALE - rw) * our_bid_component
+                ) // handler.WEIGHT_SCALE
 
                 if current_winning_bid > 0:
                     winner_rep = handler.initial_reputation_default
@@ -665,8 +680,11 @@ class BlockchainHandler:
                             )
                         except Exception:
                             winner_rep = handler.initial_reputation_default
-                    current_bid_component = ((max_price - current_winning_bid) * 100) // max_price
-                    current_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
+                    winner_rep_scaled = winner_rep * (handler.SCORE_PRECISION // handler.WEIGHT_SCALE)
+                    current_bid_component = ((max_price - current_winning_bid) * handler.SCORE_PRECISION) // max_price
+                    current_score = (
+                        rw * winner_rep_scaled + (handler.WEIGHT_SCALE - rw) * current_bid_component
+                    ) // handler.WEIGHT_SCALE
                     if our_score <= current_score:
                         result = {
                             "success": False,
@@ -818,17 +836,17 @@ class BlockchainHandler:
             self._tool_lookup = tool_lookup
             self._normalize_fn = normalize_fn
 
-        def wrap_tool_call(self, request, handler):
+        def _rewrite_request_if_needed(self, request):
             call = request.tool_call or {}
             raw_name = call.get("name", "")
             canonical_name = self._normalize_fn(raw_name)
 
             if not canonical_name or canonical_name == raw_name:
-                return handler(request)
+                return request
 
             tool_obj = self._tool_lookup.get(canonical_name)
             if tool_obj is None:
-                return handler(request)
+                return request
 
             updated_call = dict(call)
             updated_call["name"] = canonical_name
@@ -839,7 +857,13 @@ class BlockchainHandler:
             object.__setattr__(updated_request, "tool", tool_obj)
 
             logger.warning(f"Normalized malformed tool name '{raw_name}' -> '{canonical_name}'")
-            return handler(updated_request)
+            return updated_request
+
+        def wrap_tool_call(self, request, handler):
+            return handler(self._rewrite_request_if_needed(request))
+
+        async def awrap_tool_call(self, request, handler):
+            return await handler(self._rewrite_request_if_needed(request))
 
     def _build_tool_audit_context(self, state: AgentState) -> Dict[str, Any]:
         """Build per-cycle state snapshot to include in each tool-call audit event."""
@@ -1417,25 +1441,33 @@ Analyze these auctions and decide which to bid on."""
                             winner_reputation = int(rep_data.get("rating", self.initial_reputation_default))
 
                     if winning_bid > 0:
-                        rw = max(0, min(100, reputation_weight))
-                        current_bid_component = ((max_price - winning_bid) * 100) // max_price
-                        current_winner_score = (rw * winner_reputation + (100 - rw) * current_bid_component) // 100
+                        rw = max(0, min(self.WEIGHT_SCALE, reputation_weight))
+                        our_reputation_scaled = our_reputation * (self.SCORE_PRECISION // self.WEIGHT_SCALE)
+                        winner_reputation_scaled = winner_reputation * (self.SCORE_PRECISION // self.WEIGHT_SCALE)
+                        current_bid_component = ((max_price - winning_bid) * self.SCORE_PRECISION) // max_price
+                        current_winner_score = (
+                            rw * winner_reputation_scaled + (self.WEIGHT_SCALE - rw) * current_bid_component
+                        ) // self.WEIGHT_SCALE
 
                         if rw >= 100:
                             # Bid component has zero effect when reputation is fully weighted.
                             max_competitive_bid = max_price if our_reputation > winner_reputation else -1
                         else:
-                            required_numerator = 100 * (current_winner_score + 1) - (rw * our_reputation)
+                            required_numerator = self.WEIGHT_SCALE * (current_winner_score + 1) - (rw * our_reputation_scaled)
                             if required_numerator <= 0:
                                 min_required_bid_component = 0
                             else:
-                                min_required_bid_component = (required_numerator + (100 - rw) - 1) // (100 - rw)
+                                min_required_bid_component = (
+                                    required_numerator + (self.WEIGHT_SCALE - rw) - 1
+                                ) // (self.WEIGHT_SCALE - rw)
 
-                            if min_required_bid_component > 100:
+                            if min_required_bid_component > self.SCORE_PRECISION:
                                 max_competitive_bid = -1
                             else:
-                                # Enforce ((max_price - bid) * 100 // max_price) >= min_required_bid_component
-                                min_delta = (min_required_bid_component * max_price + 99) // 100
+                                # Enforce ((max_price - bid) * SCORE_PRECISION // max_price) >= min_required_bid_component
+                                min_delta = (
+                                    min_required_bid_component * max_price + self.SCORE_PRECISION - 1
+                                ) // self.SCORE_PRECISION
                                 max_competitive_bid = max_price - min_delta
                     else:
                         max_competitive_bid = max_price
@@ -1517,14 +1549,17 @@ Analyze these auctions and decide which to bid on."""
                     )
                     continue
 
-                rw = max(0, min(100, fresh_reputation_weight))
+                rw = max(0, min(self.WEIGHT_SCALE, fresh_reputation_weight))
                 our_rep = int(
                     (state.get("agent_reputation") or {}).get(
                         "rating", self.initial_reputation_default
                     )
                 )
-                our_bid_component = ((fresh_max_price - bid_amount) * 100) // fresh_max_price
-                our_score = (rw * our_rep + (100 - rw) * our_bid_component) // 100
+                our_rep_scaled = our_rep * (self.SCORE_PRECISION // self.WEIGHT_SCALE)
+                our_bid_component = ((fresh_max_price - bid_amount) * self.SCORE_PRECISION) // fresh_max_price
+                our_score = (
+                    rw * our_rep_scaled + (self.WEIGHT_SCALE - rw) * our_bid_component
+                ) // self.WEIGHT_SCALE
 
                 if fresh_winning_bid > 0:
                     winner_rep = self.initial_reputation_default
@@ -1537,8 +1572,11 @@ Analyze these auctions and decide which to bid on."""
                             rep_data = await self._fetch_reputation(fresh_winning_agent)
                             winner_rep = int(rep_data.get("rating", self.initial_reputation_default))
 
-                    current_bid_component = ((fresh_max_price - fresh_winning_bid) * 100) // fresh_max_price
-                    current_score = (rw * winner_rep + (100 - rw) * current_bid_component) // 100
+                    winner_rep_scaled = winner_rep * (self.SCORE_PRECISION // self.WEIGHT_SCALE)
+                    current_bid_component = ((fresh_max_price - fresh_winning_bid) * self.SCORE_PRECISION) // fresh_max_price
+                    current_score = (
+                        rw * winner_rep_scaled + (self.WEIGHT_SCALE - rw) * current_bid_component
+                    ) // self.WEIGHT_SCALE
 
                     if our_score <= current_score:
                         logger.info(

@@ -1,10 +1,10 @@
-# H1 ReAct Smoke Test (Homogeneous Providers)
-# Purpose: Fast end-to-end sanity check with architecture 1 + LLM ReAct providers
+# H2 Heuristic Smoke Test (Feasible Random Strategy)
+# Purpose: Fast end-to-end sanity check with heuristic providers using feasible_random bidding
 
 experiment:
-  id: "h1_react_smoke"
-  name: "ReAct Homogeneous Smoke Test"
-  description: "Quick smoke test with 1 consumer and 2 homogeneous architecture-1 ReAct providers over 2 auctions"
+  id: "h2_heuristic_smoke"
+  name: "Heuristic Feasible-Random Smoke Test"
+  description: "Quick smoke test with 1 consumer and 3 homogeneous heuristic providers using feasible_random over 2 auctions"
   research_question: "smoke_test"
   duration_timeout: 1200  # 20 minutes max
 
@@ -41,8 +41,8 @@ agents:
 
     config:
       check_interval: 10
-      max_budget: 100000       # 10 USDC
-      auction_duration: 60        # 1 minute
+      max_budget: 100000        # 10 USDC
+      auction_duration: 60       # 1 minute
       reputation_weight: 20
 
     behavior:
@@ -55,21 +55,24 @@ agents:
       inter_auction_delay: 5
 
   providers:
-    count: 2
-    agent_ids: [null, null]
+    count: 3
+    agent_ids: [null, null, null]
     private_keys: null
 
     config:
       check_interval: 10
-      bidding_base_cost: 0.05         # 0.05 USD estimated service cost
-      gas_cost_mode: "fixed"      # model with fixed network average gas price
+      bidding_base_cost: 0.05    # 0.05 USD estimated service cost
+      gas_cost_mode: "fixed"    # model with fixed network average gas price
       gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
-      eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
+      eth_price_usd: 0.1         # price in USD for gas conversion (ETH = $2000, POL = $0.1)
 
     behavior:
-      # Homogeneous architecture-1 ReAct setup
+      # Homogeneous heuristic setup (feasible random)
       architecture: "1"
-      reasoning_mode: "llm_react"
+      reasoning_mode: "heuristic"
+      heuristic_strategy: "feasible_random"
+      heuristic_min_margin: 0.10
+      heuristic_max_margin: 0.30
       auto_bid: true
       auto_execute: true
       auto_complete: true
@@ -107,12 +110,12 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h1_react_smoke"
+    directory: "experiments/data/logs/h2_heuristic_smoke"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h1_react_smoke"
+    directory: "experiments/data/metrics/h2_heuristic_smoke"
     format: "json"
 
 api_keys:

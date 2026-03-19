@@ -1,12 +1,12 @@
-# H1 Heuristic Homogeneous Experiment
-# Purpose: First non-smoke homogeneous run for heuristic provider agents
+# H1 ReAct Smoke Test (Homogeneous Providers)
+# Purpose: Fast end-to-end sanity check with architecture 1 + LLM ReAct providers
 
 experiment:
-  id: "h1_heuristic_homogeneous"
-  name: "Heuristic Homogeneous"
-  description: "Homogeneous heuristic setup with 1 consumer and X providers over Y auctions"
-  research_question: "homogeneous_heuristic_baseline"
-  duration_timeout: 21600  # 6 hours max
+  id: "h1_react_smoke"
+  name: "ReAct Homogeneous Smoke Test"
+  description: "Quick smoke test with 1 consumer and 2 homogeneous architecture-1 ReAct providers over 2 auctions"
+  research_question: "smoke_test"
+  duration_timeout: 1800  # 30 minutes max
 
 blockchain:
   network: "anvil"
@@ -41,8 +41,8 @@ agents:
 
     config:
       check_interval: 10
-      max_budget: 100000         # 0.1 USDC
-      auction_duration: 120         # 2 minute
+      max_budget: 100000       # 10 USDC
+      auction_duration: 120        # 2 minutes
       reputation_weight: 20
 
     behavior:
@@ -50,13 +50,13 @@ agents:
       service_selection: "sequential"
       service_complexity: "medium"
       auto_create_auction: true
-      num_auctions: 12
+      num_auctions: 2
       auto_monitor: true
-      inter_auction_delay: 3
+      inter_auction_delay: 5
 
   providers:
-    count: 3
-    agent_ids: [null, null, null]
+    count: 2
+    agent_ids: [null, null]
     private_keys: null
 
     config:
@@ -67,12 +67,9 @@ agents:
       eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
 
     behavior:
-      # Homogeneous heuristic setup
+      # Homogeneous architecture-1 ReAct setup
       architecture: "1"
-      reasoning_mode: "heuristic"
-      heuristic_strategy: "random_markup"
-      heuristic_min_margin: 0.10
-      heuristic_max_margin: 0.30
+      reasoning_mode: "llm_react"
       auto_bid: true
       auto_execute: true
       auto_complete: true
@@ -81,21 +78,21 @@ experiment_flow:
   phases:
     - name: "setup"
       description: "Start Anvil, deploy contracts, register agents, mint USDC"
-      timeout: 180
+      timeout: 120
 
     - name: "agents_start"
       description: "Launch consumer and provider agents"
-      timeout: 60
+      timeout: 30
 
     - name: "experiment_run"
       description: "Agents operate until target auctions complete"
       stopping_criteria:
         type: "completed_auctions"
-        target: 12
+        target: 2
         poll_interval: 5
-        max_timeout: 10800
+        max_timeout: 1200
 
-  target_auctions: 12
+  target_auctions: 2
 
 monitoring:
   metrics:
@@ -110,12 +107,12 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h1_heuristic_homogeneous"
+    directory: "experiments/data/logs/h1_react_smoke"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h1_heuristic_homogeneous"
+    directory: "experiments/data/metrics/h1_react_smoke"
     format: "json"
 
 api_keys:

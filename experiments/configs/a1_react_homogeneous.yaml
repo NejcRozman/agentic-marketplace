@@ -2,10 +2,10 @@
 # Purpose: First non-smoke homogeneous run for heuristic provider agents
 
 experiment:
-  id: "h1_heuristic_homogeneous"
-  name: "Heuristic Homogeneous"
-  description: "Homogeneous heuristic setup with 1 consumer and X providers over Y auctions"
-  research_question: "homogeneous_heuristic_baseline"
+  id: "a1_react_homogeneous"
+  name: "ReAct Homogeneous"
+  description: "Homogeneous ReAct setup with 1 consumer and X providers over Y auctions"
+  research_question: "homogeneous_react_baseline"
   duration_timeout: 21600  # 6 hours max
 
 blockchain:
@@ -67,12 +67,9 @@ agents:
       eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
 
     behavior:
-      # Homogeneous heuristic setup
+      # Homogeneous ReAct setup
       architecture: "1"
-      reasoning_mode: "heuristic"
-      heuristic_strategy: "random_markup"
-      heuristic_min_margin: 0.10
-      heuristic_max_margin: 0.30
+      reasoning_mode: "llm_react"
       auto_bid: true
       auto_execute: true
       auto_complete: true
@@ -110,12 +107,12 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h1_heuristic_homogeneous"
+    directory: "experiments/data/logs/a1_react_homogeneous"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h1_heuristic_homogeneous"
+    directory: "experiments/data/metrics/a1_react_homogeneous"
     format: "json"
 
 api_keys:

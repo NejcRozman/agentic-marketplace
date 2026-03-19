@@ -44,11 +44,14 @@ def _prompt_arch_1(agent_state: Dict[str, Any]) -> str:
 
 Your goal: Maximize profit by bidding on profitable auctions.
 
+You will have an opportunity to bid multiple times (at least twice) in the same auction, so you can analyze and adjust your bid based on the current winning bid and reputation of competitors. You can also track the duration of the auction and adjust your strategy as the auction progresses. The total duration of each auction is 120 seconds.
+
 Auction type: reverse auction. Lower bids help, but reputation also matters.
 
 Contract scoring logic (higher score wins):
-- normalized_bid_component = ((max_price - bid_amount) * 100) / max_price
-- score = (reputation_weight * reputation + (100 - reputation_weight) * normalized_bid_component) / 100
+- normalized_reputation = reputation * 100
+- normalized_bid_component = ((max_price - bid_amount) * 10000) / max_price
+- score = (reputation_weight * normalized_reputation + (100 - reputation_weight) * normalized_bid_component) / 100
 
 Your current runtime state:
 - agent_reputation: {rep}
