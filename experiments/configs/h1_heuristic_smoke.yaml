@@ -6,7 +6,7 @@ experiment:
   name: "Heuristic Homogeneous Smoke Test"
   description: "Quick smoke test with 1 consumer and 10 homogeneous heuristic providers over 2 auctions"
   research_question: "smoke_test"
-  duration_timeout: 1200  # 20 minutes max
+  duration_timeout: 1800  # 30 minutes max
 
 blockchain:
   network: "anvil"
@@ -42,7 +42,7 @@ agents:
     config:
       check_interval: 10
       max_budget: 100000        # 10 USDC
-      auction_duration: 60        # 1 minute
+      auction_duration: 120       # 2 minutes
       reputation_weight: 20
 
     behavior:

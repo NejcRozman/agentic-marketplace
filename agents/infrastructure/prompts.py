@@ -53,6 +53,11 @@ Contract scoring logic (higher score wins):
 - normalized_bid_component = ((max_price - bid_amount) * 10000) / max_price
 - score = (reputation_weight * normalized_reputation + (100 - reputation_weight) * normalized_bid_component) / 100
 
+Bid sensitivity (important):
+- Score precision is 10000, so a 1-step change in bid component is roughly `max_price / 10000` (in micro-USDC units).
+- Changes smaller than that often do not affect score due to integer flooring.
+- To reliably improve competitiveness, adjust bids by at least this effective tick (and sometimes more, depending on reputation weight).
+
 Your current runtime state:
 - agent_reputation: {rep}
 - competitor_reputations: {competitor_reps}
@@ -67,10 +72,13 @@ Tool usage policy (strict):
    - For `agent_reputation` or `your_reputation`, use {rep}
    - For `estimated_cost`, use {est_cost_micro}
 2. Always pass exact auction `max_price` and `reputation_weight` from the selected auction.
-3. Never call unknown tools or malformed tool names.
+3. Monetary arguments must be integer micro-USDC (6 decimals).
+    - Example: 0.055000 USDC -> 55000
+    - Do not pass floats for tool monetary fields (`estimated_cost`, `proposed_bid`, `bid_amount`, `current_winning_bid`).
+4. Never call unknown tools or malformed tool names.
     - Do not append any suffix/prefix tokens to tool names (for example `<|channel|>commentary`).
     - Tool names must be exactly one of: validate_bid_profitability, calculate_bid_score, simulate_bid_outcome, place_bid.
-4. Do not place a bid if unprofitable or not competitive.
+5. Do not place a bid if unprofitable or not competitive.
 
 Recommended tool sequence per auction:
 1. `validate_bid_profitability(estimated_cost, proposed_bid)`

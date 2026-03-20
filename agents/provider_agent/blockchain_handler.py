@@ -276,7 +276,7 @@ class BlockchainHandler:
                     "proposed_bid": proposed_bid,
                     "profit": profit,
                     "profit_margin_percent": margin_percent if is_profitable else -loss_percent,
-                    "summary": f"{proposed_bid/1e6:.3f} USDC bid - {estimated_cost/1e6:.3f} USDC cost = {profit/1e6:.3f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.3f}%)"
+                    "summary": f"{proposed_bid/1e6:.6f} USDC bid - {estimated_cost/1e6:.6f} USDC cost = {profit/1e6:.6f} USDC {'profit' if profit >= 0 else 'LOSS'} ({margin_percent if is_profitable else -loss_percent:.3f}%)"
                 }
                 handler._audit_tool_call(
                     tool_name="validate_bid_profitability",
@@ -383,7 +383,7 @@ class BlockchainHandler:
                     "normalized_reputation": normalized_reputation,
                     "normalized_bid_score": normalized_bid_score,
                     "bid_score": bid_score,
-                    "bid_amount_usdc": round(bid_amount / 1e6, 2),
+                    "bid_amount_usdc": round(bid_amount / 1e6, 6),
                     "higher_is_better": True,
                     "summary": (
                         f"Score={bid_score} (higher is better): rep_component={normalized_reputation} "
@@ -469,7 +469,7 @@ class BlockchainHandler:
                 if proposed_bid > max_price:
                     result = {
                         "proposed_bid": proposed_bid,
-                        "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 6),
                         "max_price": max_price,
                         "will_win": False,
                         "would_revert": True,
@@ -523,12 +523,12 @@ class BlockchainHandler:
                     
                     result = {
                         "proposed_bid": proposed_bid,
-                        "proposed_bid_usdc": round(proposed_bid / 1e6, 2),
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 6),
                         "your_score": our_score,
                         "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
                         "current_winning_bid": current_winning_bid,
-                        "current_winning_bid_usdc": round(current_winning_bid / 1e6, 3),
+                        "current_winning_bid_usdc": round(current_winning_bid / 1e6, 6),
                         "current_winner_score": current_winner_score,
                         "current_winner_bid_component": current_bid_component,
                         "current_winner_reputation": winner_rep,
@@ -558,7 +558,7 @@ class BlockchainHandler:
                     # No current winner - we'll be first bid
                     result = {
                         "proposed_bid": proposed_bid,
-                        "proposed_bid_usdc": round(proposed_bid / 1e6, 3),
+                        "proposed_bid_usdc": round(proposed_bid / 1e6, 6),
                         "your_score": our_score,
                         "your_bid_component": our_bid_component,
                         "your_reputation": your_reputation,
@@ -610,7 +610,9 @@ class BlockchainHandler:
             raw_args = {"auction_id": auction_id, "bid_amount": bid_amount}
             handler._react_stop_after_bid_attempt = True
             try:
-                logger.info(f"📤 Placing bid: auction={auction_id}, amount={bid_amount}")
+                logger.info(
+                    f"📤 Placing bid: auction={auction_id}, amount={bid_amount} ({bid_amount/1e6:.6f} USDC)"
+                )
 
                 fresh_auction = asyncio.run(
                     handler.client.call_contract_method("ReverseAuction", "getAuctionDetails", auction_id)
@@ -1500,8 +1502,8 @@ Analyze these auctions and decide which to bid on."""
                 profit_margin = (profit / estimated_cost) * 100
                 
                 logger.info(
-                    f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.3f} USDC, "
-                    f"bid={bid_amount/1e6:.3f} USDC, margin={profit_margin:.3f}%"
+                    f"📊 Auction {auction_id}: cost={estimated_cost/1e6:.6f} USDC, "
+                    f"bid={bid_amount/1e6:.6f} USDC, margin={profit_margin:.3f}%"
                 )
 
                 # Strict pre-bid refresh gate: if refresh fails, skip bid.
