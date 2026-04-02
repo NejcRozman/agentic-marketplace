@@ -1300,7 +1300,7 @@ class TestResultRetrieval(unittest.TestCase):
                         {"prompt": "Q2", "response": "Answer 2"}
                     ]
                 }
-                result_file.write_text(json.dumps(result_data))
+                result_file.write_text(json.dumps(result_data, ensure_ascii=False))
                 
                 mock_config = Mock(spec=Config)
                 mock_config.consumer_check_interval = 10

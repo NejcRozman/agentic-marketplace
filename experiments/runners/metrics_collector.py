@@ -1128,7 +1128,7 @@ class MetricsCollector:
         
         metrics_file = self.metrics_dir / "experiment_metrics.json"
         with open(metrics_file, 'w') as f:
-            json.dump(self.metrics, f, indent=2)
+            json.dump(self.metrics, f, indent=2, ensure_ascii=False)
         
         logger.info(f"✅ Comprehensive metrics saved to {metrics_file}")
         return metrics_file

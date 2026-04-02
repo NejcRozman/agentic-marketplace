@@ -128,7 +128,7 @@ async def main():
     mapping_file = Path("pdf_cids.json")
     import json
     with open(mapping_file, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, ensure_ascii=False)
     
     print(f"📝 CID mapping saved to: {mapping_file}")
     print()

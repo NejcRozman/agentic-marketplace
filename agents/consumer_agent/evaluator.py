@@ -1,21 +1,19 @@
 """
-Service Evaluator - ReAct agent for evaluating completed service quality.
+Service Evaluator - evaluates completed service quality via iterative LLM calls.
 
-Uses ReAct pattern with LLM to assess service quality and generate ratings.
+Per-pair criteria (depth, clarity, …) are scored in parallel, one LLM call per
+response.  Holistic criteria (completeness, …) require seeing all responses at
+once and are scored in a single separate call.  Results are merged and averaged
+to produce a 0-100 overall rating.
 """
 
+import asyncio
+import ast
 import json
 import logging
-import ast
 import re
-from typing import Dict, Any, List, Optional
-from typing_extensions import TypedDict
+from typing import Any, Dict, List, Optional, Tuple
 
-from langgraph.graph import StateGraph, END
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
-from langchain_core.tools import tool
-from langchain_core.rate_limiters import InMemoryRateLimiter
 from langchain_openai import ChatOpenAI
 
 try:
@@ -25,453 +23,357 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Criteria whose value can only be judged by looking at the full response set.
+HOLISTIC_CRITERIA = {"completeness"}
 
-class EvaluatorState(TypedDict):
-    """Minimal state for evaluation workflow."""
-    # Input
-    service_requirements: Dict[str, Any]
-    result: Dict[str, Any]
-    
-    # Internal reasoning (helps ReAct agent think clearly)
-    quality_scores: Optional[Dict[str, int]]
-    
-    # Output (goes to blockchain)
-    overall_rating: Optional[int]  # 0-100 for ERC-8004
-    
-    # Control
-    error: Optional[str]
-    messages: List[Any]  # ReAct agent message history
+# Retry settings for transient LLM API failures.
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 2.0  # seconds; doubled on each attempt
 
 
 class ServiceEvaluator:
-    """
-    ReAct agent for evaluating completed service results.
-    
-    Analyzes service output against requirements and generates:
-    - Integer rating (0-100) per ERC-8004 spec
-    """
-    
+
     def __init__(self, config: Config):
-        """Initialize service evaluator."""
         self.config = config
-        
-        # Build tools and graph
-        self._tools = self._build_tools()
-        self.graph = self._build_graph()
-        
-        logger.info("ServiceEvaluator initialized with ReAct agent and LangGraph")
-    
-    def _build_tools(self) -> List:
-        """Build tools for the ReAct agent."""
-        
-        @tool
-        def extract_prompt_response_pairs(
-            service_requirements: Any,
-            service_result: Any
-        ) -> Dict[str, Any]:
-            """Extract structured prompt-response pairs for evaluation.
-            
-            Args:
-                service_requirements: JSON service requirements with prompts and criteria
-                service_result: JSON service result with responses array
-                
-            Returns:
-                Structured data ready for LLM evaluation
-            """
-            def safe_json_loads(value):
-                """Parse tool input robustly (dict/list, JSON string, or Python-literal string)."""
-                if isinstance(value, (dict, list)):
-                    return value
-                if value is None:
-                    return {}
-                if isinstance(value, str):
-                    text = value.strip()
+        self._model = getattr(config, "openrouter_model", "openai/gpt-oss-20b")
+        self.model = ChatOpenAI(
+            model=self._model,
+            api_key=config.openrouter_api_key,
+            base_url=config.openrouter_base_url,
+            temperature=0.2,
+            max_tokens=1000,
+        )
+        logger.info("ServiceEvaluator initialized")
 
-                    # Strip markdown code fences if present
-                    if text.startswith("```"):
-                        lines = text.splitlines()
-                        if len(lines) >= 2:
-                            text = "\n".join(lines[1:-1]).strip()
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
-                    # Prefer strict JSON
-                    try:
-                        return json.loads(text)
-                    except Exception:
-                        pass
-
-                    # Fallback: Python literal dict/list from model output
-                    try:
-                        return ast.literal_eval(text)
-                    except Exception:
-                        pass
-
-                    # Last attempt: recover likely JSON object substring
-                    if "{" in text and "}" in text:
-                        start = text.find("{")
-                        end = text.rfind("}")
-                        if start < end:
-                            snippet = text[start:end + 1]
-                            try:
-                                return json.loads(snippet)
-                            except Exception:
-                                try:
-                                    return ast.literal_eval(snippet)
-                                except Exception:
-                                    pass
-
-                    raise ValueError("Unable to parse tool argument as JSON/object")
-                raise TypeError(f"Unsupported input type: {type(value).__name__}")
-            try:
-                requirements = safe_json_loads(service_requirements)
-                result = safe_json_loads(service_result)
-                # Extract from literature_review result structure
-                responses_data = result.get("responses", [])
-                # Each response has {"prompt": "...", "response": "..."}
-                pairs = []
-                for item in responses_data:
-                    pairs.append({
-                        "prompt": item.get("prompt", ""),
-                        "response": item.get("response", "")
-                    })
-                return {
-                    "pair_count": len(pairs),
-                    "pairs": pairs,
-                    "quality_criteria": requirements.get("quality_criteria", {}),
-                    "complexity": requirements.get("complexity", "medium"),
-                    "service_type": requirements.get("service_type", "")
-                }
-            except json.JSONDecodeError as e:
-                return {"error": f"JSON parsing error: {str(e)}"}
-            except Exception as e:
-                return {"error": str(e)}
-        
-        @tool
-        def finalize_evaluation(
-            dimension_scores: str  # JSON like '{"completeness": 90, "depth": 75, "clarity": 85}'
-        ) -> Dict[str, Any]:
-            """Calculate final rating from quality dimension scores.
-            
-            Args:
-                dimension_scores: JSON object mapping dimension names to scores (0-100)
-                
-            Returns:
-                Overall rating and quality scores breakdown
-            """
-            try:
-                scores = json.loads(dimension_scores)
-                
-                if not scores:
-                    return {
-                        "overall_rating": 0,
-                        "quality_scores": {}
-                    }
-                
-                # Calculate average (equal weighting for simplicity)
-                overall = int(sum(scores.values()) / len(scores))
-                
-                # Ensure 0-100 range
-                overall = max(0, min(100, overall))
-                
-                return {
-                    "overall_rating": overall,
-                    "quality_scores": scores
-                }
-            except Exception as e:
-                return {"error": str(e), "overall_rating": 0, "quality_scores": {}}
-        
-        return [extract_prompt_response_pairs, finalize_evaluation]
-    
-    def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow for evaluation."""
-        workflow = StateGraph(EvaluatorState)
-        
-        workflow.add_node("react_evaluation", self._react_evaluation_node)
-        workflow.add_node("validate_rating", self._validate_rating_node)
-        
-        workflow.set_entry_point("react_evaluation")
-        workflow.add_edge("react_evaluation", "validate_rating")
-        workflow.add_edge("validate_rating", END)
-        
-        return workflow.compile()
-
-    def _parse_rating_from_messages(self, messages: List[Any]) -> tuple[Optional[int], Optional[Dict[str, int]]]:
-        """Extract overall rating and quality scores from agent messages."""
-        for msg in reversed(messages):
-            try:
-                # Preferred: tool output from finalize_evaluation
-                if msg.__class__.__name__ == "ToolMessage" and "overall_rating" in str(msg.content):
-                    if isinstance(msg.content, str):
-                        try:
-                            result_data = json.loads(msg.content)
-                        except Exception:
-                            result_data = ast.literal_eval(msg.content)
-                    else:
-                        result_data = msg.content
-
-                    if isinstance(result_data, dict):
-                        return result_data.get("overall_rating"), result_data.get("quality_scores")
-
-                # Secondary: model returned final JSON directly (no tool message)
-                if msg.__class__.__name__ == "AIMessage" and "overall_rating" in str(getattr(msg, "content", "")):
-                    content = getattr(msg, "content", "")
-                    if isinstance(content, str) and content.strip():
-                        try:
-                            result_data = json.loads(content)
-                        except Exception:
-                            try:
-                                result_data = ast.literal_eval(content)
-                            except Exception:
-                                result_data = None
-                        if isinstance(result_data, dict):
-                            return result_data.get("overall_rating"), result_data.get("quality_scores")
-
-                # Tertiary: model returned plain text like "Overall Rating: 92"
-                if msg.__class__.__name__ == "AIMessage":
-                    content = getattr(msg, "content", "")
-                    if isinstance(content, str) and content.strip():
-                        parsed = self._parse_rating_from_text(content)
-                        if parsed[0] is not None:
-                            return parsed
-            except Exception:
-                continue
-
-        return None, None
-
-    def _parse_rating_from_text(self, content: str) -> tuple[Optional[int], Optional[Dict[str, int]]]:
-        """Parse rating from non-JSON model output when tool/JSON output is absent."""
-        try:
-            # Common patterns: "Overall Rating: 92" or "rating=75/100"
-            m = re.search(r"overall\s*rating\s*[:=]\s*(\d{1,3})", content, flags=re.IGNORECASE)
-            if not m:
-                m = re.search(r"rating\s*[:=]\s*(\d{1,3})\s*(?:/\s*100)?", content, flags=re.IGNORECASE)
-            if not m:
-                return None, None
-
-            overall = max(0, min(100, int(m.group(1))))
-
-            # Try to recover per-dimension scores when present in text.
-            quality_scores: Dict[str, int] = {}
-            for dim in ["completeness", "depth", "citations", "clarity"]:
-                dm = re.search(rf"{dim}\s*[:=]\s*(\d{{1,3}})", content, flags=re.IGNORECASE)
-                if dm:
-                    quality_scores[dim] = max(0, min(100, int(dm.group(1))))
-
-            return overall, quality_scores
-        except Exception:
-            return None, None
-
-    async def _react_evaluation_node(self, state: EvaluatorState) -> EvaluatorState:
-        """Use ReAct agent to evaluate service quality."""
-        logger.info("🤔 ReAct evaluation in progress...")
-        
-        try:
-            requirements = state["service_requirements"]
-            result = state["result"]
-            
-            # Serialize inputs for tools
-            requirements_json = json.dumps(requirements)
-            result_json = json.dumps(result)
-            
-            # Build system prompt
-            system_prompt = f"""You are an expert service quality evaluator for literature review services.
-
-            **Your Task:**
-            1. Use extract_prompt_response_pairs() to get structured data
-            2. Analyze each prompt-response pair against the quality criteria
-            3. Assign a score (0-100) for each quality dimension
-            4. Use finalize_evaluation() to calculate the overall rating
-
-            **Evaluation Process:**
-            - Read the quality_criteria from the extracted data
-            - For each criterion (e.g., completeness, depth, clarity):
-            * Review all prompt-response pairs
-            * Evaluate how well responses meet that criterion
-            * Assign a score 0-100
-            - Be objective and fair - evaluate based on actual content quality
-
-            **Service Requirements:**
-            ```json
-            {requirements_json}
-            ```
-
-            **Service Result:**
-            ```json
-            {result_json}
-            ```
-
-            Start by extracting the prompt-response pairs, then evaluate systematically."""
-
-            # Create ReAct agent without rate limiting (use API defaults)
-            llm = ChatOpenAI(
-                model="openai/gpt-oss-20b",
-                api_key=self.config.openrouter_api_key,
-                base_url=self.config.openrouter_base_url,
-                temperature=0.3
-            )
-            
-            react_agent = create_agent(llm, self._tools)
-            
-            recursion_limit = int(getattr(self.config, "evaluator_recursion_limit", 25))
-
-            # Run agent
-            agent_result = await react_agent.ainvoke({
-                "messages": [HumanMessage(content=system_prompt)]
-            }, config={"recursion_limit": recursion_limit})
-            
-            # Log reasoning trace
-            logger.info("\n" + "=" * 80)
-            logger.info("🤖 EVALUATOR REASONING TRACE")
-            logger.info("=" * 80)
-            for i, msg in enumerate(agent_result["messages"], 1):
-                msg_class = msg.__class__.__name__
-                
-                if hasattr(msg, 'content') and msg.content:
-                    content = str(msg.content)
-                    if len(content) > 500:
-                        content = content[:500] + "..."
-                    logger.info(f"\n[{i}] {msg_class}:\n{content}")
-                
-                if hasattr(msg, 'tool_calls') and msg.tool_calls:
-                    logger.info(f"\n[{i}] {msg_class} - Tool Calls:")
-                    for tc in msg.tool_calls:
-                        tool_name = tc.get('name', 'unknown')
-                        tool_args = tc.get('args', {})
-                        logger.info(f"  🔧 {tool_name}({list(tool_args.keys())})")
-                
-                if msg_class == "ToolMessage":
-                    tool_output = str(msg.content)[:300]
-                    logger.info(f"\n[{i}] ToolMessage:\n  ✅ {tool_output}")
-            
-            logger.info("=" * 80 + "\n")
-            
-            # Extract results from tool calls
-            overall_rating, quality_scores = self._parse_rating_from_messages(agent_result["messages"])
-
-            # Retry once with stricter instruction if no usable rating was produced
-            if overall_rating is None:
-                logger.warning("Agent did not produce rating on first pass; retrying with stricter tool-use instruction")
-                retry_msg = HumanMessage(content=(
-                    "You must call tools to finish: "
-                    "1) extract_prompt_response_pairs(service_requirements, service_result), "
-                    "2) compute dimension scores (0-100), "
-                    "3) call finalize_evaluation(dimension_scores as JSON string). "
-                    "Return only final JSON from finalize_evaluation."
-                ))
-                retry_result = await react_agent.ainvoke({
-                    "messages": [HumanMessage(content=system_prompt), retry_msg]
-                }, config={"recursion_limit": recursion_limit})
-                agent_result = retry_result
-                overall_rating, quality_scores = self._parse_rating_from_messages(agent_result["messages"])
-
-            # Final LLM-only strict JSON pass
-            if overall_rating is None:
-                logger.warning("Agent still did not produce a valid rating; retrying with strict JSON-only LLM pass")
-                strict_json_prompt = f"""You are an evaluator. Score this service result against requirements.
-
-                Return ONLY valid JSON with this exact schema:
-                {{
-                \"overall_rating\": <int 0-100>,
-                \"quality_scores\": {{
-                    \"completeness\": <int 0-100>,
-                    \"depth\": <int 0-100>,
-                    \"citations\": <int 0-100>,
-                    \"clarity\": <int 0-100>
-                }}
-                }}
-
-                Requirements JSON:
-                {requirements_json}
-
-                Result JSON:
-                {result_json}
-                """
-                strict_resp = await llm.ainvoke([HumanMessage(content=strict_json_prompt)])
-                strict_text = strict_resp.content if isinstance(strict_resp.content, str) else str(strict_resp.content)
-
-                try:
-                    parsed = json.loads(strict_text)
-                except Exception:
-                    try:
-                        parsed = ast.literal_eval(strict_text)
-                    except Exception:
-                        parsed = None
-
-                if isinstance(parsed, dict):
-                    overall_rating = parsed.get("overall_rating")
-                    quality_scores = parsed.get("quality_scores")
-
-                if overall_rating is None:
-                    txt_rating, txt_scores = self._parse_rating_from_text(strict_text)
-                    overall_rating = txt_rating
-                    quality_scores = txt_scores
-
-            # If all LLM attempts fail, set explicit error and neutral empty scores.
-            if overall_rating is None:
-                logger.error("Evaluator failed to produce valid rating after all LLM passes")
-                state["error"] = "LLM evaluator did not return a valid rating"
-                overall_rating = 0
-                quality_scores = {}
-            
-            state["overall_rating"] = overall_rating
-            state["quality_scores"] = quality_scores
-            state["messages"] = agent_result["messages"]
-            
-            logger.info(f"✅ ReAct evaluation completed: rating={overall_rating}, scores={quality_scores}")
-            
-        except Exception as e:
-            logger.error(f"Error in ReAct evaluation: {e}", exc_info=True)
-            state["error"] = str(e)
-            state["overall_rating"] = 0
-            state["quality_scores"] = {}
-        
-        return state
-    
-    async def _validate_rating_node(self, state: EvaluatorState) -> EvaluatorState:
-        """Validate rating is within ERC-8004 spec (0-100)."""
-        rating = state.get("overall_rating", 0)
-        state["overall_rating"] = max(0, min(100, rating))
-        
-        logger.info(f"✅ Final validated rating: {state['overall_rating']}/100")
-        return state
-    
     async def evaluate(
         self,
         service_requirements: Dict[str, Any],
-        result: Dict[str, Any]
+        result: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Evaluate completed service result using ReAct agent.
-        
-        Args:
-            service_requirements: Original service requirements from IPFS
-            result: Completed service result from provider
-            
-        Returns:
-            Evaluation dict with rating (0-100) and quality_scores
-        """
-        if isinstance(result, dict) and result.get("service_failed"):
-            logger.warning("Service result is marked as failed; assigning rating=0")
-            return {
-                "rating": 0,
-                "quality_scores": {"execution_failure": 0},
-                "error": result.get("error")
-            }
+        Evaluate a completed service result.
 
-        logger.info("Evaluating service result with ReAct agent...")
-        
-        initial_state: EvaluatorState = {
-            "service_requirements": service_requirements,
-            "result": result,
-            "quality_scores": None,
-            "overall_rating": None,
-            "error": None,
-            "messages": []
+        Per-pair criteria are scored in parallel (one LLM call per response).
+        Holistic criteria are scored in one call over the full response set.
+        Returns rating (0-100), per-dimension quality_scores, explanations, and error.
+        """
+        logger.info("Starting evaluation...")
+
+        quality_criteria: Dict[str, str] = service_requirements.get("quality_criteria", {})
+        required_prompts: List[str] = service_requirements.get("prompts", [])
+        responses: List[Dict[str, str]] = result.get("responses", [])
+
+        if not responses or not quality_criteria:
+            logger.warning("No responses or quality criteria found; returning neutral scores.")
+            return {"rating": 0, "quality_scores": {}, "explanations": [], "error": "No responses or quality criteria found."}
+
+        per_pair_criteria = {k: v for k, v in quality_criteria.items() if k not in HOLISTIC_CRITERIA}
+        holistic_criteria = {k: v for k, v in quality_criteria.items() if k in HOLISTIC_CRITERIA}
+
+        # --- parallel per-pair scoring ---
+        pair_tasks = [
+            self._score_pair(pair, per_pair_criteria)
+            for pair in responses
+        ]
+        pair_results: List[Optional[Dict]] = await asyncio.gather(*pair_tasks)
+
+        # --- holistic scoring (single call, all responses) ---
+        holistic_scores: Dict[str, int] = {}
+        holistic_explanation: str = ""
+        if holistic_criteria:
+            holistic_scores, holistic_explanation = await self._score_holistic(
+                responses, holistic_criteria
+            )
+
+        # If holistic parsing fails, avoid punishing completeness as zero.
+        for dim in holistic_criteria:
+            if dim in holistic_scores:
+                continue
+            if dim == "completeness":
+                fallback = self._completeness_cap(required_prompts, responses)
+                holistic_scores[dim] = fallback
+                logger.warning(
+                    "Holistic '%s' score missing; using prompt coverage fallback: %s",
+                    dim,
+                    fallback,
+                )
+            else:
+                holistic_scores[dim] = 0
+                logger.warning("Holistic '%s' score missing; defaulting to 0.", dim)
+
+        # Prevent inflated completeness when required prompts were not all answered.
+        if "completeness" in holistic_scores:
+            prompt_coverage_cap = self._completeness_cap(required_prompts, responses)
+            holistic_scores["completeness"] = min(holistic_scores["completeness"], prompt_coverage_cap)
+
+        # Aggregate per-pair scores: average across pairs, skipping failed ones
+        per_pair_dim_scores: Dict[str, List[int]] = {dim: [] for dim in per_pair_criteria}
+        explanations: List[str] = []
+        for r in pair_results:
+            if r is None:
+                continue
+            for dim in per_pair_criteria:
+                if dim in r.get("scores", {}):
+                    per_pair_dim_scores[dim].append(r["scores"][dim])
+            if r.get("explanation"):
+                explanations.append(r["explanation"])
+
+        agg_scores: Dict[str, int] = {}
+        for dim, vals in per_pair_dim_scores.items():
+            agg_scores[dim] = round(sum(vals) / len(vals)) if vals else 0
+
+        # Merge holistic scores (they override per-pair for their dimensions)
+        agg_scores.update(holistic_scores)
+        if holistic_explanation:
+            explanations.append(holistic_explanation)
+
+        overall = max(0, min(100, round(sum(agg_scores.values()) / len(agg_scores)))) if agg_scores else 0
+
+        logger.info(f"Aggregated scores: {agg_scores}, overall: {overall}")
+        return {"rating": overall, "quality_scores": agg_scores, "explanations": explanations, "error": None}
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    async def _score_pair(
+        self,
+        pair: Dict[str, str],
+        criteria: Dict[str, str],
+    ) -> Optional[Dict]:
+        """Score a single prompt-response pair. Returns None on unrecoverable failure."""
+        if not criteria:
+            return None
+
+        prompt_text = pair.get("prompt", "")
+        response_text = pair.get("response", "")
+        criteria_str = "\n".join(f"- {dim}: {desc}" for dim, desc in criteria.items())
+        dim_keys = list(criteria.keys())
+        score_schema = ", ".join(f'"{d}": <int>' for d in dim_keys)
+
+        eval_prompt = (
+            "You are an expert evaluator. Score the following response for each quality dimension (0-100) "
+            "and explain your reasoning.\n\n"
+            f"Prompt: {prompt_text}\n"
+            f"Response: {response_text}\n\n"
+            f"Quality Criteria:\n{criteria_str}\n\n"
+            f"Return JSON only: {{\"scores\": {{{score_schema}}}, \"explanation\": \"<str>\"}}"
+        )
+
+        parsed = await self._llm_call_with_retry(eval_prompt, label=f"pair '{prompt_text[:40]}'")
+        if parsed is None or "scores" not in parsed:
+            logger.warning(f"No valid scores returned for pair: {prompt_text[:60]}")
+            return None
+
+        normalized_scores: Dict[str, int] = {}
+        for dim in criteria:
+            if dim in parsed.get("scores", {}):
+                coerced = self._coerce_score(parsed["scores"][dim])
+                if coerced is not None:
+                    normalized_scores[dim] = coerced
+
+        if not normalized_scores:
+            logger.warning(f"No valid numeric scores returned for pair: {prompt_text[:60]}")
+            return None
+
+        return {"scores": normalized_scores, "explanation": parsed.get("explanation", "")}
+
+    async def _score_holistic(
+        self,
+        responses: List[Dict[str, str]],
+        criteria: Dict[str, str],
+    ) -> Tuple[Dict[str, int], str]:
+        """Score holistic criteria (e.g. completeness) over the full response set."""
+        responses_str = "\n\n".join(
+            f"[{i+1}] Prompt: {r.get('prompt', '')}\n    Response: {r.get('response', '')}"
+            for i, r in enumerate(responses)
+        )
+        criteria_str = "\n".join(f"- {dim}: {desc}" for dim, desc in criteria.items())
+        dim_keys = list(criteria.keys())
+        score_schema = ", ".join(f'"{d}": <int>' for d in dim_keys)
+
+        eval_prompt = (
+            "You are an expert evaluator. Given the full set of prompt-response pairs below, "
+            "score the overall quality for each dimension (0-100) and explain your reasoning.\n\n"
+            f"Responses:\n{responses_str}\n\n"
+            f"Quality Criteria:\n{criteria_str}\n\n"
+            f"Return JSON only: {{\"scores\": {{{score_schema}}}, \"explanation\": \"<str>\"}}"
+        )
+
+        parsed = await self._llm_call_with_retry(eval_prompt, label="holistic")
+        if parsed is None or "scores" not in parsed:
+            logger.warning("No valid holistic scores returned.")
+            return {}, ""
+
+        scores: Dict[str, int] = {}
+        for dim in criteria:
+            if dim in parsed.get("scores", {}):
+                coerced = self._coerce_score(parsed["scores"][dim])
+                if coerced is not None:
+                    scores[dim] = coerced
+
+        return scores, parsed.get("explanation", "")
+
+    async def _llm_call_with_retry(
+        self,
+        user_prompt: str,
+        label: str = "",
+    ) -> Optional[Dict]:
+        """
+        Call the LLM API with up to _MAX_RETRIES attempts on transient failure.
+        Returns the parsed JSON dict or None if all attempts fail.
+        """
+        llm_prompt = (
+            "You are a strict, fair, and concise evaluator. Respond with JSON only.\n\n"
+            f"{user_prompt}"
+        )
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = await self.model.ainvoke(llm_prompt)
+                content = response.content if isinstance(response.content, str) else str(response.content)
+                parsed = self._parse_llm_json(content)
+                if parsed is not None:
+                    return parsed
+
+                last_exc = ValueError("LLM response did not contain parseable JSON object")
+                preview = content.strip().replace("\n", " ")[:220]
+                if attempt < _MAX_RETRIES:
+                    wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
+                    logger.warning(
+                        "LLM call returned unparseable JSON for %s (attempt %s/%s). "
+                        "Preview: %r. Retrying in %ss...",
+                        label,
+                        attempt,
+                        _MAX_RETRIES,
+                        preview,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+                continue
+            except Exception as exc:
+                last_exc = exc
+                if attempt < _MAX_RETRIES:
+                    wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
+                    logger.warning(f"LLM call failed for {label} (attempt {attempt}/{_MAX_RETRIES}): {exc}. Retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+
+        logger.error(f"LLM call for {label} failed after {_MAX_RETRIES} attempts: {last_exc}")
+        return None
+
+    @staticmethod
+    def _parse_llm_json(content: str) -> Optional[Dict]:
+        """Extract and parse a JSON dict from LLM output using robust fallbacks."""
+        if not content:
+            return None
+
+        text = content.strip()
+        candidates: List[str] = [text]
+
+        # Prefer explicit fenced JSON blocks when present.
+        fence_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
+        candidates.extend(block.strip() for block in fence_blocks if block.strip())
+
+        # Then try balanced JSON-object slices extracted from the text.
+        candidates.extend(ServiceEvaluator._extract_json_objects(text))
+
+        seen: set[str] = set()
+        for candidate in candidates:
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+
+            parsed = ServiceEvaluator._try_parse_dict(candidate)
+            if parsed is not None:
+                return parsed
+
+        return None
+
+    @staticmethod
+    def _try_parse_dict(candidate: str) -> Optional[Dict]:
+        """Try parsing a string into a dict via JSON first, then Python literal."""
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        try:
+            parsed = ast.literal_eval(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+        return None
+
+    @staticmethod
+    def _extract_json_objects(text: str) -> List[str]:
+        """Extract balanced `{...}` object substrings while respecting JSON strings."""
+        objects: List[str] = []
+        depth = 0
+        start: Optional[int] = None
+        in_string = False
+        escape = False
+
+        for i, ch in enumerate(text):
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+                continue
+
+            if ch == "{":
+                if depth == 0:
+                    start = i
+                depth += 1
+                continue
+
+            if ch == "}" and depth > 0:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    objects.append(text[start:i + 1])
+                    start = None
+
+        return objects
+
+    @staticmethod
+    def _completeness_cap(required_prompts: List[str], responses: List[Dict[str, str]]) -> int:
+        """Return a 0-100 cap based on coverage of required prompts with non-empty responses."""
+        if not required_prompts:
+            return 100
+
+        required_set = {str(p).strip() for p in required_prompts if str(p).strip()}
+        if not required_set:
+            return 100
+
+        answered_prompts = {
+            str(item.get("prompt", "")).strip()
+            for item in responses
+            if str(item.get("response", "")).strip()
         }
-        
-        final_state = await self.graph.ainvoke(initial_state)
-        
-        return {
-            "rating": final_state.get("overall_rating", 0),
-            "quality_scores": final_state.get("quality_scores", {}),
-            "error": final_state.get("error")
-        }
+        covered = len(required_set.intersection(answered_prompts))
+        return round((covered / len(required_set)) * 100)
+
+    @staticmethod
+    def _coerce_score(value: Any) -> Optional[int]:
+        """Convert an arbitrary score value to a bounded integer in [0, 100]."""
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+
+        return max(0, min(100, round(numeric)))

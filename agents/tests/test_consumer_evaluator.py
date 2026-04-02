@@ -1,23 +1,19 @@
 """
 Tests for ServiceEvaluator.
 
-Unit tests use mocked LLM and ReAct agent for fast isolated testing.
+Unit tests mock ChatOpenAI async invocation.
 
-Prerequisites for integration test:
+Prerequisites for integration tests:
 1. OPENROUTER_API_KEY in agents/.env
 
-Run with: python agents/tests/test_consumer_evaluator.py
+Run with: python -m unittest agents.tests.test_consumer_evaluator
 """
-
-import sys
-from pathlib import Path
-
 
 import unittest
 import asyncio
 import json
 import logging
-from unittest.mock import Mock, AsyncMock, patch, MagicMock
+from unittest.mock import Mock, AsyncMock, MagicMock, patch
 
 # Configure logging
 logging.basicConfig(
@@ -25,7 +21,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 
-from agents.consumer_agent.evaluator import ServiceEvaluator, EvaluatorState
+from agents.consumer_agent.evaluator import ServiceEvaluator
 from agents.config import Config
 
 
@@ -35,15 +31,13 @@ def run_async(coro):
 
 
 class TestServiceEvaluatorUnit(unittest.TestCase):
-    """Unit tests with mocked LLM and ReAct agent."""
-    
+    """Unit tests for ServiceEvaluator with mocked LLM calls."""
+
     def setUp(self):
-        """Set up test fixtures."""
         self.mock_config = Mock(spec=Config)
         self.mock_config.openrouter_api_key = "test-api-key"
         self.mock_config.openrouter_base_url = "https://openrouter.ai/api/v1"
-        
-        # Sample test data
+        self.mock_config.openrouter_model = "openai/gpt-oss-20b"
         self.sample_requirements = {
             "title": "Literature Review on Quantum Computing",
             "description": "Review recent papers on quantum algorithms",
@@ -58,7 +52,6 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
             },
             "service_type": "literature_review"
         }
-        
         self.sample_result_high_quality = {
             "success": True,
             "responses": [
@@ -72,7 +65,6 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
                 }
             ]
         }
-        
         self.sample_result_low_quality = {
             "success": True,
             "responses": [
@@ -86,669 +78,361 @@ class TestServiceEvaluatorUnit(unittest.TestCase):
                 }
             ]
         }
-        
-        # Create evaluator with mocked LLM
-        with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-            self.evaluator = ServiceEvaluator(self.mock_config)
-    
+        self.evaluator = ServiceEvaluator(self.mock_config)
+
+    @staticmethod
+    def _ai_message(content: str) -> MagicMock:
+        msg = MagicMock()
+        msg.content = content
+        return msg
+
+    def _set_mock_ainvoke(self, return_value=None, side_effect=None) -> AsyncMock:
+        self.evaluator.model = Mock()
+        mock_ainvoke = AsyncMock(return_value=return_value, side_effect=side_effect)
+        self.evaluator.model.ainvoke = mock_ainvoke
+        return mock_ainvoke
+
     # ========================================================================
-    # HIGH PRIORITY: Initialization Tests
+    # Initialization
     # ========================================================================
-    
+
     def test_evaluator_initialization(self):
-        """Test ServiceEvaluator initializes correctly with tools and graph."""
-        with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-            evaluator = ServiceEvaluator(self.mock_config)
-            
-            self.assertEqual(evaluator.config, self.mock_config)
-            self.assertIsNotNone(evaluator._tools)
-            self.assertIsNotNone(evaluator.graph)
-            self.assertEqual(len(evaluator._tools), 2)
-            
-            # Check tool names
-            tool_names = [tool.name for tool in evaluator._tools]
-            self.assertIn("extract_prompt_response_pairs", tool_names)
-            self.assertIn("finalize_evaluation", tool_names)
-            
-            print("\n✓ ServiceEvaluator initialized with 2 tools and compiled graph")
-    
+        """Test ServiceEvaluator initializes correctly."""
+        evaluator = ServiceEvaluator(self.mock_config)
+        self.assertEqual(evaluator.config, self.mock_config)
+        print("\n✓ ServiceEvaluator initialized")
+
     # ========================================================================
-    # HIGH PRIORITY: Tool Function Tests
+    # evaluate() — structure and happy path
     # ========================================================================
-    
-    def test_extract_prompt_response_pairs_success(self):
-        """Test extracting prompt-response pairs from valid data."""
-        # Get the tool
-        extract_tool = self.evaluator._tools[0]
-        
-        requirements_json = json.dumps(self.sample_requirements)
-        result_json = json.dumps(self.sample_result_high_quality)
-        
-        result = extract_tool.func(requirements_json, result_json)
-        
-        self.assertEqual(result["pair_count"], 2)
-        self.assertEqual(len(result["pairs"]), 2)
-        self.assertEqual(result["pairs"][0]["prompt"], "What are the main quantum computing paradigms?")
-        self.assertIn("completeness", result["quality_criteria"])
-        self.assertEqual(result["service_type"], "literature_review")
-        
-        print("\n✓ Extract tool successfully extracted 2 prompt-response pairs")
-    
-    def test_extract_prompt_response_pairs_empty_responses(self):
-        """Test extraction with empty responses array."""
-        extract_tool = self.evaluator._tools[0]
-        
-        requirements_json = json.dumps(self.sample_requirements)
-        result_json = json.dumps({"responses": []})
-        
-        result = extract_tool.func(requirements_json, result_json)
-        
-        self.assertEqual(result["pair_count"], 0)
-        self.assertEqual(len(result["pairs"]), 0)
-        self.assertIn("quality_criteria", result)
-        
-        print("\n✓ Extract tool handled empty responses correctly")
-    
-    def test_extract_prompt_response_pairs_invalid_json(self):
-        """Test extraction with malformed JSON input."""
-        extract_tool = self.evaluator._tools[0]
-        
-        result = extract_tool.func("not valid json", "also invalid")
-        
-        self.assertIn("error", result)
-        self.assertIsInstance(result["error"], str)
-        
-        print("\n✓ Extract tool handled invalid JSON with error message")
-    
-    def test_finalize_evaluation_success(self):
-        """Test calculating overall rating from dimension scores."""
-        finalize_tool = self.evaluator._tools[1]
-        
-        dimension_scores = json.dumps({
-            "completeness": 90,
-            "depth": 80,
-            "clarity": 85
-        })
-        
-        result = finalize_tool.func(dimension_scores)
-        
-        # Average: (90 + 80 + 85) / 3 = 85
-        self.assertEqual(result["overall_rating"], 85)
-        self.assertEqual(result["quality_scores"]["completeness"], 90)
-        self.assertEqual(result["quality_scores"]["depth"], 80)
-        self.assertEqual(result["quality_scores"]["clarity"], 85)
-        
-        print("\n✓ Finalize tool calculated average rating: 85")
-    
-    def test_finalize_evaluation_single_dimension(self):
-        """Test with only one quality dimension."""
-        finalize_tool = self.evaluator._tools[1]
-        
-        dimension_scores = json.dumps({"completeness": 95})
-        
-        result = finalize_tool.func(dimension_scores)
-        
-        self.assertEqual(result["overall_rating"], 95)
-        self.assertEqual(result["quality_scores"]["completeness"], 95)
-        
-        print("\n✓ Finalize tool handled single dimension: 95")
-    
-    def test_finalize_evaluation_empty_scores(self):
-        """Test with empty scores dict."""
-        finalize_tool = self.evaluator._tools[1]
-        
-        dimension_scores = json.dumps({})
-        
-        result = finalize_tool.func(dimension_scores)
-        
-        self.assertEqual(result["overall_rating"], 0)
-        self.assertEqual(result["quality_scores"], {})
-        
-        print("\n✓ Finalize tool handled empty scores with rating 0")
-    
-    def test_finalize_evaluation_rating_clamping(self):
-        """Test that rating is clamped to 0-100 range."""
-        finalize_tool = self.evaluator._tools[1]
-        
-        # Test values that would average > 100
-        dimension_scores_high = json.dumps({
-            "score1": 150,
-            "score2": 200
-        })
-        result = finalize_tool.func(dimension_scores_high)
-        self.assertEqual(result["overall_rating"], 100)
-        
-        print("\n✓ Finalize tool clamped high rating to 100")
-    
-    def test_finalize_evaluation_invalid_json(self):
-        """Test error handling for malformed JSON."""
-        finalize_tool = self.evaluator._tools[1]
-        
-        result = finalize_tool.func("invalid json")
-        
-        self.assertIn("error", result)
-        self.assertEqual(result["overall_rating"], 0)
-        self.assertEqual(result["quality_scores"], {})
-        
-        print("\n✓ Finalize tool handled invalid JSON with error")
-    
+
+    def test_evaluate_returns_correct_structure(self):
+        """evaluate() returns rating, quality_scores, explanations, error=None."""
+        self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({
+                "scores": {"completeness": 95, "depth": 90, "clarity": 92},
+                "explanation": "Excellent, detailed, and clear.",
+            })
+        ))
+
+        result = run_async(self.evaluator.evaluate(
+            self.sample_requirements, self.sample_result_high_quality
+        ))
+
+        self.assertIn("rating", result)
+        self.assertIn("quality_scores", result)
+        self.assertIn("explanations", result)
+        self.assertIsNone(result["error"])
+        self.assertGreaterEqual(result["rating"], 0)
+        self.assertLessEqual(result["rating"], 100)
+        print("\n✓ evaluate() returns correct structure for high-quality input")
+
+    def test_evaluate_aggregates_per_pair_scores(self):
+        """Overall rating is the average of per-pair per-dimension scores."""
+        self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({"scores": {"completeness": 80, "depth": 60}, "explanation": "ok"})
+        ))
+
+        requirements = {"quality_criteria": {"completeness": "desc", "depth": "desc"}}
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+            ]
+        }
+        result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        # completeness avg = 80, depth avg = 60 -> overall = 70
+        self.assertEqual(result["quality_scores"]["completeness"], 80)
+        self.assertEqual(result["quality_scores"]["depth"], 60)
+        self.assertEqual(result["rating"], 70)
+        print("\n✓ evaluate() aggregates scores correctly")
+
     # ========================================================================
-    # HIGH PRIORITY: Validation Node Tests
+    # evaluate() — edge cases
     # ========================================================================
-    
-    def test_validate_rating_within_range(self):
-        """Test validation node with valid rating."""
-        async def _test():
-            state: EvaluatorState = {
-                "service_requirements": {},
-                "result": {},
-                "quality_scores": {"test": 75},
-                "overall_rating": 75,
-                "error": None,
-                "messages": []
+
+    def test_evaluate_empty_responses(self):
+        """evaluate() returns rating=0 and an error message for empty responses."""
+        empty_result = {"success": True, "responses": []}
+        result = run_async(self.evaluator.evaluate(self.sample_requirements, empty_result))
+        self.assertEqual(result["rating"], 0)
+        self.assertIsNotNone(result["error"])
+        print("\n✓ evaluate() handles empty responses")
+
+    def test_evaluate_missing_quality_criteria(self):
+        """evaluate() returns rating=0 and an error when quality_criteria is absent."""
+        req = {k: v for k, v in self.sample_requirements.items() if k != "quality_criteria"}
+        result = run_async(self.evaluator.evaluate(req, self.sample_result_high_quality))
+        self.assertEqual(result["rating"], 0)
+        self.assertIsNotNone(result["error"])
+        print("\n✓ evaluate() handles missing quality_criteria")
+
+    def test_evaluate_llm_returns_invalid_json(self):
+        """Invalid JSON triggers retries, then completeness falls back to coverage."""
+        self._set_mock_ainvoke(return_value=self._ai_message("Sorry, I cannot evaluate this."))
+
+        with patch("agents.consumer_agent.evaluator.asyncio.sleep", new=AsyncMock()):
+            result = run_async(self.evaluator.evaluate(
+                self.sample_requirements, self.sample_result_high_quality
+            ))
+
+        # Pair dims fall back to 0, completeness falls back to full prompt coverage (100).
+        self.assertEqual(result["quality_scores"]["depth"], 0)
+        self.assertEqual(result["quality_scores"]["clarity"], 0)
+        self.assertEqual(result["quality_scores"]["completeness"], 100)
+        self.assertEqual(result["rating"], 33)
+        self.assertIsNone(result["error"])
+        print("\n✓ evaluate() retries parse failures and uses completeness coverage fallback")
+
+    def test_evaluate_rating_clamped_to_100(self):
+        """Overall and per-dimension scores are clamped to 100."""
+        self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({
+                "scores": {"completeness": 150, "depth": 200},
+                "explanation": "unrealistically high",
+            })
+        ))
+
+        requirements = {"quality_criteria": {"completeness": "desc", "depth": "desc"}}
+        result_data = {"responses": [{"prompt": "q", "response": "a"}]}
+        result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertLessEqual(result["rating"], 100)
+        self.assertEqual(result["quality_scores"]["completeness"], 100)
+        self.assertEqual(result["quality_scores"]["depth"], 100)
+        print("\n✓ evaluate() clamps overall and per-dimension scores")
+
+    def test_evaluate_llm_api_error_skips_pair(self):
+        """evaluate() continues when an HTTP error occurs for one pair."""
+        self._set_mock_ainvoke(side_effect=Exception("Connection error"))
+
+        with patch("agents.consumer_agent.evaluator.asyncio.sleep", new=AsyncMock()):
+            result = run_async(self.evaluator.evaluate(
+                self.sample_requirements, self.sample_result_high_quality
+            ))
+
+        # Errors are caught per-pair; result should still return valid structure
+        self.assertIn("rating", result)
+        self.assertIn("quality_scores", result)
+        print("\n✓ evaluate() handles LLM API errors gracefully")
+
+    def test_evaluate_llm_json_with_markdown_fences(self):
+        """evaluate() correctly parses LLM response wrapped in markdown code fences."""
+        content_with_fences = (
+            "Here are the scores:\n```json\n"
+            + json.dumps({"scores": {"completeness": 70}, "explanation": "ok"})
+            + "\n```"
+        )
+        self._set_mock_ainvoke(return_value=self._ai_message(content_with_fences))
+
+        requirements = {"quality_criteria": {"completeness": "desc"}}
+        result_data = {"responses": [{"prompt": "q", "response": "a"}]}
+        result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(result["quality_scores"].get("completeness"), 70)
+        self.assertEqual(result["rating"], 70)
+        print("\n✓ evaluate() parses JSON from markdown-fenced LLM output")
+
+    def test_evaluate_explanations_collected(self):
+        """evaluate() collects pair explanations plus one holistic explanation."""
+        self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({"scores": {"depth": 75, "completeness": 80}, "explanation": "Good answer."})
+        ))
+
+        requirements = {"quality_criteria": {"depth": "desc", "completeness": "desc"}}
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+            ]
+        }
+        result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        # 2 pair calls + 1 holistic call
+        self.assertEqual(len(result["explanations"]), 3)
+        self.assertEqual(result["explanations"][0], "Good answer.")
+        print("\n✓ evaluate() collects pair and holistic explanations")
+
+    def test_evaluate_holistic_called_once(self):
+        """With holistic criteria present, evaluate() makes N pair calls + 1 holistic call."""
+        mock_ainvoke = self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({
+                "scores": {"depth": 70, "clarity": 75, "completeness": 80},
+                "explanation": "ok",
+            })
+        ))
+
+        requirements = {
+            "quality_criteria": {
+                "depth": "desc",
+                "clarity": "desc",
+                "completeness": "desc",
             }
-            
-            result_state = await self.evaluator._validate_rating_node(state)
-            
-            self.assertEqual(result_state["overall_rating"], 75)
-            print("\n✓ Validation kept valid rating at 75")
-        
-        run_async(_test())
-    
-    def test_validate_rating_clamps_high(self):
-        """Test validation clamps rating > 100."""
-        async def _test():
-            state: EvaluatorState = {
-                "service_requirements": {},
-                "result": {},
-                "quality_scores": {},
-                "overall_rating": 150,
-                "error": None,
-                "messages": []
-            }
-            
-            result_state = await self.evaluator._validate_rating_node(state)
-            
-            self.assertEqual(result_state["overall_rating"], 100)
-            print("\n✓ Validation clamped 150 to 100")
-        
-        run_async(_test())
-    
-    def test_validate_rating_clamps_low(self):
-        """Test validation clamps negative rating."""
-        async def _test():
-            state: EvaluatorState = {
-                "service_requirements": {},
-                "result": {},
-                "quality_scores": {},
-                "overall_rating": -10,
-                "error": None,
-                "messages": []
-            }
-            
-            result_state = await self.evaluator._validate_rating_node(state)
-            
-            self.assertEqual(result_state["overall_rating"], 0)
-            print("\n✓ Validation clamped -10 to 0")
-        
-        run_async(_test())
-    
-    def test_validate_rating_handles_none(self):
-        """Test validation handles None rating."""
-        async def _test():
-            state: EvaluatorState = {
-                "service_requirements": {},
-                "result": {},
-                "quality_scores": {},
-                "overall_rating": 0,
-                "error": None,
-                "messages": []
-            }
-            
-            result_state = await self.evaluator._validate_rating_node(state)
-            
-            self.assertEqual(result_state["overall_rating"], 0)
-            print("\n✓ Validation handled 0 rating correctly")
-        
-        run_async(_test())
-    
-    # ========================================================================
-    # MEDIUM PRIORITY: ReAct Evaluation Node Tests
-    # ========================================================================
-    
-    def test_react_evaluation_node_success(self):
-        """Test ReAct evaluation with mocked agent."""
-        async def _test():
-            # Mock the create_agent
-            mock_agent = AsyncMock()
-            
-            # Create mock messages that simulate successful tool use
-            mock_tool_message = Mock()
-            mock_tool_message.__class__.__name__ = "ToolMessage"
-            mock_tool_message.tool_calls = []  # Add empty tool_calls
-            # Content should be a dict that can be evaluated
-            mock_tool_message.content = {
-                "overall_rating": 85,
-                "quality_scores": {
-                    "completeness": 90,
-                    "depth": 80,
-                    "clarity": 85
-                }
-            }
-            
-            # Create properly structured mock messages
-            mock_human_msg = Mock(__class__=Mock(__name__="HumanMessage"))
-            mock_human_msg.content = "test"
-            mock_human_msg.tool_calls = []
-            
-            mock_agent_result = {
-                "messages": [
-                    mock_human_msg,
-                    mock_tool_message
-                ]
-            }
-            mock_agent.ainvoke = AsyncMock(return_value=mock_agent_result)
-            
-            with patch('agents.consumer_agent.evaluator.create_agent', return_value=mock_agent):
-                with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-                    state: EvaluatorState = {
-                        "service_requirements": self.sample_requirements,
-                        "result": self.sample_result_high_quality,
-                        "quality_scores": None,
-                        "overall_rating": None,
-                        "error": None,
-                        "messages": []
-                    }
-                    
-                    result_state = await self.evaluator._react_evaluation_node(state)
-                    
-                    self.assertEqual(result_state["overall_rating"], 85)
-                    self.assertIsNotNone(result_state["quality_scores"])
-                    self.assertIsNone(result_state["error"])
-                    self.assertTrue(len(result_state["messages"]) > 0)
-                    
-                    print("\n✓ ReAct evaluation completed with rating 85")
-        
-        run_async(_test())
-    
-    def test_react_evaluation_node_fallback(self):
-        """Test deterministic fallback when agent doesn't use tools properly."""
-        async def _test():
-            # Mock agent that doesn't call finalize_evaluation
-            mock_agent = AsyncMock()
-            
-            # Create properly structured mock message
-            mock_human_msg = Mock(__class__=Mock(__name__="HumanMessage"))
-            mock_human_msg.content = "test"
-            mock_human_msg.tool_calls = []
-            
-            mock_agent_result = {
-                "messages": [mock_human_msg]
-            }
-            mock_agent.ainvoke = AsyncMock(return_value=mock_agent_result)
-            
-            with patch('agents.consumer_agent.evaluator.create_agent', return_value=mock_agent):
-                with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-                    state: EvaluatorState = {
-                        "service_requirements": self.sample_requirements,
-                        "result": self.sample_result_high_quality,
-                        "quality_scores": None,
-                        "overall_rating": None,
-                        "error": None,
-                        "messages": []
-                    }
-                    
-                    result_state = await self.evaluator._react_evaluation_node(state)
-                    
-                    # Should use local deterministic fallback with bounded score
-                    self.assertIsInstance(result_state["overall_rating"], int)
-                    self.assertGreaterEqual(result_state["overall_rating"], 0)
-                    self.assertLessEqual(result_state["overall_rating"], 100)
-                    self.assertIsInstance(result_state["quality_scores"], dict)
-                    self.assertTrue(len(result_state["quality_scores"]) > 0)
-                    self.assertIsNone(result_state["error"])
-                    
-                    print("\n✓ ReAct evaluation used deterministic local fallback")
-        
-        run_async(_test())
-    
-    def test_react_evaluation_node_error_handling(self):
-        """Test error handling when agent throws exception."""
-        async def _test():
-            # Mock agent that raises exception
-            mock_agent = AsyncMock()
-            mock_agent.ainvoke = AsyncMock(side_effect=Exception("API error"))
-            
-            with patch('agents.consumer_agent.evaluator.create_agent', return_value=mock_agent):
-                with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-                    state: EvaluatorState = {
-                        "service_requirements": self.sample_requirements,
-                        "result": self.sample_result_high_quality,
-                        "quality_scores": None,
-                        "overall_rating": None,
-                        "error": None,
-                        "messages": []
-                    }
-                    
-                    result_state = await self.evaluator._react_evaluation_node(state)
-                    
-                    self.assertIsNotNone(result_state["error"])
-                    self.assertIn("API error", result_state["error"])
-                    self.assertEqual(result_state["overall_rating"], 0)
-                    self.assertEqual(result_state["quality_scores"], {})
-                    
-                    print("\n✓ ReAct evaluation handled error with rating 0")
-        
-        run_async(_test())
-    
-    # ========================================================================
-    # MEDIUM PRIORITY: End-to-End Evaluate Method Tests
-    # ========================================================================
-    
-    def test_evaluate_complete_workflow(self):
-        """Test complete evaluation workflow with mocked graph."""
-        async def _test():
-            # Mock the graph.ainvoke to return expected state
-            mock_final_state = {
-                "service_requirements": self.sample_requirements,
-                "result": self.sample_result_high_quality,
-                "quality_scores": {
-                    "completeness": 90,
-                    "depth": 85,
-                    "clarity": 80
-                },
-                "overall_rating": 85,
-                "error": None,
-                "messages": []
-            }
-            
-            self.evaluator.graph.ainvoke = AsyncMock(return_value=mock_final_state)
-            
-            evaluation = await self.evaluator.evaluate(
-                self.sample_requirements,
-                self.sample_result_high_quality
-            )
-            
-            self.assertEqual(evaluation["rating"], 85)
-            self.assertIsInstance(evaluation["quality_scores"], dict)
-            self.assertEqual(len(evaluation["quality_scores"]), 3)
-            self.assertIsNone(evaluation["error"])
-            
-            print("\n✓ Complete evaluate workflow returned rating 85")
-        
-        run_async(_test())
-    
-    def test_evaluate_with_missing_responses(self):
-        """Test evaluation when service result has fewer responses than prompts."""
-        async def _test():
-            incomplete_result = {
-                "success": True,
-                "responses": [
-                    {
-                        "prompt": "What are the main quantum computing paradigms?",
-                        "response": "Gate-based and adiabatic computing."
-                    }
-                    # Missing second response
-                ]
-            }
-            
-            # Mock lower rating for incomplete
-            mock_final_state = {
-                "service_requirements": self.sample_requirements,
-                "result": incomplete_result,
-                "quality_scores": {"completeness": 50},
-                "overall_rating": 50,
-                "error": None,
-                "messages": []
-            }
-            
-            self.evaluator.graph.ainvoke = AsyncMock(return_value=mock_final_state)
-            
-            evaluation = await self.evaluator.evaluate(
-                self.sample_requirements,
-                incomplete_result
-            )
-            
-            self.assertEqual(evaluation["rating"], 50)
-            self.assertIsNone(evaluation["error"])
-            
-            print("\n✓ Incomplete result evaluated with lower rating 50")
-        
-        run_async(_test())
-    
-    def test_evaluate_with_empty_result(self):
-        """Test evaluation with empty responses array."""
-        async def _test():
-            empty_result = {"success": True, "responses": []}
-            
-            # Mock very low rating for empty
-            mock_final_state = {
-                "service_requirements": self.sample_requirements,
-                "result": empty_result,
-                "quality_scores": {},
-                "overall_rating": 0,
-                "error": None,
-                "messages": []
-            }
-            
-            self.evaluator.graph.ainvoke = AsyncMock(return_value=mock_final_state)
-            
-            evaluation = await self.evaluator.evaluate(
-                self.sample_requirements,
-                empty_result
-            )
-            
-            self.assertEqual(evaluation["rating"], 0)
-            
-            print("\n✓ Empty result evaluated with rating 0")
-        
-        run_async(_test())
-    
-    def test_evaluate_with_error_state(self):
-        """Test evaluation returns error from state."""
-        async def _test():
-            mock_final_state = {
-                "service_requirements": self.sample_requirements,
-                "result": self.sample_result_high_quality,
-                "quality_scores": {},
-                "overall_rating": 0,
-                "error": "Evaluation failed",
-                "messages": []
-            }
-            
-            self.evaluator.graph.ainvoke = AsyncMock(return_value=mock_final_state)
-            
-            evaluation = await self.evaluator.evaluate(
-                self.sample_requirements,
-                self.sample_result_high_quality
-            )
-            
-            self.assertEqual(evaluation["rating"], 0)
-            self.assertEqual(evaluation["error"], "Evaluation failed")
-            
-            print("\n✓ Error state properly returned in evaluation")
-        
-        run_async(_test())
-    
-    # ========================================================================
-    # MEDIUM PRIORITY: Edge Cases
-    # ========================================================================
-    
-    def test_evaluate_malformed_requirements(self):
-        """Test evaluation with malformed requirements structure."""
-        async def _test():
-            malformed_requirements = {
-                "title": "Test"
-                # Missing prompts, quality_criteria, etc.
-            }
-            
-            mock_final_state = {
-                "service_requirements": malformed_requirements,
-                "result": self.sample_result_high_quality,
-                "quality_scores": {"fallback": 50},
-                "overall_rating": 50,
-                "error": None,
-                "messages": []
-            }
-            
-            self.evaluator.graph.ainvoke = AsyncMock(return_value=mock_final_state)
-            
-            evaluation = await self.evaluator.evaluate(
-                malformed_requirements,
-                self.sample_result_high_quality
-            )
-            
-            # Should still return a valid rating
-            self.assertIsInstance(evaluation["rating"], int)
-            self.assertGreaterEqual(evaluation["rating"], 0)
-            self.assertLessEqual(evaluation["rating"], 100)
-            
-            print("\n✓ Malformed requirements handled gracefully")
-        
-        run_async(_test())
-    
-    def test_tools_list_immutability(self):
-        """Test that tools list is properly initialized."""
-        with patch('agents.consumer_agent.evaluator.ChatOpenAI'):
-            evaluator1 = ServiceEvaluator(self.mock_config)
-            evaluator2 = ServiceEvaluator(self.mock_config)
-            
-            # Each evaluator should have its own tools
-            self.assertIsNot(evaluator1._tools, evaluator2._tools)
-            self.assertEqual(len(evaluator1._tools), 2)
-            self.assertEqual(len(evaluator2._tools), 2)
-            
-            print("\n✓ Each evaluator has independent tools list")
+        }
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+            ]
+        }
+
+        run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(mock_ainvoke.call_count, 3)
+        print("\n✓ evaluate() performs holistic scoring in a single extra call")
+
+    def test_evaluate_no_holistic_criteria_makes_only_pair_calls(self):
+        """Without holistic criteria, evaluate() makes one call per response only."""
+        mock_ainvoke = self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({"scores": {"depth": 70, "clarity": 75}, "explanation": "ok"})
+        ))
+
+        requirements = {"quality_criteria": {"depth": "desc", "clarity": "desc"}}
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+                {"prompt": "q3", "response": "a3"},
+            ]
+        }
+
+        run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(mock_ainvoke.call_count, 3)
+        print("\n✓ evaluate() skips holistic call when no holistic criteria exist")
+
+    def test_evaluate_completeness_capped_by_prompt_coverage(self):
+        """Completeness is capped when fewer required prompts are answered."""
+        self._set_mock_ainvoke(return_value=self._ai_message(
+            json.dumps({"scores": {"completeness": 100}, "explanation": "Looks complete."})
+        ))
+
+        requirements = {
+            "prompts": ["q1", "q2", "q3"],
+            "quality_criteria": {"completeness": "all prompts answered"},
+        }
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+            ]
+        }
+
+        result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(result["quality_scores"]["completeness"], 67)
+        self.assertEqual(result["rating"], 67)
+        print("\n✓ evaluate() caps completeness by answered prompt coverage")
+
+    def test_evaluate_retries_parse_failure_then_succeeds(self):
+        """Evaluator retries when first response is unparseable and succeeds on next attempt."""
+        first = self._ai_message("not valid json")
+        second = self._ai_message(json.dumps({"scores": {"depth": 81}, "explanation": "ok"}))
+        mock_ainvoke = self._set_mock_ainvoke(side_effect=[first, second])
+
+        requirements = {"quality_criteria": {"depth": "desc"}}
+        result_data = {"responses": [{"prompt": "q1", "response": "a1"}]}
+
+        with patch("agents.consumer_agent.evaluator.asyncio.sleep", new=AsyncMock()):
+            result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(mock_ainvoke.call_count, 2)
+        self.assertEqual(result["quality_scores"]["depth"], 81)
+        self.assertEqual(result["rating"], 81)
+        print("\n✓ evaluate() retries parse failure and recovers")
+
+    def test_evaluate_holistic_parse_failure_uses_coverage_fallback(self):
+        """If holistic output is unparseable, completeness uses prompt coverage fallback."""
+        pair_ok = self._ai_message(json.dumps({"scores": {"depth": 70}, "explanation": "ok"}))
+        holistic_bad = self._ai_message("unparseable")
+        mock_ainvoke = self._set_mock_ainvoke(
+            side_effect=[pair_ok, pair_ok, holistic_bad, holistic_bad, holistic_bad]
+        )
+
+        requirements = {
+            "prompts": ["q1", "q2", "q3"],
+            "quality_criteria": {"depth": "desc", "completeness": "desc"},
+        }
+        result_data = {
+            "responses": [
+                {"prompt": "q1", "response": "a1"},
+                {"prompt": "q2", "response": "a2"},
+            ]
+        }
+
+        with patch("agents.consumer_agent.evaluator.asyncio.sleep", new=AsyncMock()):
+            result = run_async(self.evaluator.evaluate(requirements, result_data))
+
+        self.assertEqual(mock_ainvoke.call_count, 5)
+        self.assertEqual(result["quality_scores"]["depth"], 70)
+        self.assertEqual(result["quality_scores"]["completeness"], 67)
+        self.assertEqual(result["rating"], 68)
+        print("\n✓ evaluate() avoids zero completeness on holistic parse failure")
 
 
 class TestServiceEvaluatorIntegration(unittest.TestCase):
-    """Integration tests with real LLM (OpenRouter)."""
-    
-    def test_real_llm_evaluation_high_quality(self):
-        """Integration test with real OpenRouter LLM: high-quality service result."""
+    """Integration tests that call the real OpenRouter API. Skipped if no key."""
+
+    def setUp(self):
+        self.config = Config()
+        if not self.config.openrouter_api_key:
+            self.skipTest("OPENROUTER_API_KEY not configured - skipping integration tests")
+        self.evaluator = ServiceEvaluator(self.config)
+
+    def test_real_llm_high_quality(self):
+        """Real LLM scores high-quality responses above 50."""
         async def _test():
-            # Initialize with real config
-            config = Config()
-            
-            if not config.openrouter_api_key:
-                self.skipTest("OPENROUTER_API_KEY not configured - skipping integration test")
-            
-            evaluator = ServiceEvaluator(config)
-            
             requirements = {
-                "title": "Literature Review on Machine Learning",
-                "description": "Review papers on neural networks",
-                "prompts": [
-                    "What are convolutional neural networks?",
-                    "Explain backpropagation algorithm."
-                ],
+                "prompts": ["What are convolutional neural networks?"],
                 "quality_criteria": {
-                    "completeness": "All prompts answered comprehensively",
-                    "depth": "Detailed technical explanations",
-                    "accuracy": "Scientifically correct information",
+                    "completeness": "Fully answers the question",
                     "clarity": "Clear and well-structured"
-                },
-                "service_type": "literature_review"
-            }
-            
-            result = {
-                "success": True,
-                "responses": [
-                    {
-                        "prompt": "What are convolutional neural networks?",
-                        "response": "Convolutional Neural Networks (CNNs) are specialized deep learning architectures designed for processing grid-like data such as images. They consist of convolutional layers that apply learnable filters to detect features like edges, textures, and patterns. Key components include: 1) Convolutional layers with shared weights for translation invariance, 2) Pooling layers for downsampling and feature aggregation, 3) Fully connected layers for classification. CNNs have revolutionized computer vision tasks including image classification, object detection, and segmentation."
-                    },
-                    {
-                        "prompt": "Explain backpropagation algorithm.",
-                        "response": "Backpropagation is the fundamental algorithm for training neural networks through gradient descent. It works by: 1) Forward pass - computing predictions through the network, 2) Loss calculation - measuring prediction error, 3) Backward pass - computing gradients of the loss with respect to each weight using the chain rule, 4) Weight update - adjusting parameters in the direction that reduces loss. The algorithm efficiently computes gradients by propagating error signals backward through the network layers, enabling deep networks to learn complex representations."
-                    }
-                ]
-            }
-            
-            print("\n🔄 Running real OpenRouter LLM evaluation (this may take a few seconds)...")
-            evaluation = await evaluator.evaluate(requirements, result)
-            
-            # Verify structure
-            self.assertIn("rating", evaluation)
-            self.assertIn("quality_scores", evaluation)
-            self.assertIsInstance(evaluation["rating"], int)
-            self.assertIsInstance(evaluation["quality_scores"], dict)
-            
-            # Rating should be in valid range (may use fallback if model doesn't support tools)
-            self.assertGreaterEqual(evaluation["rating"], 0)
-            self.assertLessEqual(evaluation["rating"], 100)
-            
-            print(f"\n✅ Real OpenRouter LLM evaluation completed!")
-            print(f"   Rating: {evaluation['rating']}/100")
-            print(f"   Quality Scores: {evaluation['quality_scores']}")
-            print(f"   Error: {evaluation.get('error', 'None')}")
-            print(f"   Note: If quality_scores={{'fallback': 75}}, the model didn't use tools properly")
-        
-        run_async(_test())
-    
-    def test_real_llm_evaluation_low_quality(self):
-        """Integration test with real OpenRouter LLM: low-quality service result."""
-        async def _test():
-            config = Config()
-            
-            if not config.openrouter_api_key:
-                self.skipTest("OPENROUTER_API_KEY not configured - skipping integration test")
-            
-            evaluator = ServiceEvaluator(config)
-            
-            requirements = {
-                "title": "Literature Review on Machine Learning",
-                "prompts": [
-                    "What are convolutional neural networks?",
-                    "Explain backpropagation algorithm."
-                ],
-                "quality_criteria": {
-                    "completeness": "All prompts answered comprehensively",
-                    "depth": "Detailed technical explanations"
                 }
             }
-            
-            # Poor quality responses
             result = {
-                "success": True,
-                "responses": [
-                    {
-                        "prompt": "What are convolutional neural networks?",
-                        "response": "They are neural networks."
-                    },
-                    {
-                        "prompt": "Explain backpropagation algorithm.",
-                        "response": "It's an algorithm for training."
-                    }
-                ]
+                "responses": [{
+                    "prompt": "What are convolutional neural networks?",
+                    "response": (
+                        "Convolutional neural networks (CNNs) are a class of deep learning models designed "
+                        "for grid-structured data like images. They use convolutional layers with learnable "
+                        "filters to detect local features, pooling layers to reduce spatial dimensions, and "
+                        "fully connected layers for classification. CNNs excel at image recognition, object "
+                        "detection, and similar vision tasks."
+                    )
+                }]
             }
-            
-            print("\n🔄 Running real OpenRouter LLM evaluation on low-quality responses...")
-            evaluation = await evaluator.evaluate(requirements, result)
-            
-            # Should return valid rating (may use fallback)
-            self.assertIsInstance(evaluation["rating"], int)
+            evaluation = await self.evaluator.evaluate(requirements, result)
+            self.assertGreater(evaluation["rating"], 50)
+            print(f"\n✅ Real LLM high-quality rating: {evaluation['rating']}/100")
+        run_async(_test())
+
+    def test_real_llm_low_quality(self):
+        """Real LLM scores low-quality responses; rating is within 0-100."""
+        async def _test():
+            requirements = {
+                "prompts": ["What are convolutional neural networks?"],
+                "quality_criteria": {
+                    "completeness": "Fully answers the question",
+                    "clarity": "Clear and well-structured"
+                }
+            }
+            result = {
+                "responses": [{
+                    "prompt": "What are convolutional neural networks?",
+                    "response": "They are neural networks."
+                }]
+            }
+            evaluation = await self.evaluator.evaluate(requirements, result)
             self.assertGreaterEqual(evaluation["rating"], 0)
             self.assertLessEqual(evaluation["rating"], 100)
-            
-            print(f"\n✅ Real OpenRouter LLM evaluation (low quality) completed!")
-            print(f"   Rating: {evaluation['rating']}/100")
-            print(f"   Quality Scores: {evaluation['quality_scores']}")
-        
+            print(f"\n✅ Real LLM low-quality rating: {evaluation['rating']}/100")
         run_async(_test())
-    
-    def test_real_llm_evaluation_partial_completion(self):
-        """Integration test with real OpenRouter LLM: only some prompts answered."""
+
+    def test_real_llm_partial_completion(self):
+        """Real LLM handles fewer responses than prompts."""
         async def _test():
-            config = Config()
-            
-            if not config.openrouter_api_key:
-                self.skipTest("OPENROUTER_API_KEY not configured - skipping integration test")
-            
-            evaluator = ServiceEvaluator(config)
-            
             requirements = {
-                "title": "Literature Review",
                 "prompts": [
                     "What is machine learning?",
                     "What is deep learning?",
@@ -758,10 +442,7 @@ class TestServiceEvaluatorIntegration(unittest.TestCase):
                     "completeness": "All prompts answered"
                 }
             }
-            
-            # Only 2 out of 3 answered
             result = {
-                "success": True,
                 "responses": [
                     {
                         "prompt": "What is machine learning?",
@@ -773,24 +454,14 @@ class TestServiceEvaluatorIntegration(unittest.TestCase):
                     }
                 ]
             }
-            
-            print("\n🔄 Running real LLM evaluation on partial completion...")
-            evaluation = await evaluator.evaluate(requirements, result)
-            
-            # Partial completion should get moderate rating
-            self.assertIsInstance(evaluation["rating"], int)
+            evaluation = await self.evaluator.evaluate(requirements, result)
             self.assertGreaterEqual(evaluation["rating"], 0)
             self.assertLessEqual(evaluation["rating"], 100)
-            
-            print(f"\n✅ Real LLM evaluation (partial) completed!")
-            print(f"   Rating: {evaluation['rating']}/100")
-            print(f"   Quality Scores: {evaluation['quality_scores']}")
-        
+            print(f"\n✅ Real LLM partial completion rating: {evaluation['rating']}/100")
         run_async(_test())
 
 
 if __name__ == "__main__":
-    # Run tests
     print("\n" + "=" * 80)
     print("RUNNING SERVICEEVALUATOR TESTS")
     print("=" * 80)

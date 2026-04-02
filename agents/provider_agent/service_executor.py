@@ -454,8 +454,7 @@ Maintain professional academic tone and provide detailed, well-structured respon
                         response_text = self._retrieval_only_fallback(prompt)
                         result["responses"].append({
                             "prompt": prompt,
-                            "response": response_text,
-                            "fallback": "retrieval_only"
+                            "response": response_text
                         })
                         result["partial_fallback_used"] = True
                         continue
@@ -500,18 +499,12 @@ Maintain professional academic tone and provide detailed, well-structured respon
                     "and no relevant sources were retrieved."
                 )
 
-            lines = [
-                "Partial fallback answer (reasoning recursion limit reached).",
-                "Relevant evidence excerpts:"
-            ]
-            for i, doc in enumerate(docs[:3], 1):
-                title = doc.metadata.get("title", "Unknown Title")
-                author = doc.metadata.get("first_author", "Unknown Author")
-                citation = f"[{author}, '{title}']"
+            lines = []
+            for i, doc in enumerate(docs[:1], 1):
                 snippet = " ".join(str(doc.page_content).split())
-                if len(snippet) > 400:
-                    snippet = snippet[:400] + "..."
-                lines.append(f"{i}. {snippet} {citation}")
+                if len(snippet) > 1500:
+                    snippet = snippet[:1500] + "..."
+                lines.append(f"{i}. {snippet} ")
 
             return "\n".join(lines)
         except Exception as e:

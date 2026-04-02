@@ -378,7 +378,7 @@ class Orchestrator:
             # For v1: Save result to file
             result_file = job.pdf_directory / "result.json"
             with open(result_file, "w") as f:
-                json.dump(job.result, f, indent=2)
+                json.dump(job.result, f, indent=2, ensure_ascii=False)
             
             logger.info(f"✓ Result saved to {result_file}")
             
