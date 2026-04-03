@@ -1,0 +1,31 @@
+# Offline dataset generation for evaluator analysis.
+# This reproduces runtime logic without marketplace/IPFS communication.
+
+dataset_generation:
+  dataset_id: "service_outputs_v1"
+
+  # Source PDFs and matching abstracts (.txt with same basename)
+  source_pdf_dir: "utils/files"
+  file_glob: "*.pdf"
+
+  # Output locations
+  output_dataset_dir: "experiments/evaluator_analysis/data/datasets"
+  output_artifacts_dir: "experiments/evaluator_analysis/data/artifacts"
+
+  # Workspace for provider-side vector DB artifacts
+  workspace_dir: "workspaces/evaluator_analysis"
+
+  # Provider execution profile (same service executor stack as runtime)
+  provider_agent_id: "evaluator-dataset-provider"
+  architecture: "1"
+  effort_tier: null
+
+  # Sampling controls
+  max_samples: null
+  allow_pdf_reuse: true
+  shuffle: false
+  random_seed: 42
+
+  # Runtime behavior
+  force_rebuild_rag: true
+  overwrite: false

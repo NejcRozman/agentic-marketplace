@@ -79,3 +79,4 @@ experiments/data/
 workspaces/
 experiments/analysis/output/
 experiments/analysis/figures/
+experiments/evaluator_analysis/data/
