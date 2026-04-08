@@ -88,7 +88,8 @@ class AgentState(TypedDict):
     agent_reputation: Dict[str, Any]  # Agent's current reputation score and feedback count
 
     # Agent's current performance context
-    estimated_service_cost: Optional[float]  # Estimated cost of service execution (USD)    
+    estimated_service_cost: Optional[float]  # Estimated cost of next service execution (USD)
+    current_balance: float  # Current net balance (revenue - costs, USD)
     
     # Results of current decision cycle
     bids_placed: List[Dict[str, Any]]  # Bids submitted this invocation
@@ -103,7 +104,7 @@ class AgentState(TypedDict):
     # ============================================================================
     
     # --- History Performance Parameters ---
-    # past_execution_costs: Optional[List[float]]  # Historical service execution costs (USD)
+    past_execution_costs: List[float]  # Historical service execution costs (USD, chronological)
     # past_auctions: Optional[List[Dict[str, Any]]]  # Last N auctions participated
     # past_win_rate: Optional[float]  # Win rate over last N auctions
     # past_avg_profit: Optional[float]  # Average profit per won auction
@@ -887,11 +888,17 @@ class BlockchainHandler:
         if isinstance(estimated_cost_usd, (int, float)):
             estimated_cost_micro = int(float(estimated_cost_usd) * 1e6)
 
+        execution_history = state.get("past_execution_costs") or []
+        current_balance = state.get("current_balance")
+
         return {
             "agent_id": self.agent_id,
             "agent_reputation": (state.get("agent_reputation") or {}).get("rating"),
             "estimated_service_cost_usd": estimated_cost_usd,
             "estimated_service_cost_micro": estimated_cost_micro,
+            "past_execution_costs": execution_history,
+            "past_execution_costs_count": len(execution_history),
+            "current_balance_usd": current_balance,
             "auctions": auction_map,
             "auction_count": len(auctions),
         }
@@ -1338,6 +1345,12 @@ Analyze these auctions and decide which to bid on."""
             state["competitors_reputation"] = competitors_reputation
             logger.info(f"👥 Fetched reputation for {len(competitors_reputation)} competitors")
             
+            # Track financial context in state for downstream reasoning/prompting.
+            execution_history = self.cost_tracker.get_execution_cost_history()
+            current_balance = self.cost_tracker.get_net_balance()
+            state["past_execution_costs"] = execution_history
+            state["current_balance"] = current_balance
+
             # Populate state based on architecture's state_level and coupling_mode
             if self.arch_config.state_level == 0:
                 # State Level 0: Current only (no history) - Architecture 1
@@ -1345,8 +1358,7 @@ Analyze these auctions and decide which to bid on."""
             elif self.arch_config.state_level >= 1:
                 # State Level 1+: Performance history (if coupling allows) - Future architectures
                 if self.coupling_mode in ["one_way", "two_way"]:
-                    execution_history = self.cost_tracker.get_execution_cost_history()
-                    # For now, use most recent cost or base cost as fallback
+                    # Use most recent execution cost for the next estimate when available.
                     state["estimated_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
                 else:
                     # Isolated coupling: no history available
@@ -1779,6 +1791,8 @@ Analyze these auctions and decide which to bid on."""
             "competitors_reputation": [],
             "agent_reputation": {"rating": self.initial_reputation_default, "feedback_count": 0},
             "estimated_service_cost": None,
+            "past_execution_costs": [],
+            "current_balance": 0.0,
             "bids_placed": [],
             "tx_hash": None,
             "error": None,
@@ -1819,6 +1833,8 @@ Analyze these auctions and decide which to bid on."""
             "competitors_reputation": [],
             "agent_reputation": {"rating": self.initial_reputation_default, "feedback_count": 0},
             "estimated_service_cost": None,
+            "past_execution_costs": [],
+            "current_balance": 0.0,
             "bids_placed": [],
             "tx_hash": None,
             "error": None,

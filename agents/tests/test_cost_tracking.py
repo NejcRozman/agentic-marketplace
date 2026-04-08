@@ -434,6 +434,8 @@ class TestCouplingModeIntegration(unittest.TestCase):
             
             # Current architecture schema uses estimated_service_cost
             self.assertEqual(result.get("estimated_service_cost"), test_config.bidding_base_cost)
+            self.assertEqual(result.get("past_execution_costs"), tracker.get_execution_cost_history())
+            self.assertAlmostEqual(result.get("current_balance"), tracker.get_net_balance(), places=6)
             
             print("\n✓ Isolated mode: estimated_service_cost uses base cost")
         
@@ -484,6 +486,8 @@ class TestCouplingModeIntegration(unittest.TestCase):
             
             # Architecture 1 (state_level=0) keeps base estimate regardless of coupling mode
             self.assertEqual(result.get("estimated_service_cost"), handler.config.bidding_base_cost)
+            self.assertEqual(result.get("past_execution_costs"), tracker.get_execution_cost_history())
+            self.assertAlmostEqual(result.get("current_balance"), tracker.get_net_balance(), places=6)
             
             print("\n✓ One-way mode: architecture 1 keeps base estimated_service_cost")
         
@@ -530,6 +534,8 @@ class TestCouplingModeIntegration(unittest.TestCase):
             
             # Architecture 1 (state_level=0) keeps base estimate regardless of coupling mode
             self.assertEqual(result.get("estimated_service_cost"), handler.config.bidding_base_cost)
+            self.assertEqual(result.get("past_execution_costs"), tracker.get_execution_cost_history())
+            self.assertAlmostEqual(result.get("current_balance"), tracker.get_net_balance(), places=6)
             
             print("\n✓ Two-way mode: architecture 1 keeps base estimated_service_cost")
         

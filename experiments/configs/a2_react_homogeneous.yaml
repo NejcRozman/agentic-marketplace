@@ -1,0 +1,121 @@
+# A2 ReAct Homogeneous Experiment
+# Purpose: First non-smoke homogeneous run for architecture-2 ReAct provider agents
+
+experiment:
+  id: "a2_react_homogeneous"
+  name: "A2 ReAct Homogeneous"
+  description: "Homogeneous A2 ReAct setup with 1 consumer and X providers over Y auctions"
+  research_question: "homogeneous_react_arch2"
+  duration_timeout: 21600  # 6 hours max
+
+blockchain:
+  network: "anvil"
+  rpc_url: "http://localhost:8545"
+  fork_network: "sepolia"
+  infura_key_env: "INFURA_API_KEY"
+  initial_reputation_default: 75
+
+  contracts:
+    reverse_auction: null
+    identity_registry: "0x8004a6090Cd10A7288092483047B097295Fb8847"
+    reputation_registry: "0x8004B8FD1A363aa02fDC07635C0c5F94f6Af5B7E"
+    payment_token: null
+
+  accounts:
+    main_account: "${BLOCKCHAIN_PRIVATE_KEY}"
+    deployer: "${BLOCKCHAIN_PRIVATE_KEY}"
+    consumer: "${BLOCKCHAIN_CONSUMER_PRIVATE_KEY}"
+    providers:
+      - "${BLOCKCHAIN_PRIVATE_KEY}"
+
+    consumer_funding:
+      eth_amount: 1000000000000000000  # 1 ETH
+      usdc_amount: 1000000000          # 1000 USDC
+
+agents:
+  consumer:
+    count: 1
+    agent_id: null
+    private_key: null
+    eligible_providers: null
+
+    config:
+      check_interval: 10
+      max_budget: 100000         # 0.1 USDC
+      auction_duration: 120         # 2 minute
+      reputation_weight: 20
+
+    behavior:
+      pdf_directory: "utils/files"
+      service_selection: "sequential"
+      service_complexity: "medium"
+      auto_create_auction: true
+      num_auctions: 12
+      auto_monitor: true
+      inter_auction_delay: 3
+
+  providers:
+    count: 3
+    agent_ids: [null, null, null]
+    private_keys: null
+
+    config:
+      check_interval: 10
+      bidding_base_cost: 0.05         # 0.05 USD estimated service cost
+      gas_cost_mode: "fixed"      # model with fixed network average gas price
+      gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
+      eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
+
+    behavior:
+      # Homogeneous architecture-2 ReAct setup
+      architecture: "2"
+      reasoning_mode: "llm_react"
+      auto_bid: true
+      auto_execute: true
+      auto_complete: true
+
+experiment_flow:
+  phases:
+    - name: "setup"
+      description: "Start Anvil, deploy contracts, register agents, mint USDC"
+      timeout: 180
+
+    - name: "agents_start"
+      description: "Launch consumer and provider agents"
+      timeout: 60
+
+    - name: "experiment_run"
+      description: "Agents operate until target auctions complete"
+      stopping_criteria:
+        type: "completed_auctions"
+        target: 12
+        poll_interval: 5
+        max_timeout: 10800
+
+  target_auctions: 12
+
+monitoring:
+  metrics:
+    - auction_created
+    - bids_received
+    - auction_winner
+    - service_executed
+    - service_completed
+    - reputation_updated
+    - final_reputations
+    - gas_costs
+    - timing
+
+  logs:
+    directory: "experiments/data/logs/a2_react_homogeneous"
+    format: "json"
+    level: "INFO"
+
+  output:
+    directory: "experiments/data/metrics/a2_react_homogeneous"
+    format: "json"
+
+api_keys:
+  openrouter_api_key_env: "OPENROUTER_API_KEY"
+  pinata_api_key_env: "PINATA_API_KEY"
+  pinata_secret_env: "PINATA_SECRET_KEY"
