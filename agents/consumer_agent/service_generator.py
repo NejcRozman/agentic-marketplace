@@ -223,9 +223,9 @@ class ServiceGenerator:
         
         system_prompt = """You are an expert at creating insightful questions for literature reviews.
 
-Given a research paper abstract, generate 3-5 specific, thoughtful questions that would help someone thoroughly understand and analyze the paper.
+Given a research paper abstract, generate 2-3 specific, thoughtful questions that would help someone thoroughly understand and analyze the paper.
 
-Your questions should cover:
+Your questions should cover something like:
 - Main research question and contribution
 - Methodology and approach
 - Key findings and results
@@ -242,7 +242,7 @@ Example: ["What is the main...", "How does the paper...", "What are the key..."]
 Abstract:
 {abstract}
 
-Generate 3-5 specific questions for this paper's literature review:"""
+Generate 2-3 specific questions for this paper's literature review:"""
         
         try:
             response = self.model.invoke(

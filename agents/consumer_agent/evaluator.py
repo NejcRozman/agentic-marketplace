@@ -35,7 +35,7 @@ class ServiceEvaluator:
 
     def __init__(self, config: Config):
         self.config = config
-        self._model = getattr(config, "openrouter_model", "qwen/qwen3.6-plus:free")
+        self._model = getattr(config, "openrouter_model", "openai/gpt-oss-20b")
         self.model = ChatOpenAI(
             model=self._model,
             api_key=config.openrouter_api_key,
