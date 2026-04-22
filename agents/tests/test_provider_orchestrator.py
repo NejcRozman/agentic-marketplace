@@ -63,9 +63,12 @@ class TestOrchestratorUnit(unittest.TestCase):
         }
 
         # CostTracker dependencies used by Orchestrator
-        self.mock_config.service_cost_multiplier = 100.0
         self.mock_config.gas_price_gwei = 20.0
         self.mock_config.eth_price_usd = 3000.0
+        self.mock_config.reasoning_llm_input_price_per_1k = 0.0002
+        self.mock_config.reasoning_llm_output_price_per_1k = 0.0002
+        self.mock_config.service_llm_input_price_per_1k = 0.0002
+        self.mock_config.service_llm_output_price_per_1k = 0.0002
         self.mock_config.coupling_mode = "isolated"
         
         self.sample_service_requirements = {

@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from langchain_openai import ChatOpenAI
+import aiohttp
 
 try:
     from ..config import Config
@@ -35,14 +35,12 @@ class ServiceEvaluator:
 
     def __init__(self, config: Config):
         self.config = config
-        self._model = getattr(config, "openrouter_model", "openai/gpt-oss-20b")
-        self.model = ChatOpenAI(
-            model=self._model,
-            api_key=config.openrouter_api_key,
-            base_url=config.openrouter_base_url,
-            temperature=0.2,
-            max_tokens=512,
-        )
+        self._api_url = config.openrouter_base_url.rstrip("/") + "/chat/completions"
+        self._headers = {
+            "Authorization": f"Bearer {config.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        self._model = getattr(config, "openrouter_model", "openai/gpt-4o-mini")
         logger.info("ServiceEvaluator initialized")
 
     # ------------------------------------------------------------------
@@ -74,36 +72,21 @@ class ServiceEvaluator:
         per_pair_criteria = {k: v for k, v in quality_criteria.items() if k not in HOLISTIC_CRITERIA}
         holistic_criteria = {k: v for k, v in quality_criteria.items() if k in HOLISTIC_CRITERIA}
 
-        # --- parallel per-pair scoring ---
-        pair_tasks = [
-            self._score_pair(pair, per_pair_criteria)
-            for pair in responses
-        ]
-        pair_results: List[Optional[Dict]] = await asyncio.gather(*pair_tasks)
+        async with aiohttp.ClientSession() as session:
+            # --- parallel per-pair scoring ---
+            pair_tasks = [
+                self._score_pair(session, pair, per_pair_criteria)
+                for pair in responses
+            ]
+            pair_results: List[Optional[Dict]] = await asyncio.gather(*pair_tasks)
 
-        # --- holistic scoring (single call, all responses) ---
-        holistic_scores: Dict[str, int] = {}
-        holistic_explanation: str = ""
-        if holistic_criteria:
-            holistic_scores, holistic_explanation = await self._score_holistic(
-                responses, holistic_criteria
-            )
-
-        # If holistic parsing fails, avoid punishing completeness as zero.
-        for dim in holistic_criteria:
-            if dim in holistic_scores:
-                continue
-            if dim == "completeness":
-                fallback = self._completeness_cap(required_prompts, responses)
-                holistic_scores[dim] = fallback
-                logger.warning(
-                    "Holistic '%s' score missing; using prompt coverage fallback: %s",
-                    dim,
-                    fallback,
+            # --- holistic scoring (single call, all responses) ---
+            holistic_scores: Dict[str, int] = {}
+            holistic_explanation: str = ""
+            if holistic_criteria:
+                holistic_scores, holistic_explanation = await self._score_holistic(
+                    session, responses, holistic_criteria
                 )
-            else:
-                holistic_scores[dim] = 0
-                logger.warning("Holistic '%s' score missing; defaulting to 0.", dim)
 
         # Prevent inflated completeness when required prompts were not all answered.
         if "completeness" in holistic_scores:
@@ -142,6 +125,7 @@ class ServiceEvaluator:
 
     async def _score_pair(
         self,
+        session: aiohttp.ClientSession,
         pair: Dict[str, str],
         criteria: Dict[str, str],
     ) -> Optional[Dict]:
@@ -164,7 +148,7 @@ class ServiceEvaluator:
             f"Return JSON only: {{\"scores\": {{{score_schema}}}, \"explanation\": \"<str>\"}}"
         )
 
-        parsed = await self._llm_call_with_retry(eval_prompt, label=f"pair '{prompt_text[:40]}'")
+        parsed = await self._llm_call_with_retry(session, eval_prompt, label=f"pair '{prompt_text[:40]}'")
         if parsed is None or "scores" not in parsed:
             logger.warning(f"No valid scores returned for pair: {prompt_text[:60]}")
             return None
@@ -184,6 +168,7 @@ class ServiceEvaluator:
 
     async def _score_holistic(
         self,
+        session: aiohttp.ClientSession,
         responses: List[Dict[str, str]],
         criteria: Dict[str, str],
     ) -> Tuple[Dict[str, int], str]:
@@ -204,10 +189,10 @@ class ServiceEvaluator:
             f"Return JSON only: {{\"scores\": {{{score_schema}}}, \"explanation\": \"<str>\"}}"
         )
 
-        parsed = await self._llm_call_with_retry(eval_prompt, label="holistic")
+        parsed = await self._llm_call_with_retry(session, eval_prompt, label="holistic")
         if parsed is None or "scores" not in parsed:
-            logger.warning("No valid holistic scores returned.")
-            return {}, ""
+            logger.warning("No valid holistic scores returned; defaulting to 0 for holistic dimensions.")
+            return {dim: 0 for dim in criteria}, ""
 
         scores: Dict[str, int] = {}
         for dim in criteria:
@@ -220,6 +205,7 @@ class ServiceEvaluator:
 
     async def _llm_call_with_retry(
         self,
+        session: aiohttp.ClientSession,
         user_prompt: str,
         label: str = "",
     ) -> Optional[Dict]:
@@ -227,35 +213,24 @@ class ServiceEvaluator:
         Call the LLM API with up to _MAX_RETRIES attempts on transient failure.
         Returns the parsed JSON dict or None if all attempts fail.
         """
-        llm_prompt = (
-            "You are a strict, fair, and concise evaluator. Respond with JSON only.\n\n"
-            f"{user_prompt}"
-        )
+        payload = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": "You are a strict, fair, and concise evaluator. Respond with JSON only."},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 512,
+        }
 
         last_exc: Optional[Exception] = None
         for attempt in range(1, _MAX_RETRIES + 1):
             try:
-                response = await self.model.ainvoke(llm_prompt)
-                content = response.content if isinstance(response.content, str) else str(response.content)
-                parsed = self._parse_llm_json(content)
-                if parsed is not None:
-                    return parsed
-
-                last_exc = ValueError("LLM response did not contain parseable JSON object")
-                preview = content.strip().replace("\n", " ")[:220]
-                if attempt < _MAX_RETRIES:
-                    wait = _RETRY_BACKOFF * (2 ** (attempt - 1))
-                    logger.warning(
-                        "LLM call returned unparseable JSON for %s (attempt %s/%s). "
-                        "Preview: %r. Retrying in %ss...",
-                        label,
-                        attempt,
-                        _MAX_RETRIES,
-                        preview,
-                        wait,
-                    )
-                    await asyncio.sleep(wait)
-                continue
+                async with session.post(self._api_url, json=payload, headers=self._headers, timeout=60) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json()
+                    content = data["choices"][0]["message"]["content"]
+                    return self._parse_llm_json(content)
             except Exception as exc:
                 last_exc = exc
                 if attempt < _MAX_RETRIES:
@@ -268,87 +243,18 @@ class ServiceEvaluator:
 
     @staticmethod
     def _parse_llm_json(content: str) -> Optional[Dict]:
-        """Extract and parse a JSON dict from LLM output using robust fallbacks."""
-        if not content:
+        """Extract and parse the first JSON object from LLM output."""
+        match = re.search(r'\{[\s\S]*\}', content)
+        if not match:
             return None
-
-        text = content.strip()
-        candidates: List[str] = [text]
-
-        # Prefer explicit fenced JSON blocks when present.
-        fence_blocks = re.findall(r"```(?:json)?\s*([\s\S]*?)```", text, flags=re.IGNORECASE)
-        candidates.extend(block.strip() for block in fence_blocks if block.strip())
-
-        # Then try balanced JSON-object slices extracted from the text.
-        candidates.extend(ServiceEvaluator._extract_json_objects(text))
-
-        seen: set[str] = set()
-        for candidate in candidates:
-            if not candidate or candidate in seen:
-                continue
-            seen.add(candidate)
-
-            parsed = ServiceEvaluator._try_parse_dict(candidate)
-            if parsed is not None:
-                return parsed
-
-        return None
-
-    @staticmethod
-    def _try_parse_dict(candidate: str) -> Optional[Dict]:
-        """Try parsing a string into a dict via JSON first, then Python literal."""
+        block = match.group()
         try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
+            return json.loads(block)
         except Exception:
-            pass
-
-        try:
-            parsed = ast.literal_eval(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            pass
-
-        return None
-
-    @staticmethod
-    def _extract_json_objects(text: str) -> List[str]:
-        """Extract balanced `{...}` object substrings while respecting JSON strings."""
-        objects: List[str] = []
-        depth = 0
-        start: Optional[int] = None
-        in_string = False
-        escape = False
-
-        for i, ch in enumerate(text):
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-
-            if ch == '"':
-                in_string = True
-                continue
-
-            if ch == "{":
-                if depth == 0:
-                    start = i
-                depth += 1
-                continue
-
-            if ch == "}" and depth > 0:
-                depth -= 1
-                if depth == 0 and start is not None:
-                    objects.append(text[start:i + 1])
-                    start = None
-
-        return objects
+            try:
+                return ast.literal_eval(block)
+            except Exception:
+                return None
 
     @staticmethod
     def _completeness_cap(required_prompts: List[str], responses: List[Dict[str, str]]) -> int:

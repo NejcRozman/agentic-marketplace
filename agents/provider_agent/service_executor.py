@@ -253,6 +253,57 @@ Maintain professional academic tone and provide detailed, well-structured respon
             return "\n---\n".join(results)
         
         return search_literature
+
+    @staticmethod
+    def _extract_response_text(content: Any) -> str:
+        """Extract text payloads from heterogeneous message content shapes.
+
+        Some model/providers return a plain string while others return a list of
+        structured blocks. This method collects all text-like fields and joins
+        them. If no text is present, it returns an empty string.
+        """
+        if content is None:
+            return ""
+
+        if isinstance(content, str):
+            return content
+
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                extracted = ServiceExecutor._extract_response_text(item)
+                if isinstance(extracted, str) and extracted.strip():
+                    parts.append(extracted)
+            return "\n".join(parts).strip() if parts else ""
+
+        if isinstance(content, dict):
+            parts: List[str] = []
+
+            for key in ("text", "content", "output_text"):
+                value = content.get(key)
+                extracted = ServiceExecutor._extract_response_text(value)
+                if isinstance(extracted, str) and extracted.strip():
+                    parts.append(extracted)
+
+            message = content.get("message")
+            if not parts and message is not None:
+                extracted = ServiceExecutor._extract_response_text(message)
+                if isinstance(extracted, str) and extracted.strip():
+                    parts.append(extracted)
+
+            return "\n".join(parts).strip() if parts else ""
+
+        text_attr = getattr(content, "text", None)
+        if isinstance(text_attr, str):
+            return text_attr
+
+        content_attr = getattr(content, "content", None)
+        if content_attr is not None:
+            extracted = ServiceExecutor._extract_response_text(content_attr)
+            if isinstance(extracted, str):
+                return extracted
+
+        return ""
     
     def _build_graph(self, llm_override: Optional[ChatOpenAI] = None):
         """
@@ -282,11 +333,13 @@ Maintain professional academic tone and provide detailed, well-structured respon
                 from ..infrastructure.cost_tracker import LLMCostCallback
             except ImportError:
                 from infrastructure.cost_tracker import LLMCostCallback
-            
+
             callback = LLMCostCallback(
                 cost_tracker=self.cost_tracker,
                 model=active_llm.model_name,  # Use active LLM's model
-                config=config
+                input_price_per_1k=config.service_llm_input_price_per_1k,
+                output_price_per_1k=config.service_llm_output_price_per_1k,
+                scope="service_execution",
             )
             callbacks = [callback]
         
@@ -462,12 +515,14 @@ Maintain professional academic tone and provide detailed, well-structured respon
                 
                 # Extract the final response
                 final_message = graph_result['messages'][-1]
-                
-                # Handle response content
-                if isinstance(final_message.content, list):
-                    response_text = final_message.content[0].get("text", str(final_message.content))
-                else:
-                    response_text = final_message.content
+
+                # Extract text robustly across provider/model content shapes.
+                response_text = self._extract_response_text(final_message.content)
+                if not response_text.strip():
+                    logger.warning(
+                        "Empty response text extracted for prompt: %s",
+                        prompt[:100],
+                    )
                 
                 result["responses"].append({
                     "prompt": prompt,

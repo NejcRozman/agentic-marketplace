@@ -89,9 +89,20 @@ class Config:
         self.gas_cost_mode = os.getenv("GAS_COST_MODE", "receipt")  # "receipt" or "fixed"
         self.gas_price_gwei = float(os.getenv("GAS_PRICE_GWEI", "20.0"))
         self.eth_price_usd = float(os.getenv("ETH_PRICE_USD", "3000.0"))
-        self.llm_input_price_per_1k = float(os.getenv("LLM_INPUT_PRICE_PER_1K", "0.0002"))
-        self.llm_output_price_per_1k = float(os.getenv("LLM_OUTPUT_PRICE_PER_1K", "0.0002"))
-        self.service_cost_multiplier = float(os.getenv("SERVICE_COST_MULTIPLIER", "100.0"))
+
+        # Token pricing by execution domain.
+        self.reasoning_llm_input_price_per_1k = float(
+            os.getenv("REASONING_LLM_INPUT_PRICE_PER_1K", "0.0002")
+        )
+        self.reasoning_llm_output_price_per_1k = float(
+            os.getenv("REASONING_LLM_OUTPUT_PRICE_PER_1K", "0.0002")
+        )
+        self.service_llm_input_price_per_1k = float(
+            os.getenv("SERVICE_LLM_INPUT_PRICE_PER_1K", "0.0002")
+        )
+        self.service_llm_output_price_per_1k = float(
+            os.getenv("SERVICE_LLM_OUTPUT_PRICE_PER_1K", "0.0002")
+        )
         
         # Coupling mode configuration
         self.coupling_mode = os.getenv("COUPLING_MODE", "isolated")  # "isolated", "one_way", "two_way"

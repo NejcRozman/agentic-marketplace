@@ -19,11 +19,20 @@ class LLMCostCallback(BaseCallbackHandler):
     Integrates with CostTracker to record actual LLM expenses.
     """
     
-    def __init__(self, cost_tracker: "CostTracker", model: str, config):
+    def __init__(
+        self,
+        cost_tracker: "CostTracker",
+        model: str,
+        input_price_per_1k: float,
+        output_price_per_1k: float,
+        scope: str = "llm",
+    ):
         super().__init__()
         self.cost_tracker = cost_tracker
         self.model = model
-        self.config = config
+        self.input_price_per_1k = input_price_per_1k
+        self.output_price_per_1k = output_price_per_1k
+        self.scope = scope
         self.total_tokens = 0
         self.total_cost = 0.0
     
@@ -62,9 +71,8 @@ class LLMCostCallback(BaseCallbackHandler):
             if (input_tokens + output_tokens) == 0:
                 return
 
-            # Use config-based pricing
-            input_cost = (input_tokens / 1000) * self.config.llm_input_price_per_1k
-            output_cost = (output_tokens / 1000) * self.config.llm_output_price_per_1k
+            input_cost = (input_tokens / 1000) * self.input_price_per_1k
+            output_cost = (output_tokens / 1000) * self.output_price_per_1k
             total_cost = input_cost + output_cost
 
             self.total_tokens += (input_tokens + output_tokens)
@@ -73,7 +81,7 @@ class LLMCostCallback(BaseCallbackHandler):
             # Record in cost tracker
             self.cost_tracker.add_llm_cost(
                 cost_usd=total_cost,
-                context=f"{self.model} ({input_tokens}+{output_tokens} tokens)"
+                context=f"{self.scope}:{self.model} ({input_tokens}+{output_tokens} tokens)",
             )
                 
         except Exception as e:
@@ -103,8 +111,7 @@ class CostTracker:
         self.total_revenue = 0.0
         
         # Service execution tracking
-        self.service_execution_history = []  # List of scaled execution costs (USD)
-        self.service_cost_multiplier = config.service_cost_multiplier
+        self.service_execution_history = []  # List of raw execution costs (USD)
         self._current_execution_llm_cost = 0.0
         self._is_executing_service = False
     
@@ -183,25 +190,20 @@ class CostTracker:
         Complete service execution tracking and record to history.
         
         Returns:
-            Scaled service execution cost (USD)
+            Service execution cost (USD)
         """
         if not self._is_executing_service:
             logger.warning("end_service_execution called but no service execution in progress")
             return 0.0
         
-        raw_cost = self._current_execution_llm_cost
-        scaled_cost = raw_cost * self.service_cost_multiplier
-        
-        self.service_execution_history.append(scaled_cost)
+        execution_cost = self._current_execution_llm_cost
+
+        self.service_execution_history.append(execution_cost)
         self._is_executing_service = False
         
-        logger.info(
-            f"📊 Service execution complete: "
-            f"${raw_cost:.6f} raw → ${scaled_cost:.4f} scaled "
-            f"({self.service_cost_multiplier}x multiplier)"
-        )
-        
-        return scaled_cost
+        logger.info(f"📊 Service execution complete: ${execution_cost:.6f}")
+
+        return execution_cost
     
     def get_execution_cost_history(self) -> list:
         """
@@ -211,7 +213,7 @@ class CostTracker:
         BlockchainHandler decides how to use this history.
         
         Returns:
-            List of scaled execution costs (USD) in chronological order
+            List of execution costs (USD) in chronological order
         """
         return self.service_execution_history.copy()
     

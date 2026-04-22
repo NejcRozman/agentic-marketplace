@@ -139,7 +139,9 @@ class TestLLMCostCallback(unittest.TestCase):
         self.callback = LLMCostCallback(
             cost_tracker=self.tracker,
             model="openai/gpt-oss-20b",
-            config=self.config
+            input_price_per_1k=self.config.reasoning_llm_input_price_per_1k,
+            output_price_per_1k=self.config.reasoning_llm_output_price_per_1k,
+            scope="reasoning",
         )
     
     def test_callback_initialization(self):
@@ -167,8 +169,8 @@ class TestLLMCostCallback(unittest.TestCase):
         
         # Calculate expected cost
         expected_cost = (
-            (1000 / 1000) * self.config.llm_input_price_per_1k +
-            (500 / 1000) * self.config.llm_output_price_per_1k
+            (1000 / 1000) * self.config.reasoning_llm_input_price_per_1k +
+            (500 / 1000) * self.config.reasoning_llm_output_price_per_1k
         )
         
         self.assertAlmostEqual(self.tracker.total_llm_costs, expected_cost, places=6)
@@ -319,7 +321,7 @@ class TestCostSummaryLogging(unittest.TestCase):
 
 
 class TestServiceExecutionCostTracking(unittest.TestCase):
-    """Test service execution cost tracking with multiplier."""
+    """Test service execution cost tracking without multipliers."""
     
     def test_execution_cost_tracking_basic(self):
         """Test basic service execution cost tracking."""
@@ -335,18 +337,15 @@ class TestServiceExecutionCostTracking(unittest.TestCase):
         # End service execution
         tracker.end_service_execution()
         
-        # Check that scaled cost was recorded
+        # Check that execution cost was recorded
         history = tracker.get_execution_cost_history()
         self.assertEqual(len(history), 1)
-        
-        # With 100x multiplier, $0.008 becomes $0.80
-        expected_scaled = 0.008 * config.service_cost_multiplier
-        self.assertAlmostEqual(history[0], expected_scaled, places=2)
+
+        expected_cost = 0.008
+        self.assertAlmostEqual(history[0], expected_cost, places=6)
         
         print(f"\n✓ Service execution cost tracked:")
-        print(f"  Raw cost: $0.008")
-        print(f"  Multiplier: {config.service_cost_multiplier}x")
-        print(f"  Scaled cost: ${history[0]:.2f}")
+        print(f"  Cost: ${history[0]:.6f}")
     
     def test_multiple_service_executions(self):
         """Test tracking multiple service executions."""
@@ -364,14 +363,13 @@ class TestServiceExecutionCostTracking(unittest.TestCase):
         history = tracker.get_execution_cost_history()
         self.assertEqual(len(history), 3)
         
-        # Verify each cost is scaled correctly
+        # Verify each cost is tracked directly
         for i, raw_cost in enumerate(costs):
-            expected_scaled = raw_cost * config.service_cost_multiplier
-            self.assertAlmostEqual(history[i], expected_scaled, places=2)
+            self.assertAlmostEqual(history[i], raw_cost, places=6)
         
         print(f"\n✓ Multiple service executions tracked:")
-        for i, (raw, scaled) in enumerate(zip(costs, history)):
-            print(f"  Service {i+1}: ${raw:.3f} → ${scaled:.2f}")
+        for i, tracked in enumerate(history):
+            print(f"  Service {i+1}: ${tracked:.6f}")
     
     def test_execution_without_start(self):
         """Test that costs outside execution are not tracked in history."""

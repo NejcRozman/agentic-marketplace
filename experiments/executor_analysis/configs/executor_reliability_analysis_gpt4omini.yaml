@@ -1,0 +1,39 @@
+# Executor reliability analysis using openai/gpt-4o-mini for service execution.
+
+executor_reliability_analysis:
+  analysis_id: "executor_reliability_gpt4omini_v1"
+
+  # Requirement source PDFs and matching abstracts (.txt with same basename)
+  source_pdf_dir: "utils/files"
+  file_glob: "*.pdf"
+
+  # Output roots (artifacts and summaries are namespaced by analysis_id)
+  output_dir: "experiments/executor_analysis/data/reliability"
+  artifacts_dir: "experiments/executor_analysis/data/artifacts"
+
+  # Provider execution profile
+  workspace_dir: "workspaces/executor_analysis"
+  provider_agent_id: "executor-reliability-provider"
+  architecture: "1"
+  effort_tier: "standard"  # maps to openai/gpt-4o-mini in agents/config.py
+
+  # Core reliability setup
+  requirement_count: 10
+  executor_repeats_per_requirement: 5
+
+  # Sampling controls
+  allow_pdf_reuse: true
+  shuffle: false
+  random_seed: 42
+
+  # Runtime controls
+  force_rebuild_rag: true
+  reset_executor_between_runs: false
+  include_partial_fallback_runs: true
+
+  # Evaluator observability
+  heartbeat_interval_seconds: 30
+  evaluation_timeout_seconds: null
+
+  # Replace existing results under this analysis_id
+  overwrite: true

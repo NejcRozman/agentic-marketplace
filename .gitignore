@@ -80,3 +80,4 @@ workspaces/
 experiments/analysis/output/
 experiments/analysis/figures/
 experiments/evaluator_analysis/data/
+experiments/executor_analysis/data/

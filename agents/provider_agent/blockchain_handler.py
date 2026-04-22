@@ -1695,7 +1695,9 @@ Analyze these auctions and decide which to bid on."""
             callback = LLMCostCallback(
                 cost_tracker=self.cost_tracker,
                 model=self.llm_model,
-                config=self.config
+                input_price_per_1k=self.config.reasoning_llm_input_price_per_1k,
+                output_price_per_1k=self.config.reasoning_llm_output_price_per_1k,
+                scope="reasoning",
             )
             
             llm = ChatOpenAI(
