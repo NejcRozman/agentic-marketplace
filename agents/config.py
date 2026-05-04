@@ -92,16 +92,16 @@ class Config:
 
         # Token pricing by execution domain.
         self.reasoning_llm_input_price_per_1k = float(
-            os.getenv("REASONING_LLM_INPUT_PRICE_PER_1K", "0.0002")
+            os.getenv("REASONING_LLM_INPUT_PRICE_PER_1K", "0.00015")
         )
         self.reasoning_llm_output_price_per_1k = float(
-            os.getenv("REASONING_LLM_OUTPUT_PRICE_PER_1K", "0.0002")
+            os.getenv("REASONING_LLM_OUTPUT_PRICE_PER_1K", "0.0006")
         )
         self.service_llm_input_price_per_1k = float(
-            os.getenv("SERVICE_LLM_INPUT_PRICE_PER_1K", "0.0002")
+            os.getenv("SERVICE_LLM_INPUT_PRICE_PER_1K", "0.00015")
         )
         self.service_llm_output_price_per_1k = float(
-            os.getenv("SERVICE_LLM_OUTPUT_PRICE_PER_1K", "0.0002")
+            os.getenv("SERVICE_LLM_OUTPUT_PRICE_PER_1K", "0.0006")
         )
         
         # Coupling mode configuration
@@ -196,8 +196,8 @@ class ArchitectureConfig:
     coupling_mode: str  # "isolated", "one_way", "two_way"
     prompt_template: str  # "minimal", "guided", "rich"
     enabled_tools: List[str]
-    blockchain_llm: str = "openai/gpt-oss-20b"
-    service_llm: str = "openai/gpt-oss-20b"
+    blockchain_llm: str = "openai/gpt-4o-mini"
+    service_llm: str = "openai/gpt-4o-mini"
     llm_temperature: float = 0.3
 
 
@@ -212,8 +212,8 @@ ARCHITECTURES = {
         prompt_template="1",
         enabled_tools=["validate_bid_profitability", "calculate_bid_score", 
                       "simulate_bid_outcome", "place_bid"],
-        blockchain_llm="openai/gpt-oss-20b",
-        service_llm="openai/gpt-oss-20b",
+        blockchain_llm="openai/gpt-4o-mini",
+        service_llm="openai/gpt-4o-mini",
         llm_temperature=0.3,
     ),
     "2": ArchitectureConfig(
@@ -225,8 +225,8 @@ ARCHITECTURES = {
         prompt_template="2",
         enabled_tools=["validate_bid_profitability", "calculate_bid_score",
                       "simulate_bid_outcome", "place_bid"],
-        blockchain_llm="openai/gpt-oss-20b",
-        service_llm="openai/gpt-oss-20b",
+        blockchain_llm="openai/gpt-4o-mini",
+        service_llm="openai/gpt-4o-mini",
         llm_temperature=0.3,
     ),
     # Future architectures will be added here:

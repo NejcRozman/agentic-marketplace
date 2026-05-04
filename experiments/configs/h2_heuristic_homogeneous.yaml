@@ -13,7 +13,7 @@ blockchain:
   rpc_url: "http://localhost:8545"
   fork_network: "sepolia"
   infura_key_env: "INFURA_API_KEY"
-  initial_reputation_default: 75
+  initial_reputation_default: 85
 
   contracts:
     reverse_auction: null
@@ -61,7 +61,7 @@ agents:
 
     config:
       check_interval: 10
-      bidding_base_cost: 0.05         # 0.05 USD estimated service cost
+      bidding_base_cost: 0.02         # 0.02 USD estimated service cost
       gas_cost_mode: "fixed"      # model with fixed network average gas price
       gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
       eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)

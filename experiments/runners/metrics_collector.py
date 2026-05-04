@@ -1,19 +1,13 @@
-"""
-Metrics Collector - Comprehensive data collection for experiment analysis.
+"""Runtime-first metrics collector for experiment analysis.
 
-Collects:
-- System completeness (all phases successful)
-- Auction details (bids, winner, payments)
-- Service quality (rating, evaluation, responses)
-- Reputation changes (before/after, deltas)
-- Timing (phase durations, critical path)
-- Blockchain (gas costs, transaction success)
-- Errors and reliability metrics
+Collector responsibilities:
+- Keep runtime snapshots produced during execution (consumer/provider status)
+- Pull ground-truth auction and reputation outcomes from blockchain
+- Produce analysis-ready metrics JSON without post-hoc log scraping
 """
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -64,9 +58,16 @@ class MetricsCollector:
             # Provider economics
             "provider_financials": {
                 "by_provider": {},
-                "evolution": []
+                "evolution": [],
+                "runtime_snapshots": []
             },
             
+            # Runtime snapshots captured by experiment runner polling.
+            "runtime": {
+                "consumer_status_snapshots": [],
+                "provider_status_snapshots": []
+            },
+
             # Timing data (raw data, not averages)
             "timing": {
                 "phase_durations": {},
@@ -118,7 +119,7 @@ class MetricsCollector:
     
     def collect_auction_from_blockchain(self, w3: Web3, auction_contract, auction_id: int, reputation_contract=None) -> Dict[str, Any]:
         """
-        Collect complete auction data from blockchain and logs.
+        Collect complete auction data from blockchain and runtime snapshots.
         
         This is the primary data collection method that builds the auctions array.
         Each auction object contains:
@@ -261,50 +262,38 @@ class MetricsCollector:
                 # Fallback: use theoretical end time
                 auction_data["timestamp_ended"] = auction_data["timestamp_created"] + auction_data["duration"]
             
-            # 4. Collect bid attempts from provider logs (includes failures)
-            # IMPORTANT: Only collect bids from eligible providers to avoid phantom data
+            # 4. Build attempted/failed bid information from runtime snapshots + on-chain bids.
+            runtime_bid_failures = self._runtime_bid_failures_for_auction(auction_id)
+
+            # Include all failed runtime attempts first.
+            for failure in runtime_bid_failures:
+                attempt_amount = failure.get("amount")
+                auction_data["bids_attempted"].append({
+                    "provider_id": failure.get("provider_id"),
+                    "amount": attempt_amount,
+                    "source": "runtime_status"
+                })
+            auction_data["bid_failures"].extend(runtime_bid_failures)
+
+            # Add all on-chain bids as successful attempts.
+            for bid in auction_data["bids_on_chain"]:
+                auction_data["bids_attempted"].append({
+                    "provider_id": bid.get("agent_id"),
+                    "amount": bid.get("amount"),
+                    "source": "on_chain"
+                })
+
+            # IMPORTANT: Only keep attempts from eligible providers to avoid phantom data.
             eligible_provider_ids = auction_data.get("eligible_agent_ids", [])
-            
-            for provider_id in self.metrics['agents']['provider_ids']:
-                # Skip providers that weren't eligible for this auction
-                if eligible_provider_ids and provider_id not in eligible_provider_ids:
-                    continue
-                
-                provider_log = self._load_provider_log(provider_id)
-                if not provider_log:
-                    continue
-                
-                # ReAct traces: place_bid({'auction_id': X, 'bid_amount': Y})
-                bid_pattern_react = rf"place_bid\({{[^}}]*'auction_id':\s*{auction_id}[^\d][^}}]*'bid_amount':\s*(\d+)"
-                for match in re.finditer(bid_pattern_react, provider_log):
-                    bid_amount = int(match.group(1))
-                    auction_data["bids_attempted"].append({
-                        "provider_id": provider_id,
-                        "amount": bid_amount
-                    })
-
-                # Heuristic traces: "Auction X: ... bid=1.2 USDC"
-                bid_pattern_heuristic = rf"Auction\s+{auction_id}\b:.*?bid=(\d+(?:\.\d+)?)\s+USDC"
-                for match in re.finditer(bid_pattern_heuristic, provider_log):
-                    bid_amount = int(round(float(match.group(1)) * 1e6))
-                    auction_data["bids_attempted"].append({
-                        "provider_id": provider_id,
-                        "amount": bid_amount
-                    })
-                
-                # Track bid failures (only for eligible providers)
-                auction_data["bid_failures"].extend(
-                    self._extract_bid_failures(provider_log, auction_id, provider_id)
-                )
-
-            # Fallback: every successful on-chain bid was attempted.
-            if not auction_data["bids_attempted"] and auction_data["bids_on_chain"]:
-                for bid in auction_data["bids_on_chain"]:
-                    auction_data["bids_attempted"].append({
-                        "provider_id": bid.get("agent_id"),
-                        "amount": bid.get("amount"),
-                        "inferred_from_on_chain": True
-                    })
+            if eligible_provider_ids:
+                auction_data["bids_attempted"] = [
+                    b for b in auction_data["bids_attempted"]
+                    if b.get("provider_id") in eligible_provider_ids
+                ]
+                auction_data["bid_failures"] = [
+                    b for b in auction_data["bid_failures"]
+                    if b.get("provider_id") in eligible_provider_ids
+                ]
 
             # De-duplicate attempts while preserving insertion order
             deduped_attempts = []
@@ -333,89 +322,21 @@ class MetricsCollector:
                 deduped_failures.append(failure)
             auction_data["bid_failures"] = deduped_failures
             
-            # 5. Collect execution data from winner's log and job directory
+            # 5. Collect execution data from runtime provider status snapshots
             if auction_data["winner_id"]:
-                winner_log = self._load_provider_log(auction_data["winner_id"])
-                if winner_log:
-                    # Extract auction-specific section to avoid cross-contamination
-                    winner_section = self._extract_provider_auction_section(winner_log, auction_id)
-                    if not winner_section:
-                        # Fallback to full log if section extraction fails
-                        winner_section = winner_log
-                    
-                    # Check for service execution markers (case-insensitive)
-                    if any(marker.lower() in winner_section.lower() for marker in [
-                        "result.json",
-                        "result saved",
-                        "literature review completed",
-                        "processing prompt"
-                    ]):
-                        auction_data["service_executed"] = True
-                    
-                    # Extract prompts answered by counting "Processing prompt:" occurrences
-                    prompt_count = winner_section.count("Processing prompt:")
-                    if prompt_count > 0:
-                        auction_data["prompts_answered"] = prompt_count
-                    
-                    # Set prompts_total to same as prompts_answered (actual execution count)
-                    # The service description in logs is often truncated, so use actual execution
-                    if prompt_count > 0:
-                        auction_data["prompts_total"] = prompt_count
-                    
-                    # Extract execution timing from log timestamps (within auction-specific section)
-                    execution_start_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Found \d+ PDF|Building vector database|Processing prompt)', winner_section)
-                    execution_end_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*(?:Result saved to|Literature review completed)', winner_section)
-                    
-                    if execution_start_match:
-                        auction_data["execution_start"] = execution_start_match.group(1)
-                    if execution_end_match:
-                        auction_data["execution_end"] = execution_end_match.group(1)
-                    
-                    # Calculate execution duration
-                    if auction_data["execution_start"] and auction_data["execution_end"]:
-                        try:
-                            from datetime import datetime
-                            start = datetime.strptime(auction_data["execution_start"], "%Y-%m-%d %H:%M:%S")
-                            end = datetime.strptime(auction_data["execution_end"], "%Y-%m-%d %H:%M:%S")
-                            auction_data["execution_duration_seconds"] = int((end - start).total_seconds())
-                        except:
-                            pass
-            
-            # 6. Collect evaluation data from consumer log
-            # Use consumer agent ID, not the address
-            consumer_id = self.metrics['agents']['consumer_id']
-            consumer_log = self._load_log_file(f"consumer_{consumer_id}.log")
-            if consumer_log:
-                # Extract auction-specific section to avoid reusing first auction's data
-                auction_section = self._extract_auction_section(consumer_log, auction_id)
-                search_log = auction_section if auction_section else consumer_log
-                
-                # Rating - look for overall_rating first, then fall back to other rating patterns
-                rating_match = re.search(r'"overall_rating":\s*(\d+)', search_log)
-                if not rating_match:
-                    rating_match = re.search(r'rating[=:]\s*(\d+).*?quality_scores', search_log, re.IGNORECASE | re.DOTALL)
-                if rating_match:
-                    auction_data["quality_rating"] = int(rating_match.group(1))
-                    auction_data["feedback_rating"] = auction_data["quality_rating"]
-                
-                # Evaluation method
-                if "fallback" in search_log.lower():
-                    auction_data["quality_method"] = "fallback"
-                elif "finalize_evaluation" in search_log or "quality_scores" in search_log:
-                    auction_data["quality_method"] = "tools"
-                    # Extract detailed scores if available
-                    scores_match = re.search(r"quality_scores.*?({[^}]+})", search_log)
-                    if scores_match:
-                        try:
-                            auction_data["quality_details"] = json.loads(scores_match.group(1).replace("'", '"'))
-                        except:
-                            pass
-                
-                # Feedback submission
-                if "Feedback submitted" in search_log or "submitFeedback" in search_log:
-                    auction_data["feedback_submitted"] = True
-            
-            # 7. Collect reputation data if winner exists and reputation contract provided
+                runtime_job = self._runtime_job_outcome(auction_data["winner_id"], auction_id)
+                if runtime_job:
+                    status = str(runtime_job.get("status", "")).lower()
+                    auction_data["service_executed"] = status in {"completed", "processing", "completing", "delivering"}
+                    auction_data["feedback_submitted"] = status == "completed"
+
+                    llm_cost = runtime_job.get("llm_cost")
+                    if llm_cost is not None:
+                        auction_data["quality_details"]["winner_llm_cost"] = llm_cost
+                    if runtime_job.get("error"):
+                        auction_data["errors"].append(f"provider_job_error: {runtime_job.get('error')}")
+
+            # 6. Collect reputation data if winner exists and reputation contract provided
             if auction_data["winner_id"] and reputation_contract:
                 try:
                     # Get current (after) reputation from blockchain using getSummary
@@ -428,16 +349,7 @@ class MetricsCollector:
                     ).call()
                     auction_data["reputation_after"] = int(average_score)
                     
-                    # Try to find initial reputation from winner's log
-                    winner_log = self._load_provider_log(auction_data["winner_id"])
-                    if winner_log:
-                        # Look for get_reputation tool response: {"rating": 50, "feedback_count": 0}
-                        # Use DOTALL flag to handle multiline logs
-                        rep_before_match = re.search(r'get_reputation.*?"rating":\s*(\d+)', winner_log, re.IGNORECASE | re.DOTALL)
-                        if rep_before_match:
-                            auction_data["reputation_before"] = int(rep_before_match.group(1))
-                    
-                    # If not found in logs, calculate from reputation change
+                    # Infer pre-feedback reputation directly from feedback rating and final score.
                     # Reputation after = Before + (rating - 50), so Before = After - (rating - 50)
                     if auction_data["reputation_before"] is None and auction_data["feedback_rating"]:
                         expected_change = auction_data["feedback_rating"] - 50
@@ -452,7 +364,7 @@ class MetricsCollector:
             # 8. Calculate timing metrics from raw timestamps
             self._calculate_auction_timing(auction_data)
             
-            # 9. Determine status based on blockchain state and logs
+            # 8. Determine status based on blockchain state and runtime signals
             if is_completed:
                 # Contract marks auction as completed (service delivered and feedback received)
                 auction_data["status"] = "completed"
@@ -460,8 +372,8 @@ class MetricsCollector:
                 # Feedback was submitted, so auction completed successfully
                 auction_data["status"] = "completed"
             elif not is_active and auction_data["winner_id"] and auction_data["service_executed"]:
-                # Auction ended, has winner, service executed - check for feedback
-                auction_data["status"] = "completed" if auction_data["feedback_submitted"] else "incomplete"
+                # Auction ended, has winner, service executed; await completion/feedback finalization
+                auction_data["status"] = "incomplete"
             elif not is_active and auction_data["winner_id"]:
                 # Auction ended with winner but service not executed yet
                 auction_data["status"] = "incomplete"
@@ -537,45 +449,6 @@ class MetricsCollector:
                 )
         except Exception as e:
             logger.warning(f"Error calculating timing metrics: {e}")
-    
-    def _extract_error_code(self, text: str) -> Optional[str]:
-        """Extract error code from error message."""
-        match = re.search(r"0x[0-9a-fA-F]+", text)
-        return match.group(0) if match else None
-
-    def _extract_bid_failures(self, provider_log: str, auction_id: int, provider_id: int) -> List[Dict[str, Any]]:
-        """Extract structured bid failures for one provider/auction from log lines."""
-        failures: List[Dict[str, Any]] = []
-        lines = provider_log.splitlines()
-
-        error_pattern = re.compile(rf"Error placing bid on auction\s+{auction_id}\b", re.IGNORECASE)
-        ts_pattern = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3})")
-        bid_pattern = re.compile(rf"Auction\s+{auction_id}\b:.*?bid=(\d+(?:\.\d+)?)\s+USDC", re.IGNORECASE)
-
-        for i, line in enumerate(lines):
-            if not error_pattern.search(line):
-                continue
-
-            error_code = self._extract_error_code(line)
-            ts_match = ts_pattern.search(line)
-            timestamp = ts_match.group(1) if ts_match else None
-
-            bid_amount = None
-            for j in range(max(0, i - 3), i):
-                bid_match = bid_pattern.search(lines[j])
-                if bid_match:
-                    bid_amount = int(round(float(bid_match.group(1)) * 1e6))
-                    break
-
-            failures.append({
-                "provider_id": provider_id,
-                "timestamp": timestamp,
-                "amount": bid_amount,
-                "reason": "bid_rejected",
-                "error_code": error_code
-            })
-
-        return failures
     
     def _validate_auction_data(self, auction_data: Dict[str, Any]):
         """
@@ -679,35 +552,8 @@ class MetricsCollector:
             )
             auction_data["errors"].append(f"Negative total cycle time: {total_cycle}s")
 
-    def _count_transactions_from_logs(self):
-        """Count blockchain transactions from all log files."""
-        try:
-            tx_count = 0
-            
-            # Check consumer log
-            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
-            if consumer_log:
-                # Match both formats: with and without 0x prefix
-                tx_count += len(re.findall(r'Sent transaction: (?:0x)?[0-9a-fA-F]{64}', consumer_log))
-            
-            # Check all provider logs
-            for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_provider_log(provider_id)
-                if provider_log:
-                    tx_count += len(re.findall(r'Sent transaction: (?:0x)?[0-9a-fA-F]{64}', provider_log))
-            
-            self.metrics["blockchain"]["total_transactions"] = tx_count
-            logger.debug(f"Counted {tx_count} blockchain transactions from logs")
-        except Exception as e:
-            logger.warning(f"Error counting transactions: {e}")
-
     def collect_system_completeness(self) -> Dict[str, Any]:
-        """
-        Determine which phases completed successfully.
-        
-        Returns:
-            Dictionary with boolean flags for each system phase
-        """
+        """Build system completeness from runtime snapshots + auction outcomes."""
         completeness = {
             "auction_created": False,
             "bids_received": 0,
@@ -719,32 +565,32 @@ class MetricsCollector:
         }
         
         try:
-            # Check consumer status
-            consumer_status = self._load_json(self.logs_dir / f"consumer_{self.metrics['agents']['consumer_id']}_status.json")
-            if consumer_status:
-                completeness["auction_created"] = consumer_status.get("completed_auctions", 0) >= 1
-                completeness["feedback_submitted"] = consumer_status.get("completed_auctions", 0) >= 1
-            
-            # Parse consumer log for auction and evaluation details
-            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
-            if consumer_log:
-                completeness["auction_created"] = "Auction created" in consumer_log or "✅ Auction" in consumer_log
-                completeness["service_evaluated"] = "Evaluation complete" in consumer_log or "rating=" in consumer_log
-                completeness["feedback_submitted"] = "Feedback submitted" in consumer_log or "✅ Feedback submitted" in consumer_log
-            
-            # Count bids from provider logs
-            for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_provider_log(provider_id)
-                if provider_log and ("Bid submitted" in provider_log or "✅ Bid placed" in provider_log):
-                    completeness["bids_received"] += 1
-                
-                # Check if this provider won and executed
-                if provider_log and ("Won auction" in provider_log or "✅ Won auction" in provider_log):
-                    completeness["winner_selected"] = True
-                if provider_log and ("Service completed" in provider_log or "✅ Service completed" in provider_log):
-                    completeness["service_executed"] = True
-            
-            # Reputation update requires blockchain query (set by caller)
+            auctions = self.metrics.get("auctions", [])
+            consumer_snaps = self.metrics.get("runtime", {}).get("consumer_status_snapshots", [])
+            provider_snaps = self.metrics.get("runtime", {}).get("provider_status_snapshots", [])
+
+            completed_auctions = [a for a in auctions if str(a.get("status", "")).lower() == "completed"]
+            completeness["auction_created"] = len(auctions) > 0 or len(consumer_snaps) > 0
+            completeness["bids_received"] = sum(len(a.get("bids_on_chain", [])) for a in auctions)
+            completeness["winner_selected"] = any((a.get("winner_id") or 0) > 0 for a in auctions)
+            completeness["service_executed"] = any(bool(a.get("service_executed")) for a in auctions)
+            completeness["service_evaluated"] = len(completed_auctions) > 0
+            completeness["feedback_submitted"] = len(completed_auctions) > 0
+
+            # Reputation updated if final snapshot exists or at least one completed auction exists.
+            final_reputation = [
+                s for s in self.metrics.get("reputation_evolution", [])
+                if str(s.get("after_auction")) == "final"
+            ]
+            completeness["reputation_updated"] = bool(final_reputation) or len(completed_auctions) > 0
+
+            # If provider snapshots indicate completed jobs, keep execution true even when auction extraction lags.
+            if not completeness["service_executed"]:
+                for snap in provider_snaps:
+                    jobs = (snap.get("status") or {}).get("jobs") or {}
+                    if jobs.get("completed"):
+                        completeness["service_executed"] = True
+                        break
             
         except Exception as e:
             logger.error(f"Error collecting system completeness: {e}")
@@ -753,12 +599,7 @@ class MetricsCollector:
         return completeness
     
     def collect_auction_details(self) -> Dict[str, Any]:
-        """
-        Extract auction details from logs and status files.
-        
-        Returns:
-            Dictionary with auction ID, bids, winner, amounts, etc.
-        """
+        """Build a compact single-auction detail summary from collected auction data."""
         details = {
             "auction_id": None,
             "service_cid": None,
@@ -771,57 +612,25 @@ class MetricsCollector:
         }
         
         try:
-            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
-            
-            # Extract auction ID and service CID
-            if consumer_log:
-                auction_match = re.search(r"auction.*ID[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-                if auction_match:
-                    details["auction_id"] = int(auction_match.group(1))
-                
-                cid_match = re.search(r"Service CID:\s*(Qm[a-zA-Z0-9]+)", consumer_log)
-                if cid_match:
-                    details["service_cid"] = cid_match.group(1)
-                
-                budget_match = re.search(r"budget[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-                if budget_match:
-                    details["budget"] = int(budget_match.group(1))
-                
-                duration_match = re.search(r"duration[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-                if duration_match:
-                    details["duration"] = int(duration_match.group(1))
-                
-                winner_match = re.search(r"winner[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-                if winner_match:
-                    details["winner_id"] = int(winner_match.group(1))
-            
-            # Collect bids from provider logs
-            for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_provider_log(provider_id)
-                if provider_log:
-                    bid_match = re.search(r"(?:Bid|bid)[=:]?\s*(\d+)", provider_log)
-                    if bid_match:
-                        bid_amount = int(bid_match.group(1))
-                        details["bids"].append({
-                            "agent_id": provider_id,
-                            "amount": bid_amount
-                        })
-            
-            # Calculate winning bid and spread
-            if details["bids"]:
-                bid_amounts = [b["amount"] for b in details["bids"]]
-                details["winning_bid"] = min(bid_amounts)
-                if len(bid_amounts) > 1:
-                    max_bid = max(bid_amounts)
-                    min_bid = min(bid_amounts)
-                    if max_bid > 0:
-                        details["bid_spread_percent"] = round(((max_bid - min_bid) / max_bid) * 100, 2)
-                
-                # Set winner_id from bids if not already set
-                if not details["winner_id"]:
-                    winning_bid_entry = next((b for b in details["bids"] if b["amount"] == details["winning_bid"]), None)
-                    if winning_bid_entry:
-                        details["winner_id"] = winning_bid_entry["agent_id"]
+            auctions = self.metrics.get("auctions", [])
+            if auctions:
+                latest = sorted(auctions, key=lambda a: int(a.get("auction_id", 0)))[-1]
+                details["auction_id"] = latest.get("auction_id")
+                details["service_cid"] = latest.get("service_cid")
+                details["budget"] = latest.get("budget")
+                details["duration"] = latest.get("duration")
+                details["winner_id"] = latest.get("winner_id")
+                details["winning_bid"] = latest.get("winning_bid_amount")
+
+                bids = latest.get("bids_on_chain", [])
+                details["bids"] = [
+                    {"agent_id": b.get("agent_id"), "amount": b.get("amount")}
+                    for b in bids
+                ]
+                if details["bids"]:
+                    bid_amounts = [float(b.get("amount") or 0.0) for b in details["bids"]]
+                    if len(bid_amounts) > 1 and max(bid_amounts) > 0:
+                        details["bid_spread_percent"] = round(((max(bid_amounts) - min(bid_amounts)) / max(bid_amounts)) * 100, 2)
             
         except Exception as e:
             logger.error(f"Error collecting auction details: {e}")
@@ -830,12 +639,7 @@ class MetricsCollector:
         return details
     
     def collect_service_quality(self) -> Dict[str, Any]:
-        """
-        Extract service quality metrics from consumer evaluation.
-        
-        Returns:
-            Dictionary with rating, scores, evaluation method, etc.
-        """
+        """Aggregate service quality from auction records (runtime+chain derived)."""
         quality = {
             "rating": None,
             "quality_scores": {},
@@ -847,44 +651,20 @@ class MetricsCollector:
         }
         
         try:
-            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
-            
-            if consumer_log:
-                # Extract rating
-                rating_match = re.search(r"rating[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-                if rating_match:
-                    quality["rating"] = int(rating_match.group(1))
-                
-                # Check if fallback was used
-                if "fallback" in consumer_log.lower():
-                    quality["evaluation_method"] = "fallback"
-                    quality["quality_scores"] = {"fallback": quality["rating"] or 75}
-                elif "finalize_evaluation" in consumer_log or "quality_scores" in consumer_log:
-                    quality["evaluation_method"] = "tools"
-                    # Try to extract structured scores
-                    scores_match = re.search(r"quality_scores[=:]?\s*({[^}]+})", consumer_log)
-                    if scores_match:
-                        try:
-                            quality["quality_scores"] = json.loads(scores_match.group(1).replace("'", '"'))
-                        except:
-                            pass
-                
-                # Count prompts
-                prompt_matches = re.findall(r"prompt[s]?[=:]?", consumer_log, re.IGNORECASE)
-                quality["prompts_total"] = len(prompt_matches) if prompt_matches else 5  # Default from config
-                
-                response_matches = re.findall(r"response[s]?[=:]?", consumer_log, re.IGNORECASE)
-                quality["prompts_answered"] = len(response_matches) if response_matches else quality["prompts_total"]
-            
-            # Get execution time from winner's log
-            winner_id = self.metrics.get("auction_details", {}).get("winner_id")
-            if winner_id:
-                winner_log = self._load_provider_log(winner_id)
-                if winner_log:
-                    # Look for service completion timing
-                    time_match = re.search(r"(?:execution|service).*?(\d+)\s*(?:seconds|s)", winner_log, re.IGNORECASE)
-                    if time_match:
-                        quality["execution_time_seconds"] = int(time_match.group(1))
+            auctions = self.metrics.get("auctions", [])
+            completed = [a for a in auctions if str(a.get("status", "")).lower() == "completed"]
+            if completed:
+                ratings = [a.get("quality_rating") for a in completed if a.get("quality_rating") is not None]
+                if ratings:
+                    quality["rating"] = int(round(sum(float(r) for r in ratings) / len(ratings)))
+
+                quality["evaluation_method"] = "runtime"
+                quality["prompts_total"] = int(sum(int(a.get("prompts_total", 0) or 0) for a in completed))
+                quality["prompts_answered"] = int(sum(int(a.get("prompts_answered", 0) or 0) for a in completed))
+
+                exec_times = [int(a.get("execution_duration_seconds", 0) or 0) for a in completed if int(a.get("execution_duration_seconds", 0) or 0) > 0]
+                if exec_times:
+                    quality["execution_time_seconds"] = int(sum(exec_times) / len(exec_times))
             
         except Exception as e:
             logger.error(f"Error collecting service quality: {e}")
@@ -917,18 +697,39 @@ class MetricsCollector:
             winner_reputation = reputation_contract.functions.getReputation(winner_id).call()
             reputation["winner_after"] = winner_reputation
             
-            # Try to find initial reputation from logs or assume default
-            winner_log = self._load_provider_log(winner_id)
-            if winner_log:
-                initial_match = re.search(r"(?:initial|starting).*reputation[=:]?\s*(\d+)", winner_log, re.IGNORECASE)
-                if initial_match:
-                    reputation["winner_before"] = int(initial_match.group(1))
-            
-            # If not found, assume default starting reputation (typically 50 for ERC-8004)
+            # Infer initial reputation from first runtime reputation snapshot when available.
+            for snap in self.metrics.get("reputation_evolution", []):
+                reps = snap.get("reputations") if isinstance(snap, dict) else None
+                if not isinstance(reps, dict):
+                    continue
+                p = reps.get(str(winner_id))
+                if not isinstance(p, dict):
+                    continue
+                score = p.get("score")
+                if score is not None:
+                    reputation["winner_before"] = int(score)
+                    break
+
+            # Final fallback from blockchain summary only when there is no feedback yet.
             if reputation["winner_before"] is None:
-                reputation["winner_before"] = 50  # Default assumption
+                try:
+                    feedback_count, average_score = reputation_contract.functions.getSummary(
+                        winner_id,
+                        [],
+                        bytes(32),
+                        bytes(32)
+                    ).call()
+                    if int(feedback_count) == 0:
+                        reputation["winner_before"] = int(average_score)
+                except Exception:
+                    pass
             
-            reputation["reputation_change"] = reputation["winner_after"] - reputation["winner_before"]
+            if reputation["winner_before"] is None:
+                logger.warning(
+                    f"Could not infer initial reputation for winner {winner_id}; leaving winner_before as null"
+                )
+            else:
+                reputation["reputation_change"] = reputation["winner_after"] - reputation["winner_before"]
             
         except Exception as e:
             logger.error(f"Error collecting reputation: {e}")
@@ -937,15 +738,7 @@ class MetricsCollector:
         return reputation
     
     def collect_timing(self, phase_timings: Dict[str, float]) -> Dict[str, Any]:
-        """
-        Calculate timing metrics from experiment phases.
-        
-        Args:
-            phase_timings: Dictionary of phase names to durations in seconds
-            
-        Returns:
-            Dictionary with all timing breakdowns
-        """
+        """Calculate timing metrics from runtime phases and auction records."""
         timing = {
             "phase_durations": phase_timings,
             "total_cycle_time": sum(phase_timings.values()),
@@ -957,20 +750,13 @@ class MetricsCollector:
         }
         
         try:
-            # Extract specific timings from logs
-            consumer_log = self._load_log_file(f"consumer_{self.metrics['agents']['consumer_id']}.log")
-            
-            if consumer_log:
-                # Parse timestamps to calculate durations
-                timestamps = re.findall(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", consumer_log)
-                
-                # Get auction duration from config or log
-                duration_match = re.search(r"duration[=:]?\s*(\d+)", consumer_log)
-                if duration_match:
-                    timing["auction_duration"] = int(duration_match.group(1))
-            
-            # Execution time from service quality
-            timing["execution_time"] = self.metrics.get("service_quality", {}).get("execution_time_seconds", 0)
+            auctions = self.metrics.get("auctions", [])
+            if auctions:
+                timing["auction_duration"] = int(sum(int(a.get("duration", 0) or 0) for a in auctions) / max(1, len(auctions)))
+                exec_times = [int(a.get("execution_duration_seconds", 0) or 0) for a in auctions if int(a.get("execution_duration_seconds", 0) or 0) > 0]
+                eval_times = [int(a.get("evaluation_duration_seconds", 0) or 0) for a in auctions if int(a.get("evaluation_duration_seconds", 0) or 0) > 0]
+                timing["execution_time"] = int(sum(exec_times) / len(exec_times)) if exec_times else 0
+                timing["evaluation_time"] = int(sum(eval_times) / len(eval_times)) if eval_times else 0
             
         except Exception as e:
             logger.error(f"Error collecting timing: {e}")
@@ -1032,12 +818,7 @@ class MetricsCollector:
         return blockchain
     
     def collect_errors(self) -> Dict[str, Any]:
-        """
-        Parse all log files for errors and warnings, focusing on critical issues.
-        
-        Returns:
-            Dictionary with error counts and critical issues
-        """
+        """Collect errors from runtime snapshots and auction-level collection issues."""
         errors = {
             "total_errors": 0,
             "total_warnings": 0,
@@ -1046,39 +827,44 @@ class MetricsCollector:
         }
         
         try:
-            # Scan all log files
-            for log_file in self.logs_dir.glob("*.log"):
-                content = log_file.read_text()
-                
-                # Count errors and warnings
-                error_lines = [line for line in content.split('\n') if ' ERROR ' in line]
-                warning_lines = [line for line in content.split('\n') if ' WARNING ' in line or ' WARN ' in line]
-                
-                errors["total_errors"] += len(error_lines)
-                errors["total_warnings"] += len(warning_lines)
-                
-                # Identify critical issues (not just failed bids)
-                for line in error_lines:
-                    # Skip bid failures (already tracked in auction data)
-                    if "Error placing bid" in line:
-                        continue
-                    
-                    # Track critical errors only
-                    if any(keyword in line.lower() for keyword in [
-                        "failed to connect",
-                        "connection refused", 
-                        "timeout",
-                        "contract not found",
-                        "deployment failed",
-                        "transaction reverted",
-                        "insufficient funds",
-                        "failed to fetch"
-                    ]):
-                        errors["critical_issues"].append({
-                            "file": log_file.name,
-                            "message": line.strip()[:300],
-                            "category": self._categorize_error(line)
-                        })
+            # Auction collection/runtime errors
+            for auction in self.metrics.get("auctions", []):
+                for issue in auction.get("errors", []) or []:
+                    errors["total_errors"] += 1
+                    errors["critical_issues"].append({
+                        "source": "auction",
+                        "auction_id": auction.get("auction_id"),
+                        "message": str(issue)[:300],
+                        "category": self._categorize_error(str(issue))
+                    })
+
+            # Runtime provider snapshot failures
+            for snap in self.metrics.get("runtime", {}).get("provider_status_snapshots", []):
+                provider_id = snap.get("provider_id")
+                status = snap.get("status") or {}
+                bidding = status.get("bidding") if isinstance(status, dict) else {}
+                failures = bidding.get("recent_failures") if isinstance(bidding, dict) else []
+                for failure in failures or []:
+                    errors["total_errors"] += 1
+                    errors["bid_failures"].append({
+                        "provider_id": provider_id,
+                        "auction_id": failure.get("auction_id"),
+                        "amount": failure.get("bid_amount"),
+                        "error_code": failure.get("error_code"),
+                        "reason": failure.get("error"),
+                        "timestamp": failure.get("timestamp"),
+                        "source": "runtime_status"
+                    })
+
+                status_error = status.get("last_error") if isinstance(status, dict) else None
+                if status_error:
+                    errors["total_errors"] += 1
+                    errors["critical_issues"].append({
+                        "source": "provider_status",
+                        "provider_id": provider_id,
+                        "message": str(status_error)[:300],
+                        "category": self._categorize_error(str(status_error))
+                    })
             
         except Exception as e:
             logger.error(f"Error collecting errors: {e}")
@@ -1093,7 +879,7 @@ class MetricsCollector:
         Returns:
             True if all critical phases completed successfully
         """
-        completeness = self.metrics.get("system_completeness", {})
+        completeness = self.collect_system_completeness()
         
         success = (
             completeness.get("auction_created", False) and
@@ -1123,7 +909,8 @@ class MetricsCollector:
             Path to saved metrics file
         """
         self.calculate_duration()
-        self._count_transactions_from_logs()
+        self._derive_blockchain_totals_from_auctions()
+        # Build provider financials from runtime snapshots collected during experiment.
         self.collect_provider_financials()
         
         metrics_file = self.metrics_dir / "experiment_metrics.json"
@@ -1145,79 +932,235 @@ class MetricsCollector:
             logger.warning(f"Failed to load {file_path}: {e}")
         return None
     
-    def _load_log_file(self, filename: str) -> Optional[str]:
-        """Load log file content."""
-        log_path = self.logs_dir / filename
-        try:
-            if log_path.exists():
-                return log_path.read_text()
-        except Exception as e:
-            logger.warning(f"Failed to load log {filename}: {e}")
-        return None
+    def record_consumer_status_snapshot(self, timestamp: str, status: Dict[str, Any], source: str = "runtime_status"):
+        """Append consumer runtime status snapshot with lightweight deduplication."""
+        snapshots = self.metrics.setdefault("runtime", {}).setdefault("consumer_status_snapshots", [])
+        payload = {
+            "timestamp": timestamp,
+            "status": status,
+            "source": source,
+        }
+        if snapshots and snapshots[-1].get("status") == payload["status"]:
+            return
+        snapshots.append(payload)
 
-    def _load_provider_log(self, provider_id: int) -> Optional[str]:
-        """Load provider log content with current and legacy filename support."""
-        content = self._load_log_file(f"provider_agent_{provider_id}.log")
-        if content:
-            return content
-        return self._load_log_file(f"provider_{provider_id}.log")
-
-    def collect_provider_financials(self) -> Dict[str, Any]:
-        """Collect provider balance data (revenue/costs/net) and evolution from logs."""
-        financials = {
-            "by_provider": {},
-            "evolution": []
+    def record_provider_status_snapshot(self, provider_id: int, timestamp: str, status: Dict[str, Any], source: str = "runtime_status"):
+        """Append provider runtime status snapshot with lightweight deduplication."""
+        snapshots = self.metrics.setdefault("runtime", {}).setdefault("provider_status_snapshots", [])
+        payload = {
+            "timestamp": timestamp,
+            "provider_id": int(provider_id),
+            "status": status,
+            "source": source,
         }
 
-        summary_pattern = re.compile(
-            r"Revenue:\s*\$\s*([-\d\.]+)\s*USD.*?"
-            r"LLM Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
-            r"Gas Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
-            r"Total Costs:\s*\$\s*([-\d\.]+)\s*USD.*?"
-            r"NET BALANCE:\s*\$\s*([-\d\.]+)\s*USD",
-            re.DOTALL
-        )
-        ts_pattern = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+        for prev in reversed(snapshots):
+            if int(prev.get("provider_id", -1)) != int(provider_id):
+                continue
+            if prev.get("status") == payload["status"]:
+                return
+            break
 
-        for provider_id in self.metrics.get("agents", {}).get("provider_ids", []):
-            provider_log = self._load_provider_log(provider_id)
-            if not provider_log:
+        snapshots.append(payload)
+
+    def _runtime_bid_failures_for_auction(self, auction_id: int) -> List[Dict[str, Any]]:
+        """Collect per-auction bid failures from provider runtime snapshots."""
+        out: List[Dict[str, Any]] = []
+        snapshots = self.metrics.get("runtime", {}).get("provider_status_snapshots", [])
+        for snap in snapshots:
+            provider_id = snap.get("provider_id")
+            status = snap.get("status") or {}
+            bidding = status.get("bidding") if isinstance(status, dict) else {}
+            failures = bidding.get("recent_failures") if isinstance(bidding, dict) else []
+            for failure in failures or []:
+                try:
+                    if int(failure.get("auction_id", -1)) != int(auction_id):
+                        continue
+                except Exception:
+                    continue
+                out.append(
+                    {
+                        "provider_id": int(provider_id),
+                        "timestamp": failure.get("timestamp"),
+                        "amount": failure.get("bid_amount"),
+                        "reason": failure.get("error") or "bid_rejected",
+                        "error_code": failure.get("error_code"),
+                        "source": "runtime_status",
+                    }
+                )
+
+        # De-duplicate repeated failures from periodic status polling.
+        unique: List[Dict[str, Any]] = []
+        seen = set()
+        for row in out:
+            key = (row.get("provider_id"), row.get("timestamp"), row.get("amount"), row.get("error_code"))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(row)
+        return unique
+
+    def _runtime_job_outcome(self, provider_id: int, auction_id: int) -> Optional[Dict[str, Any]]:
+        """Get latest runtime job status for a provider/auction from status snapshots."""
+        snapshots = [
+            s for s in self.metrics.get("runtime", {}).get("provider_status_snapshots", [])
+            if int(s.get("provider_id", -1)) == int(provider_id)
+        ]
+        for snap in reversed(snapshots):
+            status = snap.get("status") or {}
+            jobs = status.get("jobs") if isinstance(status, dict) else {}
+            if not isinstance(jobs, dict):
+                continue
+            for bucket in ("active", "completed"):
+                for job in jobs.get(bucket, []) or []:
+                    try:
+                        if int(job.get("auction_id", -1)) == int(auction_id):
+                            return job
+                    except Exception:
+                        continue
+        return None
+
+    def _derive_blockchain_totals_from_auctions(self):
+        """Derive conservative blockchain transaction counters from collected auctions."""
+        auctions = self.metrics.get("auctions", [])
+        total_bids = sum(len(a.get("bids_on_chain", [])) for a in auctions)
+        completed = sum(1 for a in auctions if str(a.get("status", "")).lower() == "completed")
+
+        # Conservative minimum on-chain tx estimate known from auction records:
+        # successful bids + service completion tx for completed auctions.
+        self.metrics["blockchain"]["total_transactions"] = int(total_bids + completed)
+
+    def _auction_revenue_by_provider(self) -> Dict[int, float]:
+        """Compute ground-truth provider revenue (USD) from completed auctions and winners."""
+        revenue: Dict[int, float] = {}
+        for auction in self.metrics.get("auctions", []):
+            if str(auction.get("status", "")).lower() != "completed":
+                continue
+            winner = auction.get("winner_id")
+            if winner in (None, 0):
+                continue
+            try:
+                winner_id = int(winner)
+            except Exception:
+                continue
+            winning_bid = auction.get("winning_bid_amount", 0)
+            try:
+                winning_bid_usd = float(winning_bid) / 1e6
+            except Exception:
+                winning_bid_usd = 0.0
+            revenue[winner_id] = revenue.get(winner_id, 0.0) + max(0.0, winning_bid_usd)
+        return revenue
+
+    def record_provider_financial_snapshot(
+        self,
+        provider_id: int,
+        timestamp: str,
+        revenue: float,
+        llm_costs: float,
+        gas_costs: float,
+        total_costs: float,
+        net_balance: float,
+        source: str = "runtime_status",
+    ):
+        """Append a runtime provider financial snapshot (deduplicated, monotonic-safe)."""
+        runtime_snapshots = self.metrics.setdefault("provider_financials", {}).setdefault("runtime_snapshots", [])
+
+        snapshot = {
+            "timestamp": timestamp,
+            "provider_id": int(provider_id),
+            "revenue": float(revenue),
+            "llm_costs": float(llm_costs),
+            "gas_costs": float(gas_costs),
+            "total_costs": float(total_costs),
+            "net_balance": float(net_balance),
+            "source": source,
+        }
+
+        # Skip exact duplicates for same provider to keep evolution compact.
+        for prev in reversed(runtime_snapshots):
+            if int(prev.get("provider_id", -1)) != int(provider_id):
+                continue
+            if (
+                abs(float(prev.get("revenue", 0.0)) - snapshot["revenue"]) < 1e-9
+                and abs(float(prev.get("llm_costs", 0.0)) - snapshot["llm_costs"]) < 1e-9
+                and abs(float(prev.get("gas_costs", 0.0)) - snapshot["gas_costs"]) < 1e-9
+                and abs(float(prev.get("total_costs", 0.0)) - snapshot["total_costs"]) < 1e-9
+                and abs(float(prev.get("net_balance", 0.0)) - snapshot["net_balance"]) < 1e-9
+            ):
+                return
+            break
+
+        runtime_snapshots.append(snapshot)
+
+    def collect_provider_financials(self) -> Dict[str, Any]:
+        """Finalize provider balance data from runtime snapshots with auction reconciliation."""
+        runtime_snapshots = self.metrics.get("provider_financials", {}).get("runtime_snapshots", [])
+
+        financials = {
+            "by_provider": {},
+            "evolution": list(runtime_snapshots),
+            "runtime_snapshots": list(runtime_snapshots),
+        }
+
+        auction_revenue = self._auction_revenue_by_provider()
+
+        provider_ids = self.metrics.get("agents", {}).get("provider_ids", [])
+        provider_ids = [int(pid) for pid in provider_ids] if provider_ids else []
+
+        # Backfill providers from runtime snapshots if IDs are unavailable.
+        if not provider_ids:
+            provider_ids = sorted(
+                {
+                    int(row.get("provider_id"))
+                    for row in financials["evolution"]
+                    if row.get("provider_id") is not None
+                }
+            )
+
+        for provider_id in provider_ids:
+            snapshots = [
+                row for row in financials["evolution"]
+                if int(row.get("provider_id", -1)) == int(provider_id)
+            ]
+            if not snapshots:
                 continue
 
-            matches = list(summary_pattern.finditer(provider_log))
-            if not matches:
-                continue
+            last = snapshots[-1]
+            revenue_from_auctions = float(auction_revenue.get(provider_id, 0.0))
+            revenue_from_runtime = float(last.get("revenue", 0.0))
+            revenue_discrepancy = revenue_from_runtime - revenue_from_auctions
 
-            for m in matches:
-                before = provider_log[max(0, m.start() - 250):m.start()]
-                ts = ts_pattern.findall(before)
-                timestamp = ts[-1] if ts else None
+            # Revenue from completed auctions is authoritative for experiment outcomes.
+            reconciled_revenue = revenue_from_auctions
+            reconciled_net_balance = reconciled_revenue - float(last.get("total_costs", 0.0))
 
-                revenue = float(m.group(1))
-                llm_costs = float(m.group(2))
-                gas_costs = float(m.group(3))
-                total_costs = float(m.group(4))
-                net_balance = float(m.group(5))
+            if abs(revenue_discrepancy) > 1e-6:
+                logger.warning(
+                    "Provider %s revenue mismatch: runtime=%.6f, auctions=%.6f (diff=%.6f). Using auction-derived revenue.",
+                    provider_id,
+                    revenue_from_runtime,
+                    revenue_from_auctions,
+                    revenue_discrepancy,
+                )
 
-                financials["evolution"].append({
-                    "timestamp": timestamp,
-                    "provider_id": provider_id,
-                    "revenue": revenue,
-                    "llm_costs": llm_costs,
-                    "gas_costs": gas_costs,
-                    "total_costs": total_costs,
-                    "net_balance": net_balance
-                })
-
-            last = matches[-1]
             financials["by_provider"][provider_id] = {
-                "revenue": float(last.group(1)),
-                "llm_costs": float(last.group(2)),
-                "gas_costs": float(last.group(3)),
-                "total_costs": float(last.group(4)),
-                "net_balance": float(last.group(5)),
-                "snapshots": len(matches)
+                "revenue": reconciled_revenue,
+                "revenue_from_auctions": revenue_from_auctions,
+                "revenue_from_runtime": revenue_from_runtime,
+                "revenue_discrepancy": revenue_discrepancy,
+                "llm_costs": float(last.get("llm_costs", 0.0)),
+                "gas_costs": float(last.get("gas_costs", 0.0)),
+                "total_costs": float(last.get("total_costs", 0.0)),
+                "net_balance": reconciled_net_balance,
+                "net_balance_from_runtime": float(last.get("net_balance", 0.0)),
+                "snapshots": len(snapshots)
             }
+
+        if not financials["evolution"]:
+            logger.warning(
+                "No provider runtime financial snapshots found. "
+                "Ensure experiment runner is collecting provider status financials during execution."
+            )
 
         self.metrics["provider_financials"] = financials
         return financials
@@ -1260,413 +1203,3 @@ class MetricsCollector:
         else:
             return "other"
     
-    # ========================================================================
-    # Multi-Auction Experiment Methods (E2-E6)
-    # ========================================================================
-    
-    def collect_multiple_auctions(self, auction_count: int) -> List[Dict[str, Any]]:
-        """
-        Collect metrics for multiple auctions (E2+).
-        
-        Args:
-            auction_count: Expected number of auctions
-            
-        Returns:
-            List of auction dictionaries with detailed metrics
-        """
-        auctions = []
-        
-        try:
-            consumer_id = self.metrics['agents']['consumer_id']
-            consumer_log = self._load_log_file(f"consumer_{consumer_id}.log")
-            
-            if not consumer_log:
-                logger.warning("Could not load consumer log for multi-auction analysis")
-                return auctions
-            
-            # Parse all auction IDs
-            auction_ids = re.findall(r"auction.*ID[=:]?\s*(\d+)", consumer_log, re.IGNORECASE)
-            unique_auction_ids = sorted(set(int(aid) for aid in auction_ids))
-            
-            logger.info(f"Found {len(unique_auction_ids)} auctions: {unique_auction_ids}")
-            
-            for auction_id in unique_auction_ids:
-                auction_data = self._collect_single_auction_metrics(auction_id, consumer_log)
-                auctions.append(auction_data)
-            
-        except Exception as e:
-            logger.error(f"Error collecting multiple auctions: {e}")
-        
-        self.metrics["auctions"] = auctions
-        return auctions
-    
-    def _collect_single_auction_metrics(self, auction_id: int, consumer_log: str) -> Dict[str, Any]:
-        """
-        Collect metrics for a single auction.
-        
-        Args:
-            auction_id: Auction ID to analyze
-            consumer_log: Consumer's full log content
-            
-        Returns:
-            Dictionary with auction metrics
-        """
-        auction = {
-            "auction_id": auction_id,
-            "service_cid": None,
-            "budget": None,
-            "bids": [],
-            "winner_id": None,
-            "winning_bid": None,
-            "rating": None,
-            "reputation_change": None,
-            "timestamps": {}
-        }
-        
-        try:
-            # Extract auction-specific logs (look for lines near this auction ID)
-            auction_section = self._extract_auction_section(consumer_log, auction_id)
-            
-            # Parse bids for this auction
-            for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_provider_log(provider_id)
-                if provider_log:
-                    # Find bid for this specific auction
-                    # CRITICAL: Use word boundary after auction_id
-                    bid_pattern = rf"auction\s*{auction_id}\b.*bid[=:]?\s*(\d+)"
-                    bid_match = re.search(bid_pattern, provider_log, re.IGNORECASE)
-                    if bid_match:
-                        auction["bids"].append({
-                            "agent_id": provider_id,
-                            "amount": int(bid_match.group(1))
-                        })
-            
-            # Determine winner
-            if auction["bids"]:
-                auction["winning_bid"] = min(b["amount"] for b in auction["bids"])
-                winner = next((b for b in auction["bids"] if b["amount"] == auction["winning_bid"]), None)
-                if winner:
-                    auction["winner_id"] = winner["agent_id"]
-            
-            # Extract rating for this auction
-            # CRITICAL: Use word boundary after auction_id
-            rating_pattern = rf"auction\s*{auction_id}\b.*rating[=:]?\s*(\d+)"
-            rating_match = re.search(rating_pattern, auction_section or consumer_log, re.IGNORECASE)
-            if rating_match:
-                auction["rating"] = int(rating_match.group(1))
-            
-        except Exception as e:
-            logger.warning(f"Error collecting metrics for auction {auction_id}: {e}")
-        
-        return auction
-    
-    def _extract_auction_section(self, log: str, auction_id: int) -> Optional[str]:
-        """Extract log section relevant to specific auction."""
-        lines = log.split('\n')
-        relevant_lines = []
-        start_idx = None
-        end_idx = None
-        
-        # Use regex patterns with word boundaries to avoid partial matches
-        import re
-        eval_pattern = re.compile(rf"Evaluating result for auction {auction_id}\b")
-        created_pattern = re.compile(rf"(?:Auction|Created auction) {auction_id}\b")
-        next_eval_pattern = re.compile(rf"Evaluating result for auction {auction_id + 1}\b")
-        next_created_pattern = re.compile(rf"Auction {auction_id + 1}\b")
-        feedback_pattern = re.compile(rf"Feedback submitted.*auction {auction_id}\b")
-        
-        # Find the start of this auction's section
-        for i, line in enumerate(lines):
-            # Look for evaluation start marker
-            if eval_pattern.search(line):
-                start_idx = i
-                break
-            # Fallback to auction creation if evaluation not found
-            elif start_idx is None and created_pattern.search(line):
-                start_idx = i
-        
-        # Find the end of this auction's section
-        if start_idx is not None:
-            for i in range(start_idx, len(lines)):
-                line = lines[i]
-                # Stop when we see next auction creation or evaluation
-                if i > start_idx and (next_eval_pattern.search(line) or 
-                                     next_created_pattern.search(line) or
-                                     "Creating next auction" in line):
-                    end_idx = i
-                    break
-                # Also stop after feedback submission for this auction
-                if feedback_pattern.search(line):
-                    end_idx = min(len(lines), i + 5)  # Include a few more lines
-                    break
-        
-        if start_idx is not None and end_idx is not None:
-            relevant_lines = lines[start_idx:end_idx]
-        elif start_idx is not None:
-            # If no end found, take from start to end of file (last auction)
-            relevant_lines = lines[start_idx:]
-        
-        return '\n'.join(relevant_lines) if relevant_lines else None
-    
-    def _extract_provider_auction_section(self, log: str, auction_id: int) -> Optional[str]:
-        """Extract provider log section for a specific auction execution."""
-        lines = log.split('\n')
-        relevant_lines = []
-        start_idx = None
-        end_idx = None
-        
-        import re
-        # Look for "Won auction X" or "Executing service for job X"
-        won_pattern = re.compile(rf"Won auction {auction_id}\b", re.IGNORECASE)
-        executing_pattern = re.compile(rf"Executing service for job {auction_id}\b", re.IGNORECASE)
-        # Look for completion or next auction
-        completed_pattern = re.compile(rf"Literature review completed", re.IGNORECASE)
-        next_won_pattern = re.compile(rf"Won auction {auction_id + 1}\b", re.IGNORECASE)
-        
-        # Find the start (when won the auction)
-        for i, line in enumerate(lines):
-            if won_pattern.search(line) or executing_pattern.search(line):
-                start_idx = i
-                break
-        
-        # Find the end (completion or next auction win)
-        if start_idx is not None:
-            for i in range(start_idx + 1, len(lines)):
-                line = lines[i]
-                # Stop at completion of current auction
-                if completed_pattern.search(line):
-                    # Include this line and a few more for context
-                    end_idx = min(len(lines), i + 5)
-                    break
-                # Stop if we see next auction
-                if next_won_pattern.search(line):
-                    end_idx = i
-                    break
-        
-        if start_idx is not None and end_idx is not None:
-            relevant_lines = lines[start_idx:end_idx]
-        elif start_idx is not None:
-            # If no end found, take from start to end (last auction)
-            relevant_lines = lines[start_idx:]
-        
-        return '\n'.join(relevant_lines) if relevant_lines else None
-    
-    def track_reputation_evolution(self, w3: Web3, reputation_contract, 
-                                   auction_ids: List[int]) -> List[Dict[str, Any]]:
-        """
-        Track reputation changes across multiple auctions.
-        
-        Args:
-            w3: Web3 instance
-            reputation_contract: ReputationRegistry contract
-            auction_ids: List of auction IDs in order
-            
-        Returns:
-            List of reputation snapshots over time
-        """
-        evolution = []
-        
-        try:
-            for i, auction_id in enumerate(auction_ids):
-                snapshot = {
-                    "auction_id": auction_id,
-                    "sequence": i + 1,
-                    "provider_reputations": {}
-                }
-                
-                # Query current reputation for all providers
-                for provider_id in self.metrics['agents']['provider_ids']:
-                    try:
-                        # getSummary returns (feedbackCount, averageScore)
-                        feedback_count, average_score = reputation_contract.functions.getSummary(
-                            provider_id,
-                            [],  # No client address filter
-                            bytes(32),  # No tag1 filter
-                            bytes(32)   # No tag2 filter
-                        ).call()
-                        snapshot["provider_reputations"][provider_id] = {
-                            "score": int(average_score),
-                            "feedback_count": int(feedback_count)
-                        }
-                    except Exception as e:
-                        logger.warning(f"Could not get reputation for provider {provider_id}: {e}")
-                
-                evolution.append(snapshot)
-            
-        except Exception as e:
-            logger.error(f"Error tracking reputation evolution: {e}")
-        
-        self.metrics["reputation_evolution"] = evolution
-        return evolution
-    
-    def calculate_provider_profitability(self) -> Dict[int, Dict[str, float]]:
-        """
-        Calculate profit/loss for each provider (E4+).
-        
-        Returns:
-            Dictionary mapping provider_id to profitability metrics
-        """
-        profitability = {}
-        
-        try:
-            for provider_id in self.metrics['agents']['provider_ids']:
-                provider_log = self._load_provider_log(provider_id)
-                if not provider_log:
-                    continue
-                
-                # Count wins
-                wins = len(re.findall(r"won auction", provider_log, re.IGNORECASE))
-                
-                # Sum revenue from winning bids
-                revenue = 0
-                for auction in self.metrics.get("auctions", []):
-                    if auction.get("winner_id") == provider_id:
-                        revenue += auction.get("winning_bid", 0)
-                
-                # Estimate costs (simplified - could be enhanced)
-                # Cost = gas + computation (approximate)
-                estimated_cost_per_service = 5000000  # 5 USDC per service (estimate)
-                total_costs = wins * estimated_cost_per_service
-                
-                profit = revenue - total_costs
-                
-                profitability[provider_id] = {
-                    "wins": wins,
-                    "revenue_usdc": revenue / 1e6,
-                    "costs_usdc": total_costs / 1e6,
-                    "profit_usdc": profit / 1e6,
-                    "profit_margin": (profit / revenue * 100) if revenue > 0 else 0
-                }
-            
-        except Exception as e:
-            logger.error(f"Error calculating profitability: {e}")
-        
-        self.metrics["provider_profitability"] = profitability
-        return profitability
-    
-    def analyze_market_dynamics(self) -> Dict[str, Any]:
-        """
-        Analyze market trends and equilibrium (E4+).
-        
-        Returns:
-            Dictionary with market analysis
-        """
-        dynamics = {
-            "average_winning_bid": 0,
-            "bid_trend": "stable",  # increasing, decreasing, stable
-            "price_volatility": 0,
-            "market_equilibrium_price": 0,
-            "competition_level": "medium"
-        }
-        
-        try:
-            auctions = self.metrics.get("auctions", [])
-            if not auctions:
-                return dynamics
-            
-            winning_bids = [a["winning_bid"] for a in auctions if a.get("winning_bid")]
-            
-            if winning_bids:
-                # Calculate average
-                dynamics["average_winning_bid"] = sum(winning_bids) / len(winning_bids) / 1e6
-                
-                # Detect trend
-                if len(winning_bids) >= 3:
-                    first_third = sum(winning_bids[:len(winning_bids)//3]) / (len(winning_bids)//3)
-                    last_third = sum(winning_bids[-len(winning_bids)//3:]) / (len(winning_bids)//3)
-                    
-                    change = ((last_third - first_third) / first_third) * 100
-                    if change > 5:
-                        dynamics["bid_trend"] = "increasing"
-                    elif change < -5:
-                        dynamics["bid_trend"] = "decreasing"
-                    else:
-                        dynamics["bid_trend"] = "stable"
-                
-                # Calculate volatility (standard deviation)
-                mean_bid = sum(winning_bids) / len(winning_bids)
-                variance = sum((b - mean_bid) ** 2 for b in winning_bids) / len(winning_bids)
-                dynamics["price_volatility"] = (variance ** 0.5) / mean_bid * 100  # CV%
-                
-                # Estimate equilibrium (median of middle 50%)
-                sorted_bids = sorted(winning_bids)
-                q1 = len(sorted_bids) // 4
-                q3 = 3 * len(sorted_bids) // 4
-                middle_bids = sorted_bids[q1:q3]
-                if middle_bids:
-                    dynamics["market_equilibrium_price"] = sum(middle_bids) / len(middle_bids) / 1e6
-                
-                # Competition level based on bid count and spread
-                avg_bid_count = sum(len(a.get("bids", [])) for a in auctions) / len(auctions)
-                if avg_bid_count >= 3:
-                    dynamics["competition_level"] = "high"
-                elif avg_bid_count >= 2:
-                    dynamics["competition_level"] = "medium"
-                else:
-                    dynamics["competition_level"] = "low"
-            
-        except Exception as e:
-            logger.error(f"Error analyzing market dynamics: {e}")
-        
-        self.metrics["market_dynamics"] = dynamics
-        return dynamics
-    
-    def analyze_strategy_performance(self, provider_strategies: Dict[int, str]) -> Dict[str, Dict[str, Any]]:
-        """
-        Analyze performance by provider strategy (E4+).
-        
-        Args:
-            provider_strategies: Mapping of provider_id to strategy name
-            
-        Returns:
-            Dictionary mapping strategy to performance metrics
-        """
-        strategy_perf = {}
-        
-        try:
-            auctions = self.metrics.get("auctions", [])
-            
-            # Group providers by strategy
-            strategy_providers = {}
-            for provider_id, strategy in provider_strategies.items():
-                if strategy not in strategy_providers:
-                    strategy_providers[strategy] = []
-                strategy_providers[strategy].append(provider_id)
-            
-            # Calculate metrics per strategy
-            for strategy, provider_ids in strategy_providers.items():
-                wins = 0
-                total_auctions = len(auctions)
-                total_revenue = 0
-                ratings = []
-                
-                for auction in auctions:
-                    winner_id = auction.get("winner_id")
-                    if winner_id in provider_ids:
-                        wins += 1
-                        total_revenue += auction.get("winning_bid", 0)
-                        if auction.get("rating"):
-                            ratings.append(auction["rating"])
-                
-                strategy_perf[strategy] = {
-                    "provider_count": len(provider_ids),
-                    "wins": wins,
-                    "win_rate": (wins / total_auctions * 100) if total_auctions > 0 else 0,
-                    "total_revenue_usdc": total_revenue / 1e6,
-                    "average_rating": sum(ratings) / len(ratings) if ratings else 0,
-                    "rating_consistency": self._calculate_std_dev(ratings) if len(ratings) > 1 else 0
-                }
-            
-        except Exception as e:
-            logger.error(f"Error analyzing strategy performance: {e}")
-        
-        self.metrics["strategy_performance"] = strategy_perf
-        return strategy_perf
-    
-    def _calculate_std_dev(self, values: List[float]) -> float:
-        """Calculate standard deviation."""
-        if not values:
-            return 0
-        mean = sum(values) / len(values)
-        variance = sum((v - mean) ** 2 for v in values) / len(values)
-        return variance ** 0.5

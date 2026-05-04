@@ -89,6 +89,10 @@ def collect_files(
             files.append(root)
             continue
         if root.is_dir():
+            # Support input dirs where metrics file is at the directory root.
+            direct_metrics = root / "experiment_metrics.json"
+            if direct_metrics.exists():
+                files.append(direct_metrics)
             files.extend(root.glob(input_glob))
 
     if manifest:
@@ -229,6 +233,17 @@ def reputation_snapshot_map(rep_evolution: List[Dict[str, Any]]) -> Dict[int, Di
             for pid, rep in item["reputations"].items()
         }
     return out
+
+
+def reputation_before_auction(rep_map: Dict[int, Dict[int, float]], auction_id: int, provider_id: int) -> Optional[float]:
+    """Find provider reputation from the latest snapshot at or before auction_id - 1."""
+    if auction_id <= 0:
+        return None
+    keys = [k for k in rep_map.keys() if k <= auction_id - 1]
+    if not keys:
+        return None
+    nearest = max(keys)
+    return rep_map.get(nearest, {}).get(provider_id)
 
 
 def parse_reputation_rows(base: Dict[str, Any], rep_evolution: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -389,6 +404,8 @@ def main() -> None:
                 {
                     **base,
                     "auction_id": auction_id,
+                    "timestamp_created": auction.get("timestamp_created"),
+                    "timestamp_ended": auction.get("timestamp_ended"),
                     "status": auction.get("status"),
                     "winner_id": winner_id if winner_id > 0 else None,
                     "winning_bid_amount": auction.get("winning_bid_amount"),
@@ -415,7 +432,7 @@ def main() -> None:
                     continue
                 provider_bid_stats[provider_id]["attempted"] += 1
                 provider_bid_stats[provider_id]["attempted_bid_sum"] += amount
-                rep_before = rep_map.get(auction_id - 1, {}).get(provider_id, 50.0)
+                rep_before = reputation_before_auction(rep_map, auction_id, provider_id)
                 bid_market_rows.append(
                     {
                         **base,
@@ -449,6 +466,8 @@ def main() -> None:
         net_balances: List[float] = []
         total_revenue = 0.0
         total_costs = 0.0
+        total_llm_costs = 0.0
+        total_gas_costs = 0.0
 
         for provider_id, vals in by_provider.items():
             pid = int(provider_id)
@@ -498,6 +517,8 @@ def main() -> None:
             net_balances.append(net_balance)
             total_revenue += revenue
             total_costs += total_cost
+            total_llm_costs += llm_costs
+            total_gas_costs += gas_costs
 
         for row in fin.get("evolution", []):
             provider_fin_evolution_rows.append(
@@ -516,16 +537,41 @@ def main() -> None:
         reputation_rows.extend(parse_reputation_rows(base, data.get("reputation_evolution", [])))
 
         completed_auctions = safe_float(summary.get("completed_auctions", 0))
+        total_bids_attempted = safe_float(summary.get("total_bids_attempted", 0))
+        total_bids_on_chain = safe_float(summary.get("total_bids_on_chain", 0))
+        total_other_costs = max(0.0, total_costs - total_llm_costs - total_gas_costs)
+
         total_profit = total_revenue - total_costs
+        total_profit_excluding_gas = total_revenue - (total_costs - total_gas_costs)
+        total_profit_excluding_llm = total_revenue - (total_costs - total_llm_costs)
+        total_profit_excluding_llm_gas = total_revenue - total_other_costs
+
         run_economics_rows.append(
             {
                 **base,
                 "provider_count": len(by_provider),
                 "system_total_revenue": total_revenue,
+                "system_total_llm_costs": total_llm_costs,
+                "system_total_gas_costs": total_gas_costs,
+                "system_total_other_costs": total_other_costs,
                 "system_total_costs": total_costs,
                 "system_total_profit": total_profit,
+                "system_total_profit_excluding_gas": total_profit_excluding_gas,
+                "system_total_profit_excluding_llm": total_profit_excluding_llm,
+                "system_total_profit_excluding_llm_gas": total_profit_excluding_llm_gas,
                 "profit_per_completed_auction": safe_div(total_profit, completed_auctions),
+                "revenue_per_completed_auction": safe_div(total_revenue, completed_auctions),
                 "cost_per_completed_auction": safe_div(total_costs, completed_auctions),
+                "llm_cost_per_completed_auction": safe_div(total_llm_costs, completed_auctions),
+                "gas_cost_per_completed_auction": safe_div(total_gas_costs, completed_auctions),
+                "other_cost_per_completed_auction": safe_div(total_other_costs, completed_auctions),
+                "profit_excluding_gas_per_completed_auction": safe_div(total_profit_excluding_gas, completed_auctions),
+                "profit_excluding_llm_per_completed_auction": safe_div(total_profit_excluding_llm, completed_auctions),
+                "profit_excluding_llm_gas_per_completed_auction": safe_div(total_profit_excluding_llm_gas, completed_auctions),
+                "cost_per_bid_attempted": safe_div(total_costs, total_bids_attempted),
+                "cost_per_on_chain_bid": safe_div(total_costs, total_bids_on_chain),
+                "gas_cost_per_on_chain_bid": safe_div(total_gas_costs, total_bids_on_chain),
+                "llm_cost_per_bid_attempted": safe_div(total_llm_costs, total_bids_attempted),
                 "efficiency_profit_to_cost": safe_div(total_profit, total_costs),
                 "profit_gini": gini(net_balances),
                 "profit_fairness_index": 1.0 - gini(net_balances),
@@ -617,6 +663,8 @@ def main() -> None:
             "seed",
             "metrics_file",
             "auction_id",
+            "timestamp_created",
+            "timestamp_ended",
             "status",
             "winner_id",
             "winning_bid_amount",
@@ -761,10 +809,27 @@ def main() -> None:
             "metrics_file",
             "provider_count",
             "system_total_revenue",
+            "system_total_llm_costs",
+            "system_total_gas_costs",
+            "system_total_other_costs",
             "system_total_costs",
             "system_total_profit",
+            "system_total_profit_excluding_gas",
+            "system_total_profit_excluding_llm",
+            "system_total_profit_excluding_llm_gas",
             "profit_per_completed_auction",
+            "revenue_per_completed_auction",
             "cost_per_completed_auction",
+            "llm_cost_per_completed_auction",
+            "gas_cost_per_completed_auction",
+            "other_cost_per_completed_auction",
+            "profit_excluding_gas_per_completed_auction",
+            "profit_excluding_llm_per_completed_auction",
+            "profit_excluding_llm_gas_per_completed_auction",
+            "cost_per_bid_attempted",
+            "cost_per_on_chain_bid",
+            "gas_cost_per_on_chain_bid",
+            "llm_cost_per_bid_attempted",
             "efficiency_profit_to_cost",
             "profit_gini",
             "profit_fairness_index",

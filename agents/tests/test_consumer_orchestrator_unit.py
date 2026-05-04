@@ -985,6 +985,49 @@ class TestAuctionMonitoring(unittest.TestCase):
                 print("\n✓ ACTIVE → ENDED with winning bid captured")
         
         run_async(_test())
+
+    def test_monitor_auction_no_winner_finalizes_as_failed(self):
+        """Test no-winner auctions are finalized so sequential flow does not hang."""
+        async def _test():
+            with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
+                 patch('agents.consumer_agent.consumer_orchestrator.ServiceEvaluator'):
+
+                consumer = Consumer(self.mock_config)
+                consumer.blockchain_handler._initialized = True
+                consumer.blockchain_handler.get_auction_status = AsyncMock(return_value={
+                    "active": False,
+                    "completed": False,
+                    "winning_agent_id": 0,
+                    "winning_bid": 0,
+                    "error": None
+                })
+                consumer.blockchain_handler.client = Mock()
+                consumer.blockchain_handler.client.get_block_number = AsyncMock(return_value=12345)
+
+                tracker = AuctionTracker(
+                    auction_id=1,
+                    status=AuctionStatus.ACTIVE,
+                    created_at=datetime.now(),
+                    service_cid="QmTest",
+                    max_budget=100000000,
+                    duration=1800,
+                    eligible_providers=[1, 2]
+                )
+                consumer.active_auctions[1] = tracker
+
+                await consumer.monitor_auctions()
+
+                # Auction should be marked failed and moved out of active tracking
+                self.assertEqual(tracker.status, AuctionStatus.FAILED)
+                self.assertEqual(tracker.error, "Auction ended without winner")
+                self.assertIn(tracker, consumer.completed_auctions)
+                self.assertNotIn(1, consumer.active_auctions)
+
+                print("\n✓ No-winner auction finalized as FAILED and removed from active list")
+
+        run_async(_test())
     
     @patch('agents.consumer_agent.consumer_orchestrator.datetime')
     def test_monitor_auction_duration_expired(self, mock_datetime):

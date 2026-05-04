@@ -218,6 +218,12 @@ class BlockchainHandler:
         # Bids placed tracker (for ReAct tool results)
         self._bids_placed: List[Dict[str, Any]] = []
         self._react_stop_after_bid_attempt: bool = False
+        self._bid_attempt_stats: Dict[str, int] = {
+            "attempted": 0,
+            "succeeded": 0,
+            "failed": 0,
+        }
+        self._bid_failures: List[Dict[str, Any]] = []
 
         # Per-cycle state snapshot used by tool-call logging
         self._tool_audit_context: Dict[str, Any] = {}
@@ -610,6 +616,13 @@ class BlockchainHandler:
             """Submit a bid for an auction on the blockchain."""
             raw_args = {"auction_id": auction_id, "bid_amount": bid_amount}
             handler._react_stop_after_bid_attempt = True
+            handler._record_bid_attempt(
+                auction_id=auction_id,
+                bid_amount=bid_amount,
+                success=False,
+                error="attempt_started",
+                mode="react",
+            )
             try:
                 logger.info(
                     f"📤 Placing bid: auction={auction_id}, amount={bid_amount} ({bid_amount/1e6:.6f} USDC)"
@@ -638,6 +651,14 @@ class BlockchainHandler:
                         "explanation": "Auction ended before bid submission. State refreshed and tx skipped.",
                         "retry_recommended": False,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
 
@@ -649,6 +670,14 @@ class BlockchainHandler:
                         "explanation": "Bid exceeds current auction max_price. State refreshed and tx skipped.",
                         "retry_recommended": True,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
 
@@ -659,6 +688,13 @@ class BlockchainHandler:
                         "explanation": "You are already the current winner. No tx sent.",
                         "retry_recommended": False,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error"))
                     return result
 
@@ -698,6 +734,14 @@ class BlockchainHandler:
                             "current_winning_agent": current_winning_agent,
                             "retry_recommended": False,
                         }
+                        handler._record_bid_attempt(
+                            auction_id=auction_id,
+                            bid_amount=bid_amount,
+                            success=False,
+                            error=result.get("error"),
+                            error_code=result.get("error_code"),
+                            mode="react",
+                        )
                         handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                         return result
 
@@ -731,10 +775,23 @@ class BlockchainHandler:
                         "block_number": receipt["blockNumber"],
                     }
                     handler._bids_placed.append(result)
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=True,
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result)
                     return result
 
                 result = {"success": False, "error": "Transaction failed"}
+                handler._record_bid_attempt(
+                    auction_id=auction_id,
+                    bid_amount=bid_amount,
+                    success=False,
+                    error=result.get("error"),
+                    mode="react",
+                )
                 handler._audit_tool_call("place_bid", raw_args, raw_args, result, result["error"])
                 return result
 
@@ -751,6 +808,14 @@ class BlockchainHandler:
                         "suggestion": "Try a lower bid amount to improve competitiveness.",
                         "retry_recommended": False,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
                 if "0xc9b80cd4" in error_msg or "BidTooHigh" in error_msg:
@@ -761,6 +826,14 @@ class BlockchainHandler:
                         "explanation": "Your bid amount exceeds auction max price.",
                         "retry_recommended": True,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
                 if "0x69b8d0fe" in error_msg or "AuctionNotActive" in error_msg:
@@ -771,6 +844,14 @@ class BlockchainHandler:
                         "explanation": "Auction is no longer active.",
                         "retry_recommended": False,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
                 if "0x5c427cd9" in error_msg or "AgentNotEligible" in error_msg:
@@ -781,6 +862,14 @@ class BlockchainHandler:
                         "explanation": "Agent is not eligible for this auction.",
                         "retry_recommended": False,
                     }
+                    handler._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=result.get("error"),
+                        error_code=result.get("error_code"),
+                        mode="react",
+                    )
                     handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error_code"))
                     return result
 
@@ -790,6 +879,13 @@ class BlockchainHandler:
                     "explanation": "An unexpected error occurred while placing the bid.",
                     "suggestion": "Check auction status and eligibility before retrying.",
                 }
+                handler._record_bid_attempt(
+                    auction_id=auction_id,
+                    bid_amount=bid_amount,
+                    success=False,
+                    error=result.get("error"),
+                    mode="react",
+                )
                 handler._audit_tool_call("place_bid", raw_args, raw_args, result, result.get("error"))
                 return result
 
@@ -1601,6 +1697,13 @@ Analyze these auctions and decide which to bid on."""
                 
                 # Place bid
                 try:
+                    self._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error="attempt_started",
+                        mode="heuristic",
+                    )
                     estimated_gas = await self.client.estimate_gas(
                         "ReverseAuction",
                         "placeBid",
@@ -1639,11 +1742,31 @@ Analyze these auctions and decide which to bid on."""
                             "block_number": receipt['blockNumber']
                         }
                         self._bids_placed.append(result)
+                        self._record_bid_attempt(
+                            auction_id=auction_id,
+                            bid_amount=bid_amount,
+                            success=True,
+                            mode="heuristic",
+                        )
                     else:
                         logger.warning(f"❌ Bid transaction failed for auction {auction_id}")
+                        self._record_bid_attempt(
+                            auction_id=auction_id,
+                            bid_amount=bid_amount,
+                            success=False,
+                            error="TransactionFailed",
+                            mode="heuristic",
+                        )
                         
                 except Exception as e:
                     logger.error(f"Error placing bid on auction {auction_id}: {e}")
+                    self._record_bid_attempt(
+                        auction_id=auction_id,
+                        bid_amount=bid_amount,
+                        success=False,
+                        error=str(e),
+                        mode="heuristic",
+                    )
                     continue
             
             state["bids_placed"] = self._bids_placed
@@ -1810,7 +1933,49 @@ Analyze these auctions and decide which to bid on."""
             "won_auctions": result.get("won_auctions", []),
             "eligible_active_auctions_count": len(result.get("eligible_active_auctions", [])),
             "bids_placed": result.get("bids_placed", []),
-            "error": result.get("error")
+            "error": result.get("error"),
+            "bidding": self.get_bidding_metrics(),
+        }
+
+    def _record_bid_attempt(
+        self,
+        auction_id: int,
+        bid_amount: int,
+        success: bool,
+        error: Optional[str] = None,
+        error_code: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> None:
+        """Track bid attempt outcomes for runtime status reporting."""
+        if error == "attempt_started":
+            self._bid_attempt_stats["attempted"] += 1
+            return
+
+        if success:
+            self._bid_attempt_stats["succeeded"] += 1
+            return
+
+        self._bid_attempt_stats["failed"] += 1
+        self._bid_failures.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "auction_id": int(auction_id),
+                "bid_amount": int(bid_amount),
+                "error": (error or "bid_failed")[:300],
+                "error_code": error_code,
+                "mode": mode,
+            }
+        )
+        if len(self._bid_failures) > 200:
+            self._bid_failures = self._bid_failures[-200:]
+
+    def get_bidding_metrics(self) -> Dict[str, Any]:
+        """Return cumulative runtime bidding metrics for status snapshots."""
+        return {
+            "attempted": int(self._bid_attempt_stats.get("attempted", 0)),
+            "succeeded": int(self._bid_attempt_stats.get("succeeded", 0)),
+            "failed": int(self._bid_attempt_stats.get("failed", 0)),
+            "recent_failures": self._bid_failures[-50:],
         }
     
     async def complete_service(self, auction_id: int, client_address: str) -> Dict[str, Any]:

@@ -128,6 +128,7 @@ class Orchestrator:
         # Runtime state
         self.running = False
         self.check_interval = 5  # Check blockchain every 5 seconds
+        self.last_monitor_error: Optional[str] = None
         
         logger.info(f"Orchestrator initialized for agent {self.config.agent_id}")
     
@@ -182,6 +183,7 @@ class Orchestrator:
         """Check blockchain for newly won auctions."""
         try:
             result = await self.blockchain_handler.monitor_auctions()
+            self.last_monitor_error = result.get("error")
             won_auctions = result.get("won_auctions", [])
             
             for auction_details in won_auctions:
@@ -465,10 +467,20 @@ class Orchestrator:
     
     def get_status(self) -> Dict[str, Any]:
         """Get current orchestrator status."""
+        total_costs = self.cost_tracker.total_llm_costs + self.cost_tracker.total_gas_costs
         return {
             "running": self.running,
             "active_jobs": len(self.active_jobs),
             "completed_jobs": len(self.completed_jobs),
+            "last_error": self.last_monitor_error,
+            "bidding": self.blockchain_handler.get_bidding_metrics(),
+            "financials": {
+                "revenue": self.cost_tracker.total_revenue,
+                "llm_costs": self.cost_tracker.total_llm_costs,
+                "gas_costs": self.cost_tracker.total_gas_costs,
+                "total_costs": total_costs,
+                "net_balance": self.cost_tracker.get_net_balance(),
+            },
             "jobs": {
                 "active": [job.to_dict() for job in self.active_jobs.values()],
                 "completed": [job.to_dict() for job in self.completed_jobs[-10:]]  # Last 10

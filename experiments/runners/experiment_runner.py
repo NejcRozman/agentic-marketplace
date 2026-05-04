@@ -80,6 +80,7 @@ class ExperimentRunner:
         # Status tracking
         self.start_time: Optional[datetime] = None
         self.consumer_status_file: Optional[Path] = None
+        self.provider_status_files: Dict[int, Path] = {}
         
         # Metrics collection
         self.metrics_collector: Optional[MetricsCollector] = None
@@ -477,6 +478,7 @@ class ExperimentRunner:
         else:  # provider_agent
             script = agents_dir / "provider_agent" / "orchestrator.py"
             status_file = self.log_dir / f"provider_{agent_id}_status.json"
+            self.provider_status_files[agent_id] = status_file
         
         # Build command - use same Python interpreter as the runner (preserves venv)
         cmd = [
@@ -748,6 +750,7 @@ class ExperimentRunner:
                 "timestamp": datetime.now().isoformat(),
                 "reputations": {}
             }
+            initial_reputation_default = int(self.config['blockchain'].get('initial_reputation_default', 50))
             
             for provider_id in self.provider_agent_ids:
                 try:
@@ -759,9 +762,9 @@ class ExperimentRunner:
                         bytes(32)   # No tag2 filter
                     ).call()
                     
-                    # Default to 50 if no feedback (matches provider agent logic)
+                    # If no feedback yet, preserve configured initial reputation.
                     if feedback_count == 0:
-                        average_score = 50
+                        average_score = initial_reputation_default
                     
                     snapshot["reputations"][provider_id] = {
                         "score": int(average_score),
@@ -821,6 +824,9 @@ class ExperimentRunner:
             if elapsed > max_timeout:
                 logger.info(f"Maximum timeout reached ({max_timeout}s = {max_timeout/3600:.1f}h)")
                 break
+
+            # Persist runtime status snapshots (consumer + provider financials/bidding/jobs).
+            self._collect_runtime_status_snapshots()
             
             # Check stopping criteria
             if criteria_type == "completed_auctions":
@@ -829,6 +835,13 @@ class ExperimentRunner:
                     if self.consumer_status_file and self.consumer_status_file.exists():
                         with open(self.consumer_status_file, 'r') as f:
                             status = json.load(f)
+
+                        if self.metrics_collector:
+                            self.metrics_collector.record_consumer_status_snapshot(
+                                timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                status=status,
+                                source="runtime_status",
+                            )
                         
                         completed = status.get('completed_auctions', 0)
                         logger.info(f"Completed auctions: {completed}/{target} (elapsed: {int(elapsed)}s)")
@@ -847,8 +860,61 @@ class ExperimentRunner:
             
             # Wait before next check
             await asyncio.sleep(poll_interval)
+
+        # One final snapshot at loop exit.
+        self._collect_runtime_status_snapshots()
         
         logger.info("✓ Experiment monitoring complete")
+
+    def _collect_runtime_status_snapshots(self):
+        """Collect structured runtime snapshots from consumer/provider status files."""
+        if not self.metrics_collector:
+            return
+
+        snapshot_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for provider_id, status_file in self.provider_status_files.items():
+            try:
+                if not status_file.exists():
+                    continue
+
+                with open(status_file, 'r', encoding='utf-8') as f:
+                    status = json.load(f)
+
+                self.metrics_collector.record_provider_status_snapshot(
+                    provider_id=provider_id,
+                    timestamp=snapshot_ts,
+                    status=status,
+                    source="runtime_status",
+                )
+
+                financials = status.get("financials", {})
+                if not isinstance(financials, dict):
+                    continue
+
+                self.metrics_collector.record_provider_financial_snapshot(
+                    provider_id=provider_id,
+                    timestamp=snapshot_ts,
+                    revenue=float(financials.get("revenue", 0.0)),
+                    llm_costs=float(financials.get("llm_costs", 0.0)),
+                    gas_costs=float(financials.get("gas_costs", 0.0)),
+                    total_costs=float(financials.get("total_costs", 0.0)),
+                    net_balance=float(financials.get("net_balance", 0.0)),
+                    source="runtime_status",
+                )
+            except Exception as e:
+                logger.debug(f"Failed to collect runtime financial snapshot for provider {provider_id}: {e}")
+
+        if self.consumer_status_file and self.consumer_status_file.exists():
+            try:
+                with open(self.consumer_status_file, 'r', encoding='utf-8') as f:
+                    consumer_status = json.load(f)
+                self.metrics_collector.record_consumer_status_snapshot(
+                    timestamp=snapshot_ts,
+                    status=consumer_status,
+                    source="runtime_status",
+                )
+            except Exception as e:
+                logger.debug(f"Failed to collect runtime consumer status snapshot: {e}")
     
     def collect_metrics(self):
         """Collect comprehensive experiment metrics."""
@@ -872,6 +938,9 @@ class ExperimentRunner:
             consumer_id=self.consumer_agent_id,
             provider_ids=self.provider_agent_ids
         )
+
+        # Capture a final runtime snapshot right before collection.
+        self._collect_runtime_status_snapshots()
         
         # Collect auction data from blockchain
         logger.info("📊 Collecting auction data from blockchain...")
@@ -1001,9 +1070,10 @@ class ExperimentRunner:
         if errors.get('critical_issues'):
             logger.warning(f"   ⚠️  {len(errors['critical_issues'])} critical issue(s) detected")
         
-        # Determine overall success
-        success = len(auctions) > 0 and any(a["status"] == "completed" for a in auctions)
-        self.metrics_collector.metrics["success"] = success
+        # Determine overall success from runtime-complete criteria.
+        completeness = self.metrics_collector.collect_system_completeness()
+        success = self.metrics_collector.determine_success()
+        logger.info(f"   Runtime completeness: {completeness}")
         logger.info(f"\n{'✅' if success else '❌'} Experiment success: {success}")
         
         # Save metrics

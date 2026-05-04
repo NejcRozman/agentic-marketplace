@@ -286,6 +286,19 @@ class Consumer:
                     tracker.ended_block = current_block
                     tracker.winning_agent_id = auction_data['winning_agent_id']
                     tracker.winning_bid = auction_data['winning_bid']
+
+                    # If no winner exists, this auction is terminal and should not block
+                    # sequential auction creation or experiment completion.
+                    winner_id = tracker.winning_agent_id
+                    if winner_id in (None, 0):
+                        logger.info(
+                            f"⚠️ Auction {auction_id} ended without winner (no valid bids); finalizing as failed"
+                        )
+                        tracker.status = AuctionStatus.FAILED
+                        tracker.completed_at = datetime.now()
+                        tracker.error = "Auction ended without winner"
+                        self._finalize_terminal_auction(tracker)
+                        continue
                     
                 elif is_active:
                     tracker.status = AuctionStatus.ACTIVE
@@ -394,9 +407,7 @@ class Consumer:
                 )
                 tracker.feedback_submitted = False
                 tracker.status = AuctionStatus.COMPLETED
-                self.completed_auctions.append(tracker)
-                if tracker.auction_id in self.active_auctions:
-                    del self.active_auctions[tracker.auction_id]
+                self._finalize_terminal_auction(tracker)
                 return
 
             # Query for FeedbackAuthProvided event (already emitted by provider)
@@ -442,12 +453,18 @@ class Consumer:
             
             # Mark as fully completed and move to completed list
             tracker.status = AuctionStatus.COMPLETED
-            self.completed_auctions.append(tracker)
-            del self.active_auctions[tracker.auction_id]
+            self._finalize_terminal_auction(tracker)
             
         except Exception as e:
             logger.error(f"Error submitting feedback: {e}")
             tracker.error = str(e)
+
+    def _finalize_terminal_auction(self, tracker: AuctionTracker):
+        """Move terminal auction to completed list and remove it from active tracking."""
+        if tracker not in self.completed_auctions:
+            self.completed_auctions.append(tracker)
+        if tracker.auction_id in self.active_auctions:
+            del self.active_auctions[tracker.auction_id]
     
     async def run(self):
         """Run the consumer agent main loop."""
@@ -474,9 +491,11 @@ class Consumer:
     
     def get_status(self) -> Dict[str, Any]:
         """Get current status of consumer agent."""
+        failed_auctions = sum(1 for t in self.completed_auctions if t.status == AuctionStatus.FAILED)
         return {
             "active_auctions": len(self.active_auctions),
             "completed_auctions": len(self.completed_auctions),
+            "failed_auctions": failed_auctions,
             "running": self.running
         }
     
@@ -568,7 +587,7 @@ async def main(args):
             # Sequential creation: Create next auction when previous completes
             if config.auto_create_auction and auctions_created < config.num_auctions:
                 # Check if we should create next auction
-                # Use completed_auctions list length (only populated after feedback submission)
+                # Use terminal auctions count (completed or failed) to avoid blocking on no-bid rounds.
                 completed_count = len(consumer.completed_auctions)
                 
                 logger.debug(f"Status check: completed={completed_count}, created={auctions_created}, target={config.num_auctions}")

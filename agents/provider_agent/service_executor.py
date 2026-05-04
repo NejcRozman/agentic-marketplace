@@ -1,6 +1,7 @@
 """Literature Analysis Agent for the agentic marketplace."""
 
 import os
+import time
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Annotated, Sequence, Literal, Optional, TypedDict
@@ -20,6 +21,60 @@ except ImportError:
     config = Config()
 
 logger = logging.getLogger(__name__)
+
+
+class ResilientOpenAIEmbeddings(OpenAIEmbeddings):
+    """OpenAI embeddings wrapper with retries for transient empty responses."""
+
+    def __init__(self, *args, max_retries: int = 3, retry_delay_seconds: float = 0.5, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._max_retries = max_retries
+        self._retry_delay_seconds = retry_delay_seconds
+
+    @staticmethod
+    def _is_retryable_embedding_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return "no embedding data received" in message or "embedding" in message
+
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return super().embed_documents(texts)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= self._max_retries or not self._is_retryable_embedding_error(exc):
+                    raise
+                logger.warning(
+                    "Embedding request failed (attempt %s/%s): %s; retrying...",
+                    attempt,
+                    self._max_retries,
+                    exc,
+                )
+                time.sleep(self._retry_delay_seconds * attempt)
+        if last_exc:
+            raise last_exc
+        return []
+
+    def embed_query(self, text: str) -> List[float]:
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                return super().embed_query(text)
+            except Exception as exc:
+                last_exc = exc
+                if attempt >= self._max_retries or not self._is_retryable_embedding_error(exc):
+                    raise
+                logger.warning(
+                    "Embedding query failed (attempt %s/%s): %s; retrying...",
+                    attempt,
+                    self._max_retries,
+                    exc,
+                )
+                time.sleep(self._retry_delay_seconds * attempt)
+        if last_exc:
+            raise last_exc
+        return []
 
 
 class AgentState(TypedDict):
@@ -89,10 +144,12 @@ Maintain professional academic tone and provide detailed, well-structured respon
             base_url=config.openrouter_base_url,
             temperature=config.rag_temperature
         )
-        self.embeddings = OpenAIEmbeddings(
+        self.embeddings = ResilientOpenAIEmbeddings(
             model="text-embedding-3-small",
             api_key=config.openrouter_api_key,
-            base_url=config.openrouter_base_url
+            base_url=config.openrouter_base_url,
+            max_retries=4,
+            retry_delay_seconds=0.75,
         )
         
         # RAG parameters from config
