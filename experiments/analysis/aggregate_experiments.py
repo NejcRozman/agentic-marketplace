@@ -19,11 +19,79 @@ from statistics import fmean, stdev
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-def infer_labels(experiment_id: str) -> Tuple[str, str, bool, str, Optional[int]]:
-    """Infer architecture/reasoning/scenario labels from experiment_id."""
+def normalize_reasoning_label(reasoning_mode: Any) -> str:
+    raw = str(reasoning_mode or "").strip().lower()
+    if raw == "llm_react":
+        return "react"
+    if raw == "llm_strategic":
+        return "strategic"
+    return raw or "unknown"
+
+
+def provider_display_architecture(profile: Dict[str, Any]) -> str:
+    architecture = str(profile.get("architecture") or "").strip().lower()
+    reasoning = normalize_reasoning_label(profile.get("reasoning_mode"))
+    if architecture.isdigit():
+        prefix = "h" if reasoning == "heuristic" else "a"
+        return f"{prefix}{architecture}"
+    return architecture or "unknown"
+
+
+def provider_subtype_label(profile: Dict[str, Any]) -> str:
+    group_name = str(profile.get("group_name") or "").strip()
+    if group_name and group_name != "default":
+        return group_name
+    architecture = provider_display_architecture(profile)
+    reasoning = normalize_reasoning_label(profile.get("reasoning_mode"))
+    if reasoning in ("unknown", ""):
+        return architecture
+    return f"{architecture}_{reasoning}"
+
+
+def provider_profile_map(provider_profiles: List[Dict[str, Any]]) -> Dict[int, Dict[str, Any]]:
+    out: Dict[int, Dict[str, Any]] = {}
+    for profile in provider_profiles:
+        try:
+            provider_id = int(profile.get("provider_id"))
+        except Exception:
+            continue
+        out[provider_id] = profile
+    return out
+
+
+def provider_mix_string(provider_profiles: List[Dict[str, Any]]) -> str:
+    counts: Dict[str, int] = defaultdict(int)
+    for profile in provider_profiles:
+        counts[provider_subtype_label(profile)] += 1
+    return "|".join(f"{label}:{counts[label]}" for label in sorted(counts.keys()))
+
+
+def enrich_with_provider_profile(row: Dict[str, Any], profile: Optional[Dict[str, Any]], prefix: str = "provider") -> Dict[str, Any]:
+    if not profile:
+        row[f"{prefix}_group_name"] = None
+        row[f"{prefix}_architecture"] = None
+        row[f"{prefix}_reasoning_mode"] = None
+        row[f"{prefix}_heuristic_strategy"] = None
+        row[f"{prefix}_heuristic_min_margin"] = None
+        row[f"{prefix}_heuristic_max_margin"] = None
+        row[f"{prefix}_subtype_label"] = "unknown"
+        return row
+
+    row[f"{prefix}_group_name"] = profile.get("group_name")
+    row[f"{prefix}_architecture"] = profile.get("architecture")
+    row[f"{prefix}_reasoning_mode"] = normalize_reasoning_label(profile.get("reasoning_mode"))
+    row[f"{prefix}_heuristic_strategy"] = profile.get("heuristic_strategy")
+    row[f"{prefix}_heuristic_min_margin"] = profile.get("heuristic_min_margin")
+    row[f"{prefix}_heuristic_max_margin"] = profile.get("heuristic_max_margin")
+    row[f"{prefix}_subtype_label"] = provider_subtype_label(profile)
+    return row
+
+
+def infer_labels(experiment_id: str, provider_profiles: Optional[List[Dict[str, Any]]] = None) -> Tuple[str, str, bool, str, Optional[int]]:
+    """Infer architecture/reasoning/scenario labels from experiment_id and provider metadata."""
     exp = experiment_id.lower()
-    arch_match = re.search(r"h(\d+)", exp)
-    architecture = f"h{arch_match.group(1)}" if arch_match else "unknown"
+    arch_match = re.search(r"([ah])(\d+)", exp)
+    architecture = f"{arch_match.group(1)}{arch_match.group(2)}" if arch_match else "unknown"
 
     if "heuristic" in exp:
         reasoning = "heuristic"
@@ -45,6 +113,27 @@ def infer_labels(experiment_id: str) -> Tuple[str, str, bool, str, Optional[int]
 
     seed_match = re.search(r"(?:^|[_-])seed[_-]?(\d+)(?:$|[_-])", exp)
     seed = int(seed_match.group(1)) if seed_match else None
+
+    normalized_profiles = [p for p in (provider_profiles or []) if isinstance(p, dict)]
+    if normalized_profiles:
+        architectures = sorted(
+            {
+                provider_display_architecture(profile)
+                for profile in normalized_profiles
+                if provider_display_architecture(profile) != "unknown"
+            }
+        )
+        reasoning_modes = sorted(
+            {
+                normalize_reasoning_label(profile.get("reasoning_mode"))
+                for profile in normalized_profiles
+                if normalize_reasoning_label(profile.get("reasoning_mode")) != "unknown"
+            }
+        )
+        if architectures:
+            architecture = architectures[0] if len(architectures) == 1 else "mixed"
+        if reasoning_modes:
+            reasoning = reasoning_modes[0] if len(reasoning_modes) == 1 else "mixed"
 
     return architecture, reasoning, reasoning == "heuristic", scenario, seed
 
@@ -347,14 +436,18 @@ def main() -> None:
     reputation_rows: List[Dict[str, Any]] = []
     bid_market_rows: List[Dict[str, Any]] = []
     provider_run_rows: List[Dict[str, Any]] = []
+    provider_type_run_rows: List[Dict[str, Any]] = []
     run_economics_rows: List[Dict[str, Any]] = []
 
     for metrics_file in files:
         data = json.loads(metrics_file.read_text(encoding="utf-8"))
 
         experiment_id = data.get("experiment_id", metrics_file.parent.name)
-        architecture, reasoning_mode, is_heuristic, scenario, seed = infer_labels(experiment_id)
+        provider_profiles = data.get("agents", {}).get("provider_profiles", []) or []
+        provider_meta_map = provider_profile_map(provider_profiles)
+        architecture, reasoning_mode, is_heuristic, scenario, seed = infer_labels(experiment_id, provider_profiles)
         summary = data.get("summary", {})
+        subtype_labels = sorted({provider_subtype_label(profile) for profile in provider_profiles})
 
         base = {
             "experiment_id": experiment_id,
@@ -363,6 +456,8 @@ def main() -> None:
             "is_heuristic": int(is_heuristic),
             "scenario": scenario,
             "seed": seed,
+            "provider_mix": provider_mix_string(provider_profiles),
+            "provider_subtype_count": len(subtype_labels),
             "metrics_file": str(metrics_file),
         }
 
@@ -386,6 +481,8 @@ def main() -> None:
 
         provider_bid_stats: Dict[int, Dict[str, float]] = defaultdict(
             lambda: {
+                "eligible": 0,
+                "participated": 0,
                 "attempted": 0,
                 "on_chain": 0,
                 "wins": 0,
@@ -399,30 +496,38 @@ def main() -> None:
             auction_id = safe_int(auction.get("auction_id"), default=0)
             winner_id = safe_int(auction.get("winner_id"), default=0)
             on_chain_providers = {safe_int(b.get("agent_id"), default=-1) for b in auction.get("bids_on_chain", [])}
+            attempted_providers_in_auction: Set[int] = set()
+            eligible_provider_ids = [safe_int(pid, default=-1) for pid in auction.get("eligible_agent_ids", []) or []]
+            for eligible_provider_id in eligible_provider_ids:
+                if eligible_provider_id < 0:
+                    continue
+                provider_bid_stats[eligible_provider_id]["eligible"] += 1
 
-            auction_rows.append(
-                {
-                    **base,
-                    "auction_id": auction_id,
-                    "timestamp_created": auction.get("timestamp_created"),
-                    "timestamp_ended": auction.get("timestamp_ended"),
-                    "status": auction.get("status"),
-                    "winner_id": winner_id if winner_id > 0 else None,
-                    "winning_bid_amount": auction.get("winning_bid_amount"),
-                    "winning_bid_usdc": safe_float(auction.get("winning_bid_amount", 0.0)) / 1e6,
-                    "budget": budget,
-                    "budget_usdc": budget / 1e6,
-                    "winning_bid_ratio": safe_div(safe_float(auction.get("winning_bid_amount", 0.0)), budget),
-                    "bid_count_on_chain": len(auction.get("bids_on_chain", [])),
-                    "bid_count_attempted": len(auction.get("bids_attempted", [])),
-                    "bid_failure_count": len(auction.get("bid_failures", [])),
-                    "service_executed": int(bool(auction.get("service_executed", False))),
-                    "quality_rating": auction.get("quality_rating"),
-                    "feedback_submitted": int(bool(auction.get("feedback_submitted", False))),
-                    "execution_duration_seconds": auction.get("execution_duration_seconds", 0),
-                    "evaluation_duration_seconds": auction.get("evaluation_duration_seconds", 0),
-                }
-            )
+            winner_profile = provider_meta_map.get(winner_id)
+
+            auction_row = {
+                **base,
+                "auction_id": auction_id,
+                "timestamp_created": auction.get("timestamp_created"),
+                "timestamp_ended": auction.get("timestamp_ended"),
+                "status": auction.get("status"),
+                "winner_id": winner_id if winner_id > 0 else None,
+                "winning_bid_amount": auction.get("winning_bid_amount"),
+                "winning_bid_usdc": safe_float(auction.get("winning_bid_amount", 0.0)) / 1e6,
+                "budget": budget,
+                "budget_usdc": budget / 1e6,
+                "winning_bid_ratio": safe_div(safe_float(auction.get("winning_bid_amount", 0.0)), budget),
+                "bid_count_on_chain": len(auction.get("bids_on_chain", [])),
+                "bid_count_attempted": len(auction.get("bids_attempted", [])),
+                "bid_failure_count": len(auction.get("bid_failures", [])),
+                "eligible_provider_count": len([pid for pid in eligible_provider_ids if pid >= 0]),
+                "service_executed": int(bool(auction.get("service_executed", False))),
+                "quality_rating": auction.get("quality_rating"),
+                "feedback_submitted": int(bool(auction.get("feedback_submitted", False))),
+                "execution_duration_seconds": auction.get("execution_duration_seconds", 0),
+                "evaluation_duration_seconds": auction.get("evaluation_duration_seconds", 0),
+            }
+            auction_rows.append(enrich_with_provider_profile(auction_row, winner_profile, prefix="winner"))
 
             # Per-attempt bid market dataset (for bid price vs reputation analysis)
             for bid in auction.get("bids_attempted", []):
@@ -430,24 +535,26 @@ def main() -> None:
                 amount = safe_float(bid.get("amount", 0.0))
                 if provider_id < 0:
                     continue
+                if provider_id not in attempted_providers_in_auction:
+                    provider_bid_stats[provider_id]["participated"] += 1
+                    attempted_providers_in_auction.add(provider_id)
                 provider_bid_stats[provider_id]["attempted"] += 1
                 provider_bid_stats[provider_id]["attempted_bid_sum"] += amount
                 rep_before = reputation_before_auction(rep_map, auction_id, provider_id)
-                bid_market_rows.append(
-                    {
-                        **base,
-                        "auction_id": auction_id,
-                        "provider_id": provider_id,
-                        "bid_amount": amount,
-                        "bid_amount_usdc": amount / 1e6,
-                        "budget": budget,
-                        "budget_usdc": budget / 1e6,
-                        "normalized_bid": safe_div(amount, budget),
-                        "reputation_before_auction": rep_before,
-                        "won_auction": int(provider_id == winner_id and winner_id > 0),
-                        "has_on_chain_bid": int(provider_id in on_chain_providers),
-                    }
-                )
+                bid_row = {
+                    **base,
+                    "auction_id": auction_id,
+                    "provider_id": provider_id,
+                    "bid_amount": amount,
+                    "bid_amount_usdc": amount / 1e6,
+                    "budget": budget,
+                    "budget_usdc": budget / 1e6,
+                    "normalized_bid": safe_div(amount, budget),
+                    "reputation_before_auction": rep_before,
+                    "won_auction": int(provider_id == winner_id and winner_id > 0),
+                    "has_on_chain_bid": int(provider_id in on_chain_providers),
+                }
+                bid_market_rows.append(enrich_with_provider_profile(bid_row, provider_meta_map.get(provider_id)))
 
             for on_chain_bid in auction.get("bids_on_chain", []):
                 provider_id = safe_int(on_chain_bid.get("agent_id"), default=-1)
@@ -468,51 +575,59 @@ def main() -> None:
         total_costs = 0.0
         total_llm_costs = 0.0
         total_gas_costs = 0.0
+        current_provider_run_rows: List[Dict[str, Any]] = []
 
         for provider_id, vals in by_provider.items():
             pid = int(provider_id)
+            provider_profile = vals.get("profile") or provider_meta_map.get(pid)
             revenue = safe_float(vals.get("revenue", 0.0))
             llm_costs = safe_float(vals.get("llm_costs", 0.0))
             gas_costs = safe_float(vals.get("gas_costs", 0.0))
             total_cost = safe_float(vals.get("total_costs", 0.0))
             net_balance = safe_float(vals.get("net_balance", 0.0))
-            provider_summary_rows.append(
-                {
-                    **base,
-                    "provider_id": pid,
-                    "revenue": revenue,
-                    "llm_costs": llm_costs,
-                    "gas_costs": gas_costs,
-                    "total_costs": total_cost,
-                    "net_balance": net_balance,
-                    "snapshots": vals.get("snapshots", 0),
-                }
-            )
+            provider_summary_row = {
+                **base,
+                "provider_id": pid,
+                "revenue": revenue,
+                "llm_costs": llm_costs,
+                "gas_costs": gas_costs,
+                "total_costs": total_cost,
+                "net_balance": net_balance,
+                "snapshots": vals.get("snapshots", 0),
+            }
+            provider_summary_rows.append(enrich_with_provider_profile(provider_summary_row, provider_profile))
 
             stats = provider_bid_stats.get(pid, {})
+            eligible = safe_float(stats.get("eligible", 0.0))
+            participated = safe_float(stats.get("participated", 0.0))
             attempted = safe_float(stats.get("attempted", 0.0))
             on_chain = safe_float(stats.get("on_chain", 0.0))
             wins = safe_float(stats.get("wins", 0.0))
             attempted_bid_sum = safe_float(stats.get("attempted_bid_sum", 0.0))
             on_chain_bid_sum = safe_float(stats.get("on_chain_bid_sum", 0.0))
 
-            provider_run_rows.append(
-                {
-                    **base,
-                    "provider_id": pid,
-                    "wins": int(wins),
-                    "bids_attempted": int(attempted),
-                    "bids_on_chain": int(on_chain),
-                    "bid_acceptance_rate": safe_div(on_chain, attempted),
-                    "mean_attempted_bid_usdc": safe_div(attempted_bid_sum / 1e6, attempted),
-                    "mean_on_chain_bid_usdc": safe_div(on_chain_bid_sum / 1e6, on_chain),
-                    "revenue": revenue,
-                    "llm_costs": llm_costs,
-                    "gas_costs": gas_costs,
-                    "total_costs": total_cost,
-                    "net_balance": net_balance,
-                }
-            )
+            provider_run_row = {
+                **base,
+                "provider_id": pid,
+                "eligible_auctions": int(eligible),
+                "participated_auctions": int(participated),
+                "wins": int(wins),
+                "bids_attempted": int(attempted),
+                "bids_on_chain": int(on_chain),
+                "bid_participation_rate": safe_div(participated, eligible),
+                "bid_acceptance_rate": safe_div(on_chain, attempted),
+                "win_rate_per_eligible": safe_div(wins, eligible),
+                "mean_attempted_bid_usdc": safe_div(attempted_bid_sum / 1e6, attempted),
+                "mean_on_chain_bid_usdc": safe_div(on_chain_bid_sum / 1e6, on_chain),
+                "revenue": revenue,
+                "llm_costs": llm_costs,
+                "gas_costs": gas_costs,
+                "total_costs": total_cost,
+                "net_balance": net_balance,
+            }
+            enriched_provider_run_row = enrich_with_provider_profile(provider_run_row, provider_profile)
+            provider_run_rows.append(enriched_provider_run_row)
+            current_provider_run_rows.append(enriched_provider_run_row)
 
             net_balances.append(net_balance)
             total_revenue += revenue
@@ -521,20 +636,22 @@ def main() -> None:
             total_gas_costs += gas_costs
 
         for row in fin.get("evolution", []):
-            provider_fin_evolution_rows.append(
-                {
-                    **base,
-                    "timestamp": row.get("timestamp"),
-                    "provider_id": row.get("provider_id"),
-                    "revenue": row.get("revenue", 0.0),
-                    "llm_costs": row.get("llm_costs", 0.0),
-                    "gas_costs": row.get("gas_costs", 0.0),
-                    "total_costs": row.get("total_costs", 0.0),
-                    "net_balance": row.get("net_balance", 0.0),
-                }
-            )
+            provider_id = safe_int(row.get("provider_id"), default=-1)
+            fin_row = {
+                **base,
+                "timestamp": row.get("timestamp"),
+                "provider_id": provider_id,
+                "revenue": row.get("revenue", 0.0),
+                "llm_costs": row.get("llm_costs", 0.0),
+                "gas_costs": row.get("gas_costs", 0.0),
+                "total_costs": row.get("total_costs", 0.0),
+                "net_balance": row.get("net_balance", 0.0),
+            }
+            provider_fin_evolution_rows.append(enrich_with_provider_profile(fin_row, row.get("profile") or provider_meta_map.get(provider_id)))
 
-        reputation_rows.extend(parse_reputation_rows(base, data.get("reputation_evolution", [])))
+        for rep_row in parse_reputation_rows(base, data.get("reputation_evolution", [])):
+            provider_id = safe_int(rep_row.get("provider_id"), default=-1)
+            reputation_rows.append(enrich_with_provider_profile(rep_row, provider_meta_map.get(provider_id)))
 
         completed_auctions = safe_float(summary.get("completed_auctions", 0))
         total_bids_attempted = safe_float(summary.get("total_bids_attempted", 0))
@@ -578,6 +695,58 @@ def main() -> None:
                 "top1_profit_share": safe_div(max(net_balances) if net_balances else 0.0, sum(max(0.0, v) for v in net_balances)),
             }
         )
+
+        subtype_groups: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in current_provider_run_rows:
+            subtype_groups[row.get("provider_subtype_label", "unknown")].append(row)
+
+        total_provider_count = len(current_provider_run_rows)
+        total_wins = sum(safe_float(row.get("wins", 0.0)) for row in current_provider_run_rows)
+        total_revenue_for_shares = sum(safe_float(row.get("revenue", 0.0)) for row in current_provider_run_rows)
+
+        for subtype_label, rows in sorted(subtype_groups.items(), key=lambda item: item[0]):
+            provider_count = len(rows)
+            wins_total = sum(safe_float(row.get("wins", 0.0)) for row in rows)
+            revenue_total = sum(safe_float(row.get("revenue", 0.0)) for row in rows)
+            llm_costs_total = sum(safe_float(row.get("llm_costs", 0.0)) for row in rows)
+            gas_costs_total = sum(safe_float(row.get("gas_costs", 0.0)) for row in rows)
+            total_costs_total = sum(safe_float(row.get("total_costs", 0.0)) for row in rows)
+            net_balance_total = sum(safe_float(row.get("net_balance", 0.0)) for row in rows)
+            eligible_total = sum(safe_float(row.get("eligible_auctions", 0.0)) for row in rows)
+            participated_total = sum(safe_float(row.get("participated_auctions", 0.0)) for row in rows)
+            bids_attempted_total = sum(safe_float(row.get("bids_attempted", 0.0)) for row in rows)
+            bids_on_chain_total = sum(safe_float(row.get("bids_on_chain", 0.0)) for row in rows)
+            provider_type_run_rows.append(
+                {
+                    **base,
+                    "provider_subtype_label": subtype_label,
+                    "provider_group_name": rows[0].get("provider_group_name"),
+                    "provider_architecture": rows[0].get("provider_architecture"),
+                    "provider_reasoning_mode": rows[0].get("provider_reasoning_mode"),
+                    "provider_heuristic_strategy": rows[0].get("provider_heuristic_strategy"),
+                    "provider_count": provider_count,
+                    "population_share": safe_div(provider_count, total_provider_count),
+                    "eligible_auctions_total": int(eligible_total),
+                    "participated_auctions_total": int(participated_total),
+                    "bids_attempted_total": int(bids_attempted_total),
+                    "bids_on_chain_total": int(bids_on_chain_total),
+                    "wins_total": int(wins_total),
+                    "win_share": safe_div(wins_total, total_wins),
+                    "revenue_total": revenue_total,
+                    "revenue_share": safe_div(revenue_total, total_revenue_for_shares),
+                    "llm_costs_total": llm_costs_total,
+                    "gas_costs_total": gas_costs_total,
+                    "total_costs_total": total_costs_total,
+                    "net_balance_total": net_balance_total,
+                    "mean_net_balance": fmean([safe_float(row.get("net_balance", 0.0)) for row in rows]),
+                    "mean_revenue": fmean([safe_float(row.get("revenue", 0.0)) for row in rows]),
+                    "mean_bid_participation_rate": fmean([safe_float(row.get("bid_participation_rate", 0.0)) for row in rows]),
+                    "mean_bid_acceptance_rate": fmean([safe_float(row.get("bid_acceptance_rate", 0.0)) for row in rows]),
+                    "mean_win_rate_per_eligible": fmean([safe_float(row.get("win_rate_per_eligible", 0.0)) for row in rows]),
+                    "mean_attempted_bid_usdc": fmean([safe_float(row.get("mean_attempted_bid_usdc", 0.0)) for row in rows]),
+                    "mean_on_chain_bid_usdc": fmean([safe_float(row.get("mean_on_chain_bid_usdc", 0.0)) for row in rows]),
+                }
+            )
 
     group_fields = [f.strip() for f in args.group_by.split(",") if f.strip()]
     metric_fields = [
@@ -638,6 +807,8 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "success",
             "duration_seconds",
@@ -675,6 +846,12 @@ def main() -> None:
             "bid_count_on_chain",
             "bid_count_attempted",
             "bid_failure_count",
+            "eligible_provider_count",
+            "winner_group_name",
+            "winner_architecture",
+            "winner_reasoning_mode",
+            "winner_heuristic_strategy",
+            "winner_subtype_label",
             "service_executed",
             "quality_rating",
             "feedback_submitted",
@@ -693,8 +870,17 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "provider_id",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_heuristic_min_margin",
+            "provider_heuristic_max_margin",
+            "provider_subtype_label",
             "revenue",
             "llm_costs",
             "gas_costs",
@@ -714,12 +900,25 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "provider_id",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_heuristic_min_margin",
+            "provider_heuristic_max_margin",
+            "provider_subtype_label",
+            "eligible_auctions",
+            "participated_auctions",
             "wins",
             "bids_attempted",
             "bids_on_chain",
+            "bid_participation_rate",
             "bid_acceptance_rate",
+            "win_rate_per_eligible",
             "mean_attempted_bid_usdc",
             "mean_on_chain_bid_usdc",
             "revenue",
@@ -727,6 +926,48 @@ def main() -> None:
             "gas_costs",
             "total_costs",
             "net_balance",
+        ],
+    )
+
+    write_csv(
+        out / "provider_type_run_summary.csv",
+        provider_type_run_rows,
+        [
+            "experiment_id",
+            "architecture",
+            "reasoning_mode",
+            "is_heuristic",
+            "scenario",
+            "seed",
+            "provider_mix",
+            "provider_subtype_count",
+            "metrics_file",
+            "provider_subtype_label",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_count",
+            "population_share",
+            "eligible_auctions_total",
+            "participated_auctions_total",
+            "bids_attempted_total",
+            "bids_on_chain_total",
+            "wins_total",
+            "win_share",
+            "revenue_total",
+            "revenue_share",
+            "llm_costs_total",
+            "gas_costs_total",
+            "total_costs_total",
+            "net_balance_total",
+            "mean_net_balance",
+            "mean_revenue",
+            "mean_bid_participation_rate",
+            "mean_bid_acceptance_rate",
+            "mean_win_rate_per_eligible",
+            "mean_attempted_bid_usdc",
+            "mean_on_chain_bid_usdc",
         ],
     )
 
@@ -740,9 +981,18 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "timestamp",
             "provider_id",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_heuristic_min_margin",
+            "provider_heuristic_max_margin",
+            "provider_subtype_label",
             "revenue",
             "llm_costs",
             "gas_costs",
@@ -761,11 +1011,20 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "sequence",
             "timestamp",
             "after_auction",
             "provider_id",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_heuristic_min_margin",
+            "provider_heuristic_max_margin",
+            "provider_subtype_label",
             "reputation_score",
             "feedback_count",
             "source",
@@ -782,9 +1041,18 @@ def main() -> None:
             "is_heuristic",
             "scenario",
             "seed",
+            "provider_mix",
+            "provider_subtype_count",
             "metrics_file",
             "auction_id",
             "provider_id",
+            "provider_group_name",
+            "provider_architecture",
+            "provider_reasoning_mode",
+            "provider_heuristic_strategy",
+            "provider_heuristic_min_margin",
+            "provider_heuristic_max_margin",
+            "provider_subtype_label",
             "bid_amount",
             "bid_amount_usdc",
             "budget",

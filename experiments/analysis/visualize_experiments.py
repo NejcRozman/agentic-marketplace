@@ -52,6 +52,25 @@ def label_of(row: Dict[str, Any]) -> str:
     return f"{row.get('architecture', 'unknown')}-{row.get('reasoning_mode', 'unknown')}-{scenario}"
 
 
+def subtype_label_of(row: Dict[str, Any]) -> str:
+    label = str(row.get("provider_subtype_label", "")).strip()
+    if label and label != "unknown":
+        return label
+    group_name = str(row.get("provider_group_name", "")).strip()
+    if group_name and group_name != "default":
+        return group_name
+    architecture = str(row.get("provider_architecture", "")).strip()
+    reasoning = str(row.get("provider_reasoning_mode", "")).strip()
+    if architecture and reasoning:
+        return f"{architecture}-{reasoning}"
+    return architecture or reasoning or "unknown"
+
+
+def has_multiple_subtypes(rows: List[Dict[str, Any]]) -> bool:
+    labels = {subtype_label_of(row) for row in rows if subtype_label_of(row) != "unknown"}
+    return len(labels) > 1
+
+
 def parse_log_timestamp(value: Any) -> datetime | None:
     if value is None:
         return None
@@ -610,7 +629,7 @@ def plot_profit_fairness(provider_run_rows: List[Dict[str, Any]], run_economics_
     labels = sorted(by_label_balances.keys())
     if labels:
         data = [by_label_balances[l] for l in labels]
-        ax_dist.boxplot(data, tick_labels=labels, showmeans=True)
+        ax_dist.boxplot(data, labels=labels, showmeans=True)
         ax_dist.tick_params(axis="x", rotation=20)
     ax_dist.set_title("Long-run Profit Distribution")
     ax_dist.set_ylabel("Net Balance (USD)")
@@ -755,6 +774,130 @@ def plot_architecture_rates(group_rows: List[Dict[str, Any]], fig_dir: Path) -> 
     save_fig(fig, fig_dir / "fig_architecture_rates.png")
 
 
+def plot_heterogeneous_mix_shares(provider_type_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    if not provider_type_rows or not has_multiple_subtypes(provider_type_rows):
+        return
+
+    by_subtype: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in provider_type_rows:
+        by_subtype[subtype_label_of(row)].append(row)
+
+    labels = sorted(by_subtype.keys())
+    if not labels:
+        return
+
+    population = [fmean([to_float(row.get("population_share"), 0.0) for row in by_subtype[label]]) for label in labels]
+    wins = [fmean([to_float(row.get("win_share"), 0.0) for row in by_subtype[label]]) for label in labels]
+    revenue = [fmean([to_float(row.get("revenue_share"), 0.0) for row in by_subtype[label]]) for label in labels]
+
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    x = list(range(len(labels)))
+    width = 0.24
+    ax.bar([i - width for i in x], population, width=width, label="Population share")
+    ax.bar(x, wins, width=width, label="Win share")
+    ax.bar([i + width for i in x], revenue, width=width, label="Revenue share")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Share")
+    ax.set_title("Heterogeneous Mix: Population vs Wins vs Revenue")
+    ax.legend()
+    save_fig(fig, fig_dir / "fig_heterogeneous_mix_shares.png")
+
+
+def plot_heterogeneous_provider_outcomes(provider_run_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    if not provider_run_rows or not has_multiple_subtypes(provider_run_rows):
+        return
+
+    by_subtype: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for row in provider_run_rows:
+        by_subtype[subtype_label_of(row)].append(row)
+
+    labels = sorted(by_subtype.keys())
+    if not labels:
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5.0))
+    ax_balance, ax_rates = axes
+
+    balance_data = [[to_float(row.get("net_balance"), 0.0) for row in by_subtype[label]] for label in labels]
+    ax_balance.boxplot(balance_data, labels=labels, showmeans=True)
+    ax_balance.tick_params(axis="x", rotation=20)
+    ax_balance.set_title("Provider Net Balance by Subtype")
+    ax_balance.set_ylabel("Net Balance (USD)")
+
+    x = list(range(len(labels)))
+    participation = [fmean([to_float(row.get("bid_participation_rate"), 0.0) for row in by_subtype[label]]) for label in labels]
+    win_rate = [fmean([to_float(row.get("win_rate_per_eligible"), 0.0) for row in by_subtype[label]]) for label in labels]
+    acceptance = [fmean([to_float(row.get("bid_acceptance_rate"), 0.0) for row in by_subtype[label]]) for label in labels]
+    width = 0.24
+    ax_rates.bar([i - width for i in x], participation, width=width, label="Bid participation")
+    ax_rates.bar(x, win_rate, width=width, label="Win / eligible")
+    ax_rates.bar([i + width for i in x], acceptance, width=width, label="Bid acceptance")
+    ax_rates.set_xticks(x)
+    ax_rates.set_xticklabels(labels, rotation=20, ha="right")
+    ax_rates.set_ylim(0, 1)
+    ax_rates.set_title("Provider Outcome Rates by Subtype")
+    ax_rates.set_ylabel("Rate")
+    ax_rates.legend(fontsize=8)
+
+    save_fig(fig, fig_dir / "fig_heterogeneous_provider_outcomes.png")
+
+
+def plot_heterogeneous_reputation_by_subtype(reputation_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    if not reputation_rows or not has_multiple_subtypes(reputation_rows):
+        return
+
+    grouped: Dict[str, Dict[int, List[float]]] = defaultdict(lambda: defaultdict(list))
+    for row in reputation_rows:
+        subtype = subtype_label_of(row)
+        after_auction = to_int(row.get("after_auction"), -1)
+        score = to_float(row.get("reputation_score"), -1.0)
+        if subtype == "unknown" or after_auction < 0 or score < 0:
+            continue
+        grouped[subtype][after_auction].append(score)
+
+    if not grouped:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 5.0))
+    for subtype in sorted(grouped.keys()):
+        xs = sorted(grouped[subtype].keys())
+        ys = [fmean(grouped[subtype][x]) for x in xs]
+        ax.plot(xs, ys, marker="o", linewidth=1.5, label=subtype)
+
+    ax.set_title("Mean Reputation Trajectory by Subtype")
+    ax.set_xlabel("After Auction")
+    ax.set_ylabel("Reputation score")
+    ax.set_ylim(0, 100)
+    ax.legend(fontsize=8)
+    save_fig(fig, fig_dir / "fig_heterogeneous_reputation_by_subtype.png")
+
+
+def plot_heterogeneous_bid_behavior(bid_market_rows: List[Dict[str, Any]], fig_dir: Path) -> None:
+    if not bid_market_rows or not has_multiple_subtypes(bid_market_rows):
+        return
+
+    by_subtype: Dict[str, List[float]] = defaultdict(list)
+    for row in bid_market_rows:
+        subtype = subtype_label_of(row)
+        bid_ratio = to_float(row.get("normalized_bid"), -1.0)
+        if subtype == "unknown" or bid_ratio < 0:
+            continue
+        by_subtype[subtype].append(bid_ratio)
+
+    labels = sorted(by_subtype.keys())
+    if not labels:
+        return
+
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.boxplot([by_subtype[label] for label in labels], labels=labels, showmeans=True)
+    ax.tick_params(axis="x", rotation=20)
+    ax.set_title("Normalized Bid Distribution by Subtype")
+    ax.set_ylabel("Bid / Budget")
+    save_fig(fig, fig_dir / "fig_heterogeneous_bid_behavior.png")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Create analysis charts from aggregated CSV outputs")
     parser.add_argument("--input-dir", type=Path, default=Path("experiments/analysis/output"))
@@ -773,6 +916,7 @@ def main() -> None:
     provider_summary_rows = read_csv(args.input_dir / "provider_financials_summary.csv")
     provider_fin_evolution_rows = read_csv(args.input_dir / "provider_financials_evolution.csv")
     provider_run_rows = read_csv(args.input_dir / "provider_run_summary.csv")
+    provider_type_run_rows = read_csv(args.input_dir / "provider_type_run_summary.csv")
     run_economics_rows = read_csv(args.input_dir / "run_economics.csv")
     bid_market_rows = read_csv(args.input_dir / "bid_market_data.csv")
     reputation_rows = read_csv(args.input_dir / "reputation_evolution.csv")
@@ -790,6 +934,14 @@ def main() -> None:
         plot_reputation_vs_bid(bid_market_rows, args.fig_dir)
     if run_economics_rows:
         plot_decomposed_normalized_metrics(run_economics_rows, args.fig_dir)
+    if provider_type_run_rows:
+        plot_heterogeneous_mix_shares(provider_type_run_rows, args.fig_dir)
+    if provider_run_rows:
+        plot_heterogeneous_provider_outcomes(provider_run_rows, args.fig_dir)
+    if reputation_rows:
+        plot_heterogeneous_reputation_by_subtype(reputation_rows, args.fig_dir)
+    if bid_market_rows:
+        plot_heterogeneous_bid_behavior(bid_market_rows, args.fig_dir)
 
     if args.profile == "full":
         if auction_rows:

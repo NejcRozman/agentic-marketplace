@@ -45,6 +45,8 @@ class TestArchitecture2Prompts(unittest.TestCase):
         self.assertIn("Primary objective:", prompt_a2)
         self.assertIn("Strategic policy:", prompt_a1)
         self.assertIn("Strategic policy:", prompt_a2)
+        self.assertIn("You are not limited to round-number bids", prompt_a1)
+        self.assertIn("You are not limited to round-number bids", prompt_a2)
 
         # A1: explicit unavailability markers.
         self.assertIn("current_balance_usd: unavailable in this architecture", prompt_a1)
@@ -54,6 +56,8 @@ class TestArchitecture2Prompts(unittest.TestCase):
         self.assertIn("current_balance_usd: -2.5", prompt_a2)
         self.assertIn("past_execution_costs_count: 3", prompt_a2)
         self.assertIn("past_execution_costs_avg_usd: 0.12", prompt_a2)
+        self.assertIn("Past execution costs are raw service-execution costs only", prompt_a2)
+        self.assertIn("estimated_service_cost already adds amortized non-execution overhead", prompt_a2)
 
 
 class TestArchitecture2StateCoupling(unittest.TestCase):
@@ -79,9 +83,11 @@ class TestArchitecture2StateCoupling(unittest.TestCase):
         mock_client.call_contract_method = AsyncMock(side_effect=_call_contract_method)
         return mock_client
 
-    def test_a2_uses_latest_execution_cost_for_estimate(self):
+    def test_a2_uses_additive_total_cost_estimate(self):
         tracker = CostTracker(agent_id="test_agent", config=self.config)
         tracker.get_execution_cost_history = Mock(return_value=[0.08, 0.11, 0.15])
+        tracker.get_average_execution_cost = Mock(return_value=(0.08 + 0.11 + 0.15) / 3)
+        tracker.get_average_non_execution_cost_per_auction = Mock(return_value=0.05)
         tracker.get_net_balance = Mock(return_value=-1.75)
 
         handler = BlockchainHandler(
@@ -96,13 +102,15 @@ class TestArchitecture2StateCoupling(unittest.TestCase):
         state = {"agent_id": 1, "action": "monitor", "messages": []}
         result = asyncio.run(handler._gather_state_node(state))
 
-        self.assertEqual(result.get("estimated_service_cost"), 0.15)
+        self.assertAlmostEqual(result.get("estimated_service_cost"), ((0.08 + 0.11 + 0.15) / 3) + 0.05, places=6)
         self.assertEqual(result.get("past_execution_costs"), [0.08, 0.11, 0.15])
         self.assertAlmostEqual(result.get("current_balance"), -1.75, places=6)
 
     def test_a2_falls_back_to_base_cost_when_history_empty(self):
         tracker = CostTracker(agent_id="test_agent", config=self.config)
         tracker.get_execution_cost_history = Mock(return_value=[])
+        tracker.get_average_execution_cost = Mock(return_value=self.config.bidding_base_cost)
+        tracker.get_average_non_execution_cost_per_auction = Mock(return_value=0.0)
         tracker.get_net_balance = Mock(return_value=0.0)
 
         handler = BlockchainHandler(

@@ -1588,7 +1588,7 @@ class TestConsumerRunLoop(unittest.TestCase):
             print("\n✓ stop() sets running=False")
     
     def test_get_status(self):
-        """Test get_status returns correct counts."""
+        """Test get_status returns counts and per-auction lifecycle details."""
         with patch('agents.consumer_agent.consumer_orchestrator.ConsumerBlockchainHandler'), \
              patch('agents.consumer_agent.consumer_orchestrator.IPFSClient'), \
              patch('agents.consumer_agent.consumer_orchestrator.ServiceGenerator'), \
@@ -1597,17 +1597,66 @@ class TestConsumerRunLoop(unittest.TestCase):
             mock_config = Mock(spec=Config)
             mock_config.consumer_check_interval = 10
             consumer = Consumer(mock_config)
-            consumer.active_auctions = {1: Mock(), 2: Mock(), 3: Mock()}
-            consumer.completed_auctions = [Mock(), Mock()]
+            created_at = datetime(2026, 5, 12, 10, 0, 0)
+            ended_at = datetime(2026, 5, 12, 10, 2, 0)
+            completed_at = datetime(2026, 5, 12, 10, 3, 30)
+            evaluation_started_at = datetime(2026, 5, 12, 10, 3, 31)
+            evaluation_completed_at = datetime(2026, 5, 12, 10, 3, 40)
+            feedback_submitted_at = datetime(2026, 5, 12, 10, 3, 42)
+
+            active_tracker = AuctionTracker(
+                auction_id=1,
+                status=AuctionStatus.ACTIVE,
+                created_at=created_at,
+                service_cid="QmActive",
+                max_budget=100000,
+                duration=120,
+                eligible_providers=[11, 12],
+            )
+            completed_tracker = AuctionTracker(
+                auction_id=2,
+                status=AuctionStatus.COMPLETED,
+                created_at=created_at,
+                service_cid="QmDone",
+                max_budget=100000,
+                duration=120,
+                eligible_providers=[11, 12],
+                winning_agent_id=12,
+                winning_bid=30000,
+                ended_at=ended_at,
+                completed_at=completed_at,
+                evaluation_started_at=evaluation_started_at,
+                evaluation_completed_at=evaluation_completed_at,
+                feedback_submitted_at=feedback_submitted_at,
+                evaluation={
+                    "rating": 87,
+                    "quality_scores": {"accuracy": 90},
+                    "explanations": ["Looks good"],
+                    "error": None,
+                },
+                feedback_submitted=True,
+                result_path=Path("/tmp/auction_2/result.json"),
+            )
+
+            consumer.active_auctions = {1: active_tracker}
+            consumer.completed_auctions = [completed_tracker]
             consumer.running = True
             
             status = consumer.get_status()
             
-            self.assertEqual(status["active_auctions"], 3)
-            self.assertEqual(status["completed_auctions"], 2)
+            self.assertEqual(status["active_auctions"], 1)
+            self.assertEqual(status["completed_auctions"], 1)
             self.assertTrue(status["running"])
+            self.assertEqual(len(status["auctions"]), 2)
+
+            completed_status = next(row for row in status["auctions"] if row["auction_id"] == 2)
+            self.assertEqual(completed_status["quality_rating"], 87)
+            self.assertEqual(completed_status["execution_duration_seconds"], 90)
+            self.assertEqual(completed_status["evaluation_duration_seconds"], 9)
+            self.assertEqual(completed_status["quality_method"], "consumer_evaluator")
+            self.assertTrue(completed_status["feedback_submitted"])
             
-            print("\n✓ get_status returns correct counts")
+            print("\n✓ get_status returns counts and per-auction details")
 
 
 if __name__ == "__main__":

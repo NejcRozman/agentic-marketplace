@@ -1,11 +1,12 @@
-# H2 Heuristic Homogeneous Experiment (Feasible Random Strategy)
-# Purpose: Non-smoke homogeneous run for heuristic provider agents using feasible_random bidding
+# Heterogeneous provider-mix template
+# Ratios are treated as weights over the total provider count.
+
 
 experiment:
-  id: "h2_heuristic_homogeneous"
-  name: "Heuristic Feasible-Random Homogeneous"
-  description: "Homogeneous heuristic setup with 1 consumer and X providers over Y auctions using feasible_random"
-  research_question: "homogeneous_heuristic_baseline"
+  id: "react_heterogeneous_template"
+  name: "Heterogeneous ReAct Template"
+  description: "Template for mixed provider architectures with ratio-based group allocation"
+  research_question: "heterogeneous_provider_mix"
   duration_timeout: 21600  # 6 hours max
 
 blockchain:
@@ -42,7 +43,7 @@ agents:
     config:
       check_interval: 10
       max_budget: 100000         # 0.1 USDC
-      auction_duration: 120         # 2 minute
+      auction_duration: 120      # 2 minutes
       reputation_weight: 20
 
     behavior:
@@ -50,32 +51,43 @@ agents:
       service_selection: "sequential"
       service_complexity: "medium"
       auto_create_auction: true
-      num_auctions: 12
+      num_auctions: 2
       auto_monitor: true
       inter_auction_delay: 3
 
   providers:
-    count: 3
-    agent_ids: [null, null, null]
+    count: 4
+    agent_ids: [null, null, null, null]
     private_keys: null
 
+    # Shared defaults inherited by every provider group unless overridden below.
     config:
       check_interval: 10
-      bidding_base_cost: 0.03         # 0.03 USD estimated service cost
-      gas_cost_mode: "fixed"      # model with fixed network average gas price
-      gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
-      eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)
+      bidding_base_cost: 0.03
+      gas_cost_mode: "fixed"
+      gas_price_gwei: 121
+      eth_price_usd: 0.1
 
     behavior:
-      # Homogeneous heuristic setup (feasible random)
-      architecture: "1"
-      reasoning_mode: "heuristic"
-      heuristic_strategy: "feasible_random"
-      heuristic_min_margin: 0.10
-      heuristic_max_margin: 0.30
       auto_bid: true
       auto_execute: true
       auto_complete: true
+
+    groups:
+      - name: "a1_react"
+        ratio: 1
+        behavior:
+          architecture: "1"
+          reasoning_mode: "llm_react"
+
+      - name: "h2_heuristic"
+        ratio: 1
+        behavior:
+          architecture: "1"
+          reasoning_mode: "heuristic"
+          heuristic_strategy: "feasible_random"
+          heuristic_min_margin: 0.10
+          heuristic_max_margin: 0.30
 
 experiment_flow:
   phases:
@@ -110,15 +122,9 @@ monitoring:
     - timing
 
   logs:
-    directory: "experiments/data/logs/h2_heuristic_homogeneous"
+    directory: "experiments/data/logs/react_heterogeneous_template"
     format: "json"
     level: "INFO"
 
   output:
-    directory: "experiments/data/metrics/h2_heuristic_homogeneous"
-    format: "json"
-
-api_keys:
-  openrouter_api_key_env: "OPENROUTER_API_KEY"
-  pinata_api_key_env: "PINATA_API_KEY"
-  pinata_secret_env: "PINATA_SECRET_KEY"
+    directory: "experiments/data/metrics/react_heterogeneous_template"

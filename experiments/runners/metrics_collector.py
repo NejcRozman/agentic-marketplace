@@ -108,13 +108,60 @@ class MetricsCollector:
             "identity_registry": identity_registry,
             "reputation_registry": reputation_registry
         }
+
+    @staticmethod
+    def _normalize_provider_profile(profile: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Normalize provider subtype metadata for storage and joins."""
+        if not isinstance(profile, dict):
+            return {}
+
+        provider_id = profile.get("provider_id")
+        try:
+            provider_id = int(provider_id) if provider_id is not None else None
+        except Exception:
+            provider_id = None
+
+        return {
+            "provider_id": provider_id,
+            "group_name": profile.get("group_name") or "default",
+            "architecture": profile.get("architecture"),
+            "reasoning_mode": profile.get("reasoning_mode"),
+            "heuristic_strategy": profile.get("heuristic_strategy"),
+            "heuristic_min_margin": profile.get("heuristic_min_margin"),
+            "heuristic_max_margin": profile.get("heuristic_max_margin"),
+        }
+
+    def _provider_profile_map(self) -> Dict[int, Dict[str, Any]]:
+        """Return provider subtype metadata keyed by provider id."""
+        profiles = self.metrics.get("agents", {}).get("provider_profiles", []) or []
+        out: Dict[int, Dict[str, Any]] = {}
+        for profile in profiles:
+            normalized = self._normalize_provider_profile(profile)
+            provider_id = normalized.get("provider_id")
+            if provider_id is None:
+                continue
+            out[int(provider_id)] = normalized
+        return out
         
-    def set_agents(self, consumer_id: int, provider_ids: List[int]):
+    def set_agents(self, consumer_id: int, provider_ids: List[int], provider_profiles: Optional[List[Dict[str, Any]]] = None):
         """Record agent IDs."""
+        normalized_profiles = [
+            self._normalize_provider_profile(profile)
+            for profile in (provider_profiles or [])
+            if self._normalize_provider_profile(profile)
+        ]
+
+        mix_counts: Dict[str, int] = {}
+        for profile in normalized_profiles:
+            label = profile.get("group_name") or "default"
+            mix_counts[label] = mix_counts.get(label, 0) + 1
+
         self.metrics["agents"] = {
             "consumer_id": consumer_id,
             "provider_ids": provider_ids,
-            "provider_count": len(provider_ids)
+            "provider_count": len(provider_ids),
+            "provider_profiles": normalized_profiles,
+            "provider_mix": mix_counts,
         }
     
     def collect_auction_from_blockchain(self, w3: Web3, auction_contract, auction_id: int, reputation_contract=None) -> Dict[str, Any]:
@@ -336,6 +383,11 @@ class MetricsCollector:
                     if runtime_job.get("error"):
                         auction_data["errors"].append(f"provider_job_error: {runtime_job.get('error')}")
 
+            # 5b. Merge consumer-side completion and evaluation details from runtime snapshots.
+            runtime_consumer_auction = self._runtime_consumer_auction(auction_id)
+            if runtime_consumer_auction:
+                self._apply_runtime_consumer_auction(auction_data, runtime_consumer_auction)
+
             # 6. Collect reputation data if winner exists and reputation contract provided
             if auction_data["winner_id"] and reputation_contract:
                 try:
@@ -416,27 +468,38 @@ class MetricsCollector:
                     last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
                     timing["first_bid_to_close"] = last_bid_ts - first_bid_ts
             
-            # Execution timing from log timestamps
-            if auction_data["execution_start"] and auction_data["execution_end"]:
-                from datetime import datetime
-                start = datetime.strptime(auction_data["execution_start"], "%Y-%m-%d %H:%M:%S")
-                end = datetime.strptime(auction_data["execution_end"], "%Y-%m-%d %H:%M:%S")
-                timing["execution"] = int((end - start).total_seconds())
-                
-                # Close to execution start
-                # Use actual auction end timestamp for accurate measurement
-                if auction_data.get("timestamp_ended"):
-                    execution_start_ts = int(start.timestamp())
-                    timing["close_to_execution_start"] = execution_start_ts - auction_data["timestamp_ended"]
-                    
-                    # Note: This CAN be negative if execution started before AuctionEnded event
-                    # This happens when provider starts work while auction is still active
-                    # or if there's clock skew between blockchain and local system
-                elif auction_data["bids_on_chain"]:
-                    # Fallback: use last bid time as proxy
-                    last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
-                    execution_start_ts = int(start.timestamp())
-                    timing["close_to_execution_start"] = execution_start_ts - last_bid_ts
+            execution_start = self._parse_runtime_datetime(auction_data.get("execution_start"))
+            execution_end = self._parse_runtime_datetime(auction_data.get("execution_end"))
+            execution_duration = int(auction_data.get("execution_duration_seconds", 0) or 0)
+            evaluation_duration = int(auction_data.get("evaluation_duration_seconds", 0) or 0)
+
+            # Execution timing from runtime timestamps when available.
+            execution_start_ts = None
+            if execution_start and execution_end:
+                timing["execution"] = max(0, int((execution_end - execution_start).total_seconds()))
+                execution_start_ts = int(execution_start.timestamp())
+            elif execution_duration > 0:
+                timing["execution"] = execution_duration
+                if execution_end:
+                    execution_start_ts = int(execution_end.timestamp()) - timing["execution"]
+                elif execution_start:
+                    execution_start_ts = int(execution_start.timestamp())
+
+            # Close to execution start
+            # Use actual auction end timestamp for accurate measurement when we can estimate execution start.
+            if execution_start_ts is not None and auction_data.get("timestamp_ended"):
+                timing["close_to_execution_start"] = execution_start_ts - auction_data["timestamp_ended"]
+
+                # Note: This CAN be negative if execution started before AuctionEnded event
+                # This happens when provider starts work while auction is still active
+                # or if there's clock skew between blockchain and local system
+            elif execution_start_ts is not None and auction_data["bids_on_chain"]:
+                # Fallback: use last bid time as proxy
+                last_bid_ts = auction_data["bids_on_chain"][-1]["timestamp"]
+                timing["close_to_execution_start"] = execution_start_ts - last_bid_ts
+
+            if evaluation_duration > 0:
+                timing["evaluation"] = evaluation_duration
             
             # Calculate total cycle time
             # Only calculate if all components are present (some may be 0 or negative)
@@ -445,10 +508,105 @@ class MetricsCollector:
                     timing["creation_to_first_bid"] + 
                     timing["first_bid_to_close"] + 
                     timing["close_to_execution_start"] + 
-                    timing["execution"]
+                    timing["execution"] +
+                    timing["evaluation"] +
+                    timing["feedback_submission"]
                 )
         except Exception as e:
             logger.warning(f"Error calculating timing metrics: {e}")
+
+    @staticmethod
+    def _parse_runtime_datetime(value: Any) -> Optional[datetime]:
+        """Parse timestamps emitted by agent status snapshots."""
+        if not value or not isinstance(value, str):
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _runtime_consumer_auction(self, auction_id: int) -> Optional[Dict[str, Any]]:
+        """Return the latest consumer runtime snapshot for a specific auction."""
+        snapshots = self.metrics.get("runtime", {}).get("consumer_status_snapshots", [])
+        for snap in reversed(snapshots):
+            status = snap.get("status") if isinstance(snap, dict) else None
+            auctions = status.get("auctions") if isinstance(status, dict) else None
+            if not isinstance(auctions, list):
+                continue
+            for auction in reversed(auctions):
+                try:
+                    if int(auction.get("auction_id", -1)) == int(auction_id):
+                        return auction
+                except Exception:
+                    continue
+        return None
+
+    def _apply_runtime_consumer_auction(self, auction_data: Dict[str, Any], runtime_auction: Dict[str, Any]):
+        """Merge consumer-side completion and evaluation data into an auction record."""
+        ended_at = self._parse_runtime_datetime(runtime_auction.get("ended_at"))
+        completed_at = self._parse_runtime_datetime(runtime_auction.get("completed_at"))
+        evaluation_started_at = self._parse_runtime_datetime(runtime_auction.get("evaluation_started_at"))
+        evaluation_completed_at = self._parse_runtime_datetime(runtime_auction.get("evaluation_completed_at"))
+        feedback_submitted_at = self._parse_runtime_datetime(runtime_auction.get("feedback_submitted_at"))
+
+        execution_duration = int(runtime_auction.get("execution_duration_seconds", 0) or 0)
+        if execution_duration <= 0 and ended_at and completed_at:
+            execution_duration = max(0, int((completed_at - ended_at).total_seconds()))
+
+        evaluation_duration = int(runtime_auction.get("evaluation_duration_seconds", 0) or 0)
+        if evaluation_duration <= 0 and evaluation_started_at and evaluation_completed_at:
+            evaluation_duration = max(0, int((evaluation_completed_at - evaluation_started_at).total_seconds()))
+
+        if ended_at and not auction_data.get("execution_start"):
+            auction_data["execution_start"] = ended_at.isoformat(timespec="seconds")
+        if completed_at and not auction_data.get("execution_end"):
+            auction_data["execution_end"] = completed_at.isoformat(timespec="seconds")
+
+        auction_data["service_executed"] = bool(runtime_auction.get("service_executed")) or bool(auction_data.get("service_executed"))
+        auction_data["feedback_submitted"] = bool(runtime_auction.get("feedback_submitted")) or bool(auction_data.get("feedback_submitted"))
+
+        if execution_duration > 0:
+            auction_data["execution_duration_seconds"] = execution_duration
+        if evaluation_duration > 0:
+            auction_data["evaluation_duration_seconds"] = evaluation_duration
+
+        quality_rating = runtime_auction.get("quality_rating")
+        if quality_rating is not None:
+            auction_data["quality_rating"] = quality_rating
+
+        feedback_rating = runtime_auction.get("feedback_rating")
+        if feedback_rating is not None:
+            auction_data["feedback_rating"] = feedback_rating
+
+        quality_method = runtime_auction.get("quality_method")
+        if quality_method:
+            auction_data["quality_method"] = quality_method
+
+        quality_scores = runtime_auction.get("quality_scores")
+        if isinstance(quality_scores, dict) and quality_scores:
+            auction_data.setdefault("quality_details", {})["quality_scores"] = quality_scores
+
+        quality_explanations = runtime_auction.get("quality_explanations")
+        if isinstance(quality_explanations, list) and quality_explanations:
+            auction_data.setdefault("quality_details", {})["explanations"] = quality_explanations
+
+        if evaluation_duration > 0:
+            auction_data["timing"]["evaluation"] = evaluation_duration
+        if feedback_submitted_at and evaluation_completed_at:
+            auction_data["timing"]["feedback_submission"] = max(
+                0,
+                int((feedback_submitted_at - evaluation_completed_at).total_seconds()),
+            )
+
+        runtime_error = runtime_auction.get("error")
+        if runtime_error:
+            auction_data["errors"].append(f"consumer_auction_error: {runtime_error}")
     
     def _validate_auction_data(self, auction_data: Dict[str, Any]):
         """
@@ -944,12 +1102,19 @@ class MetricsCollector:
             return
         snapshots.append(payload)
 
-    def record_provider_status_snapshot(self, provider_id: int, timestamp: str, status: Dict[str, Any], source: str = "runtime_status"):
+    def record_provider_status_snapshot(self, provider_id: int, timestamp: str, status: Dict[str, Any], provider_profile: Optional[Dict[str, Any]] = None, source: str = "runtime_status"):
         """Append provider runtime status snapshot with lightweight deduplication."""
         snapshots = self.metrics.setdefault("runtime", {}).setdefault("provider_status_snapshots", [])
+        resolved_profile = self._normalize_provider_profile(provider_profile)
+        if not resolved_profile:
+            resolved_profile = self._provider_profile_map().get(int(provider_id), {})
+        if not resolved_profile and isinstance(status, dict):
+            resolved_profile = self._normalize_provider_profile(status.get("profile"))
+
         payload = {
             "timestamp": timestamp,
             "provider_id": int(provider_id),
+            "profile": resolved_profile,
             "status": status,
             "source": source,
         }
@@ -1060,14 +1225,19 @@ class MetricsCollector:
         gas_costs: float,
         total_costs: float,
         net_balance: float,
+        provider_profile: Optional[Dict[str, Any]] = None,
         source: str = "runtime_status",
     ):
         """Append a runtime provider financial snapshot (deduplicated, monotonic-safe)."""
         runtime_snapshots = self.metrics.setdefault("provider_financials", {}).setdefault("runtime_snapshots", [])
+        resolved_profile = self._normalize_provider_profile(provider_profile)
+        if not resolved_profile:
+            resolved_profile = self._provider_profile_map().get(int(provider_id), {})
 
         snapshot = {
             "timestamp": timestamp,
             "provider_id": int(provider_id),
+            "profile": resolved_profile,
             "revenue": float(revenue),
             "llm_costs": float(llm_costs),
             "gas_costs": float(gas_costs),
@@ -1144,6 +1314,7 @@ class MetricsCollector:
                 )
 
             financials["by_provider"][provider_id] = {
+                "profile": last.get("profile") or self._provider_profile_map().get(int(provider_id), {}),
                 "revenue": reconciled_revenue,
                 "revenue_from_auctions": revenue_from_auctions,
                 "revenue_from_runtime": revenue_from_runtime,

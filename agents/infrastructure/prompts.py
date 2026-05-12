@@ -82,7 +82,7 @@ Long-term utility should consider:
 - Execution-cost uncertainty and risk of underpricing
 - Financial runway and sustainability
 
-Auction type: reverse auction. Lower bids help, but reputation also matters.
+Auction type: reverse auction. Lower bids are more competitive, but they also reduce revenue and profit. A higher bid is more conservative/profit-preserving; a lower bid is more aggressive/win-seeking.
 
 Contract scoring logic (higher score wins):
 - normalized_reputation = reputation * 100
@@ -90,8 +90,9 @@ Contract scoring logic (higher score wins):
 - score = (reputation_weight * normalized_reputation + (100 - reputation_weight) * normalized_bid_component) / 100
 
 Bid sensitivity:
-- Score precision is 10000, so a 1-step change in bid component is roughly `max_price / 10000` (in micro-USDC).
-- Changes smaller than that often do not affect score due to integer flooring.
+- In this setup, `max_price` is fixed at 100000 micro-USDC (0.1 USDC).
+- Therefore the smallest bid change that can affect the bid component is 10 micro-USDC (0.000010 USDC).
+- You are not limited to round-number bids; more refined integer micro-USDC bids are valid.
 
 Architecture-specific data policy:
 {architecture_data_policy}
@@ -108,11 +109,12 @@ Strategic policy:
    - competitiveness against current winner
    - long-term reputation/value effect
 2. Generate at least two candidate bids for important auctions when possible:
-   - one conservative (profit-preserving)
-   - one aggressive (win-seeking)
-3. You MAY choose a controlled short-term loss if and only if it materially improves winning odds and serves long-term recovery.
-4. Do not place loss-making bids that are still not competitive.
-5. Avoid repetitive high-loss behavior across cycles; adapt using available evidence.
+    - one conservative (higher price, more profit-preserving)
+    - one aggressive (lower price, more win-seeking)
+3. A bid below `estimated_cost` is immediate negative PnL.
+4. You MAY choose a controlled short-term loss if and only if it materially improves winning odds and serves long-term recovery.
+5. Do not place loss-making bids that are still not competitive.
+6. Avoid repetitive high-loss behavior across cycles; adapt using available evidence.
 
 Tool usage policy (strict):
 1. Use state values directly, do not invent replacements.
@@ -171,12 +173,11 @@ def _prompt_arch_1(agent_state: Dict[str, Any]) -> str:
         architecture_mode="A1 strategic reasoning (isolated)",
         architecture_data_policy=(
             "This architecture is isolated (no coupling to execution history). "
-            "You must not assume hidden historical cost or balance signals. "
             "Reason strategically using current auction state, current cost estimate, and available tools only."
         ),
         include_history=False,
         include_balance=False,
-        max_reasoning_steps=6,
+        max_reasoning_steps=3,
     )
 
 
@@ -194,11 +195,13 @@ def _prompt_arch_2(agent_state: Dict[str, Any]) -> str:
         architecture_mode="A2 strategic reasoning (one-way coupled)",
         architecture_data_policy=(
             "This architecture has one-way coupling from service execution to bidding. "
-            "You can use real past execution costs and current balance to calibrate risk and recovery strategy."
+            "You can use real past execution costs and current balance to calibrate risk and recovery strategy. "
+            "Past execution costs are raw service-execution costs only; they do not represent full end-to-end operating cost. "
+            "The provided estimated_service_cost already adds amortized non-execution overhead and is the total-cost estimate to use for bidding."
         ),
         include_history=True,
         include_balance=True,
-        max_reasoning_steps=6,
+        max_reasoning_steps=3,
     )
 
 

@@ -1454,8 +1454,14 @@ Analyze these auctions and decide which to bid on."""
             elif self.arch_config.state_level >= 1:
                 # State Level 1+: Performance history (if coupling allows) - Future architectures
                 if self.coupling_mode in ["one_way", "two_way"]:
-                    # Use most recent execution cost for the next estimate when available.
-                    state["estimated_service_cost"] = execution_history[-1] if execution_history else self.config.bidding_base_cost
+                    # Use a smoothed total-cost estimate: average completed
+                    # execution cost plus amortized non-execution overhead per
+                    # participated auction.
+                    average_execution_cost = self.cost_tracker.get_average_execution_cost(
+                        default=self.config.bidding_base_cost
+                    )
+                    average_non_execution_overhead = self.cost_tracker.get_average_non_execution_cost_per_auction()
+                    state["estimated_service_cost"] = average_execution_cost + average_non_execution_overhead
                 else:
                     # Isolated coupling: no history available
                     state["estimated_service_cost"] = self.config.bidding_base_cost
@@ -1856,8 +1862,6 @@ Analyze these auctions and decide which to bid on."""
                 # Human/System messages
                 if hasattr(msg, 'content') and msg.content:
                     content = str(msg.content)
-                    if len(content) > 500:
-                        content = content[:500] + "..."
                     logger.info(f"\n[{i}] {msg_class}:\n{content}")
                 
                 # AI messages with tool calls
@@ -1948,6 +1952,7 @@ Analyze these auctions and decide which to bid on."""
     ) -> None:
         """Track bid attempt outcomes for runtime status reporting."""
         if error == "attempt_started":
+            self.cost_tracker.record_auction_participation(auction_id)
             self._bid_attempt_stats["attempted"] += 1
             return
 

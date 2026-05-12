@@ -85,6 +85,118 @@ class ExperimentRunner:
         # Metrics collection
         self.metrics_collector: Optional[MetricsCollector] = None
         self.phase_timings: Dict[str, float] = {}  # Track phase durations
+
+    def _allocate_provider_group_counts(self, total_count: int, groups: List[Dict[str, Any]]) -> List[int]:
+        """Allocate integer provider counts from ratio weights."""
+        if total_count < 0:
+            raise ValueError("Provider count must be non-negative")
+        if not groups:
+            raise ValueError("Provider groups must be a non-empty list")
+
+        ratios: List[float] = []
+        for idx, group in enumerate(groups):
+            ratio = group.get('ratio')
+            if ratio is None:
+                raise ValueError(f"Provider group at index {idx} is missing required field 'ratio'")
+
+            ratio_value = float(ratio)
+            if ratio_value < 0:
+                raise ValueError(f"Provider group at index {idx} has invalid negative ratio: {ratio}")
+            ratios.append(ratio_value)
+
+        ratio_sum = sum(ratios)
+        if ratio_sum <= 0:
+            raise ValueError("Provider group ratios must sum to a positive value")
+
+        raw_counts = [(total_count * ratio) / ratio_sum for ratio in ratios]
+        allocated = [int(raw_count) for raw_count in raw_counts]
+        remainder = total_count - sum(allocated)
+
+        ranked_indexes = sorted(
+            range(len(groups)),
+            key=lambda index: (raw_counts[index] - allocated[index], ratios[index]),
+            reverse=True,
+        )
+        for index in ranked_indexes[:remainder]:
+            allocated[index] += 1
+
+        return allocated
+
+    def _expand_provider_group_configs(self, provider_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Expand provider config into a per-provider runtime plan."""
+        provider_count = int(provider_config['count'])
+        groups = provider_config.get('groups') or []
+        if not groups:
+            return [
+                {
+                    'group_name': 'default',
+                    'group_config': provider_config,
+                    'group_index': 0,
+                    'group_member_index': index,
+                }
+                for index in range(provider_count)
+            ]
+
+        shared_config = dict(provider_config.get('config', {}))
+        shared_behavior = dict(provider_config.get('behavior', {}))
+        allocated_counts = self._allocate_provider_group_counts(provider_count, groups)
+
+        provider_plan: List[Dict[str, Any]] = []
+        for group_index, (group, group_count) in enumerate(zip(groups, allocated_counts)):
+            group_name = group.get('name', f'group_{group_index + 1}')
+            group_config = {
+                'config': {**shared_config, **group.get('config', {})},
+                'behavior': {**shared_behavior, **group.get('behavior', {})},
+            }
+
+            for group_member_index in range(group_count):
+                provider_plan.append({
+                    'group_name': group_name,
+                    'group_config': group_config,
+                    'group_index': group_index,
+                    'group_member_index': group_member_index,
+                })
+
+        if len(provider_plan) != provider_count:
+            raise RuntimeError(
+                f"Provider plan expansion mismatch: expected {provider_count}, got {len(provider_plan)}"
+            )
+
+        return provider_plan
+
+    @staticmethod
+    def _profile_from_group_config(provider_id: int, group_name: str, group_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Build normalized provider profile metadata for metrics and analysis."""
+        provider_behavior = group_config.get('behavior', {})
+        provider_cfg = group_config.get('config', {})
+        architecture = provider_behavior.get('architecture', provider_cfg.get('architecture'))
+        reasoning_mode = provider_behavior.get('reasoning_mode', provider_cfg.get('reasoning_mode'))
+        heuristic_strategy = provider_behavior.get('heuristic_strategy', provider_cfg.get('heuristic_strategy'))
+        heuristic_min_margin = provider_behavior.get('heuristic_min_margin', provider_cfg.get('heuristic_min_margin'))
+        heuristic_max_margin = provider_behavior.get('heuristic_max_margin', provider_cfg.get('heuristic_max_margin'))
+
+        return {
+            'provider_id': int(provider_id),
+            'group_name': group_name or 'default',
+            'architecture': str(architecture) if architecture is not None else None,
+            'reasoning_mode': str(reasoning_mode) if reasoning_mode is not None else None,
+            'heuristic_strategy': str(heuristic_strategy) if heuristic_strategy is not None else None,
+            'heuristic_min_margin': heuristic_min_margin,
+            'heuristic_max_margin': heuristic_max_margin,
+        }
+
+    def _provider_profiles_for_metrics(self) -> List[Dict[str, Any]]:
+        """Build provider profile metadata keyed by registered provider ids."""
+        profiles: List[Dict[str, Any]] = []
+        for provider_meta in self.provider_metadata:
+            profiles.append(
+                self._profile_from_group_config(
+                    provider_id=provider_meta['agent_id'],
+                    group_name=provider_meta.get('group_name', 'default'),
+                    group_config=provider_meta['group_config'],
+                )
+            )
+        return profiles
         
     def load_config(self):
         """Load and validate experiment configuration from YAML."""
@@ -425,12 +537,24 @@ class ExperimentRunner:
         # Register providers
         provider_pks = self.config['blockchain']['accounts']['providers']
         provider_config = self.config['agents']['providers']
+        provider_plan = self._expand_provider_group_configs(provider_config)
 
         # Providers for current experiment plan: provider_agent only
-        provider_count = provider_config['count']
+        provider_count = len(provider_plan)
         self.provider_metadata = []
 
+        group_counts: Dict[str, int] = {}
+        for plan_entry in provider_plan:
+            group_name = plan_entry['group_name']
+            group_counts[group_name] = group_counts.get(group_name, 0) + 1
+
+        logger.info(
+            "Resolved provider mix: %s",
+            ", ".join(f"{name}={count}" for name, count in group_counts.items())
+        )
+
         for i in range(provider_count):
+            plan_entry = provider_plan[i]
             pk = provider_pks[i] if i < len(provider_pks) else provider_pks[0]
             agent_id = self.register_agent(pk)
             self.provider_agent_ids.append(agent_id)
@@ -439,11 +563,12 @@ class ExperimentRunner:
             self.provider_metadata.append({
                 'agent_id': agent_id,
                 'private_key': pk,
-                'group_config': provider_config,
-                'index': i
+                'group_name': plan_entry['group_name'],
+                'group_config': plan_entry['group_config'],
+                'index': i,
             })
 
-            logger.info(f"Provider {i+1} agent ID: {agent_id}")
+            logger.info(f"Provider {i+1} agent ID: {agent_id} ({plan_entry['group_name']})")
         
         logger.info(f"✓ All agents registered ({len(self.provider_agent_ids)} providers)")
     
@@ -519,6 +644,8 @@ class ExperimentRunner:
             if 'inter_auction_delay' in additional_args:
                 cmd.extend(["--inter-auction-delay", str(additional_args['inter_auction_delay'])])
         elif agent_type == "provider_agent" and additional_args:
+            if 'group_name' in additional_args:
+                cmd.extend(["--group-name", str(additional_args['group_name'])])
             if 'check_interval' in additional_args:
                 cmd.extend(["--check-interval", str(additional_args['check_interval'])])
             if 'architecture' in additional_args:
@@ -542,6 +669,8 @@ class ExperimentRunner:
 
         # Provider reasoning configuration (also set in env for compatibility)
         if agent_type == "provider_agent" and additional_args:
+            if 'group_name' in additional_args:
+                env["PROVIDER_GROUP_NAME"] = str(additional_args['group_name'])
             if 'architecture' in additional_args:
                 env["ARCHITECTURE"] = str(additional_args['architecture'])
             if 'reasoning_mode' in additional_args:
@@ -659,11 +788,13 @@ class ExperimentRunner:
         for provider_meta in self.provider_metadata:
             agent_id = provider_meta['agent_id']
             pk = provider_meta['private_key']
+            group_name = provider_meta.get('group_name', 'default')
             group_config = provider_meta['group_config']
             
             # Build provider-specific args
             if 'config' in group_config:
                 provider_args = {
+                    'group_name': group_name,
                     'check_interval': group_config['config'].get('check_interval', 5)
                 }
                 
@@ -671,7 +802,7 @@ class ExperimentRunner:
                 if 'quality_profile' in group_config['config']:
                     provider_args['quality_profile'] = group_config['config']['quality_profile']
             else:
-                provider_args = {}
+                provider_args = {'group_name': group_name}
 
             provider_behavior = group_config.get('behavior', {})
             provider_cfg = group_config.get('config', {})
@@ -711,6 +842,7 @@ class ExperimentRunner:
 
             logger.info(
                 f"Provider {agent_id} runtime config: "
+                f"group={group_name}, "
                 f"architecture={provider_args.get('architecture', 'default')}, "
                 f"reasoning_mode={provider_args.get('reasoning_mode', 'default')}, "
                 f"heuristic_strategy={provider_args.get('heuristic_strategy', 'default')}"
@@ -872,6 +1004,10 @@ class ExperimentRunner:
             return
 
         snapshot_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        provider_profiles = {
+            int(profile['provider_id']): profile
+            for profile in self._provider_profiles_for_metrics()
+        }
         for provider_id, status_file in self.provider_status_files.items():
             try:
                 if not status_file.exists():
@@ -884,6 +1020,7 @@ class ExperimentRunner:
                     provider_id=provider_id,
                     timestamp=snapshot_ts,
                     status=status,
+                    provider_profile=provider_profiles.get(int(provider_id)),
                     source="runtime_status",
                 )
 
@@ -899,6 +1036,7 @@ class ExperimentRunner:
                     gas_costs=float(financials.get("gas_costs", 0.0)),
                     total_costs=float(financials.get("total_costs", 0.0)),
                     net_balance=float(financials.get("net_balance", 0.0)),
+                    provider_profile=provider_profiles.get(int(provider_id)),
                     source="runtime_status",
                 )
             except Exception as e:
@@ -936,7 +1074,8 @@ class ExperimentRunner:
         )
         self.metrics_collector.set_agents(
             consumer_id=self.consumer_agent_id,
-            provider_ids=self.provider_agent_ids
+            provider_ids=self.provider_agent_ids,
+            provider_profiles=self._provider_profiles_for_metrics(),
         )
 
         # Capture a final runtime snapshot right before collection.

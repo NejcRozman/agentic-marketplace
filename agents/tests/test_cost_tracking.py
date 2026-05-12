@@ -388,6 +388,48 @@ class TestServiceExecutionCostTracking(unittest.TestCase):
         
         print("\n✓ Non-execution costs not added to history")
 
+    def test_average_non_execution_cost_per_auction(self):
+        """Test additive overhead estimate from non-execution costs."""
+        config = Config()
+        tracker = CostTracker(agent_id="test_agent", config=config)
+
+        tracker.record_auction_participation(1)
+        tracker.add_llm_cost(0.006, "reasoning")
+        tracker.start_service_execution()
+        tracker.add_llm_cost(0.010, "service")
+        tracker.end_service_execution()
+
+        self.assertAlmostEqual(tracker.get_average_non_execution_cost_per_auction(), 0.006, places=6)
+
+    def test_average_non_execution_cost_excludes_inflight_execution(self):
+        """Test that in-flight execution cost is not misclassified as overhead."""
+        config = Config()
+        tracker = CostTracker(agent_id="test_agent", config=config)
+
+        tracker.record_auction_participation(1)
+        tracker.add_llm_cost(0.005, "reasoning")
+        tracker.start_service_execution()
+        tracker.add_llm_cost(0.010, "service")
+        tracker.end_service_execution()
+
+        tracker.start_service_execution()
+        tracker.add_llm_cost(0.003, "service")
+
+        self.assertAlmostEqual(tracker.get_average_non_execution_cost_per_auction(), 0.005, places=6)
+
+    def test_average_non_execution_cost_uses_unique_auction_participation(self):
+        """Test overhead is amortized across unique participated auctions."""
+        config = Config()
+        tracker = CostTracker(agent_id="test_agent", config=config)
+
+        tracker.record_auction_participation(1)
+        tracker.record_auction_participation(1)
+        tracker.record_auction_participation(2)
+        tracker.add_llm_cost(0.012, "reasoning")
+
+        self.assertEqual(tracker.get_participated_auction_count(), 2)
+        self.assertAlmostEqual(tracker.get_average_non_execution_cost_per_auction(), 0.006, places=6)
+
 
 class TestCouplingModeIntegration(unittest.TestCase):
     """Test coupling mode configurations."""

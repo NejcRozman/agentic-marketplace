@@ -114,6 +114,23 @@ class CostTracker:
         self.service_execution_history = []  # List of raw execution costs (USD)
         self._current_execution_llm_cost = 0.0
         self._is_executing_service = False
+        self._participated_auction_ids = set()
+
+    def record_auction_participation(self, auction_id: int):
+        """Record a unique auction participation for overhead amortization."""
+        if auction_id is None:
+            return
+        self._participated_auction_ids.add(int(auction_id))
+
+    def get_participated_auction_count(self) -> int:
+        """Return the number of unique auctions this agent has participated in."""
+        return len(self._participated_auction_ids)
+
+    def get_average_execution_cost(self, default: float = 0.0) -> float:
+        """Return the simple average of completed execution costs."""
+        if not self.service_execution_history:
+            return float(default)
+        return sum(self.service_execution_history) / len(self.service_execution_history)
     
     def start_service_execution(self):
         """
@@ -216,6 +233,24 @@ class CostTracker:
             List of execution costs (USD) in chronological order
         """
         return self.service_execution_history.copy()
+
+    def get_average_non_execution_cost_per_auction(self) -> float:
+        """Estimate additive non-execution overhead per participated auction.
+
+        This amortizes historical bidding/reasoning overhead across unique
+        auction participations, while excluding any in-flight execution cost
+        that has not yet been finalized into history.
+        """
+        participated_auctions = self.get_participated_auction_count()
+        if participated_auctions == 0:
+            return 0.0
+
+        finalized_execution_cost = sum(self.service_execution_history)
+        inflight_execution_cost = self._current_execution_llm_cost if self._is_executing_service else 0.0
+        total_costs = self.total_llm_costs + self.total_gas_costs
+        non_execution_costs = total_costs - finalized_execution_cost - inflight_execution_cost
+
+        return max(0.0, non_execution_costs) / participated_auctions
     
     def get_net_balance(self) -> float:
         """

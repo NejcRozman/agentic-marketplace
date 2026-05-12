@@ -65,6 +65,9 @@ class AuctionTracker:
     result_path: Optional[Path] = None
     result: Optional[Dict[str, Any]] = None  # Actual result data
     completed_at: Optional[datetime] = None
+    evaluation_started_at: Optional[datetime] = None
+    evaluation_completed_at: Optional[datetime] = None
+    feedback_submitted_at: Optional[datetime] = None
     
     # Evaluation
     evaluation: Optional[Dict[str, Any]] = None
@@ -110,8 +113,66 @@ class Consumer:
         self.running = False
         self.check_interval = config.consumer_check_interval
         self.result_base_path = Path(config.result_base_path) if hasattr(config, 'result_base_path') else Path(__file__).parent.parent / "data" / "jobs"
-        
+
         logger.info(f"Consumer initialized")
+
+    @staticmethod
+    def _serialize_datetime(value: Optional[datetime]) -> Optional[str]:
+        """Convert datetimes to JSON-friendly timestamps."""
+        if value is None:
+            return None
+        return value.isoformat(timespec="seconds")
+
+    @staticmethod
+    def _safe_duration_seconds(start: Optional[datetime], end: Optional[datetime]) -> int:
+        """Return non-negative elapsed seconds when both endpoints are present."""
+        if start is None or end is None:
+            return 0
+        return max(0, int((end - start).total_seconds()))
+
+    def _serialize_auction_tracker(self, tracker: AuctionTracker) -> Dict[str, Any]:
+        """Export per-auction runtime details for external metrics collection."""
+        evaluation = tracker.evaluation if isinstance(tracker.evaluation, dict) else {}
+        quality_rating = evaluation.get("rating")
+        quality_scores = evaluation.get("quality_scores") or {}
+        quality_explanations = evaluation.get("explanations") or []
+        evaluation_error = evaluation.get("error")
+        service_executed = bool(tracker.result_path or tracker.result)
+
+        if evaluation and evaluation_error:
+            quality_method = "consumer_evaluator_failed"
+        elif evaluation:
+            quality_method = "consumer_evaluator"
+        else:
+            quality_method = "unknown"
+
+        return {
+            "auction_id": tracker.auction_id,
+            "status": tracker.status.value if isinstance(tracker.status, AuctionStatus) else str(tracker.status),
+            "created_at": self._serialize_datetime(tracker.created_at),
+            "ended_at": self._serialize_datetime(tracker.ended_at),
+            "completed_at": self._serialize_datetime(tracker.completed_at),
+            "evaluation_started_at": self._serialize_datetime(tracker.evaluation_started_at),
+            "evaluation_completed_at": self._serialize_datetime(tracker.evaluation_completed_at),
+            "feedback_submitted_at": self._serialize_datetime(tracker.feedback_submitted_at),
+            "service_cid": tracker.service_cid,
+            "max_budget": tracker.max_budget,
+            "duration": tracker.duration,
+            "eligible_providers": list(tracker.eligible_providers),
+            "winning_agent_id": tracker.winning_agent_id,
+            "winning_bid": tracker.winning_bid,
+            "service_executed": service_executed,
+            "result_path": str(tracker.result_path) if tracker.result_path else None,
+            "feedback_submitted": bool(tracker.feedback_submitted),
+            "feedback_rating": quality_rating,
+            "quality_rating": quality_rating,
+            "quality_scores": quality_scores,
+            "quality_explanations": quality_explanations,
+            "quality_method": quality_method,
+            "execution_duration_seconds": self._safe_duration_seconds(tracker.ended_at, tracker.completed_at) if service_executed else 0,
+            "evaluation_duration_seconds": self._safe_duration_seconds(tracker.evaluation_started_at, tracker.evaluation_completed_at),
+            "error": tracker.error or evaluation_error,
+        }
     
     async def initialize(self, pdf_dir: Optional[Path] = None):
         """Initialize blockchain connections and contracts. Pre-generate services if PDF directory provided.
@@ -365,10 +426,12 @@ class Consumer:
         service_requirements = await self.ipfs_client.fetch_json(tracker.service_cid)
         
         # Evaluate using ReAct agent
+        tracker.evaluation_started_at = datetime.now()
         evaluation = await self.evaluator.evaluate(
             service_requirements=service_requirements,
             result=tracker.result
         )
+        tracker.evaluation_completed_at = datetime.now()
         
         tracker.evaluation = evaluation
         tracker.status = AuctionStatus.EVALUATED
@@ -449,6 +512,7 @@ class Consumer:
                 return
             
             tracker.feedback_submitted = True
+            tracker.feedback_submitted_at = datetime.now()
             logger.info(f"✓ Feedback submitted: tx={result['tx_hash']}")
             
             # Mark as fully completed and move to completed list
@@ -492,11 +556,16 @@ class Consumer:
     def get_status(self) -> Dict[str, Any]:
         """Get current status of consumer agent."""
         failed_auctions = sum(1 for t in self.completed_auctions if t.status == AuctionStatus.FAILED)
+        tracked_auctions: Dict[int, Dict[str, Any]] = {}
+        for tracker in list(self.active_auctions.values()) + list(self.completed_auctions):
+            tracked_auctions[tracker.auction_id] = self._serialize_auction_tracker(tracker)
+
         return {
             "active_auctions": len(self.active_auctions),
             "completed_auctions": len(self.completed_auctions),
             "failed_auctions": failed_auctions,
-            "running": self.running
+            "running": self.running,
+            "auctions": [tracked_auctions[auction_id] for auction_id in sorted(tracked_auctions.keys())],
         }
     
     def write_status(self, status_file: Path):

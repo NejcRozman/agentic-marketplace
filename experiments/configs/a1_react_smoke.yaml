@@ -1,8 +1,8 @@
-# H1 ReAct Smoke Test (Homogeneous Providers)
+# A1 ReAct Smoke Test (Homogeneous Providers)
 # Purpose: Fast end-to-end sanity check with architecture 1 + LLM ReAct providers
 
 experiment:
-  id: "h1_react_smoke"
+  id: "a1_react_smoke"
   name: "ReAct Homogeneous Smoke Test"
   description: "Quick smoke test with 1 consumer and 2 homogeneous architecture-1 ReAct providers over 2 auctions"
   research_question: "smoke_test"
@@ -61,7 +61,7 @@ agents:
 
     config:
       check_interval: 10
-      bidding_base_cost: 0.02         # 0.02 USD estimated service cost
+      bidding_base_cost: 0.03         # 0.03 USD estimated service cost
       gas_cost_mode: "fixed"      # model with fixed network average gas price
       gas_price_gwei: 121        # assumed average gas price (ETH = 0.04 gwei, POL = 121 gwei)
       eth_price_usd: 0.1          # price in USD for gas conversion (ETH = $2000, POL = $0.1)

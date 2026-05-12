@@ -96,9 +96,12 @@ class Orchestrator:
         config: Optional[Config] = None,
         architecture: Optional[str] = None,
         reasoning_mode: Optional[str] = None,
+        group_name: Optional[str] = None,
     ):
         """Initialize the orchestrator."""
         self.config = config or Config()
+        resolved_architecture = architecture or self.config.architecture
+        resolved_reasoning_mode = reasoning_mode or self.config.reasoning_mode
         
         # Create shared cost tracker for all components
         self.cost_tracker = CostTracker(agent_id=self.config.agent_id, config=self.config)
@@ -106,16 +109,25 @@ class Orchestrator:
         # Initialize agents with shared cost tracker
         self.blockchain_handler = BlockchainHandler(
             self.config.agent_id,
-            architecture=architecture,
-            reasoning_mode=reasoning_mode,
+            architecture=resolved_architecture,
+            reasoning_mode=resolved_reasoning_mode,
             cost_tracker=self.cost_tracker
         )
         self.service_executor = ServiceExecutor(
             str(self.config.agent_id),
             cost_tracker=self.cost_tracker,
-            architecture=architecture
+            architecture=resolved_architecture
         )
         self.ipfs_client = IPFSClient()
+
+        self.provider_profile = {
+            "group_name": group_name or "default",
+            "architecture": resolved_architecture,
+            "reasoning_mode": resolved_reasoning_mode,
+            "heuristic_strategy": self.config.heuristic_strategy,
+            "heuristic_min_margin": self.config.heuristic_min_margin,
+            "heuristic_max_margin": self.config.heuristic_max_margin,
+        }
         
         # Job tracking
         self.active_jobs: Dict[int, Job] = {}  # auction_id -> Job
@@ -470,6 +482,7 @@ class Orchestrator:
         total_costs = self.cost_tracker.total_llm_costs + self.cost_tracker.total_gas_costs
         return {
             "running": self.running,
+            "profile": self.provider_profile,
             "active_jobs": len(self.active_jobs),
             "completed_jobs": len(self.completed_jobs),
             "last_error": self.last_monitor_error,
@@ -512,12 +525,14 @@ async def main(args):
         config=runtime_config,
         architecture=architecture,
         reasoning_mode=reasoning_mode,
+        group_name=args.group_name,
     )
     if args.check_interval:
         orchestrator.check_interval = args.check_interval
 
     logger.info(
         "Provider runtime: "
+        f"group_name={args.group_name or 'default'}, "
         f"architecture={architecture}, reasoning_mode={reasoning_mode or 'default'}, "
         f"heuristic_strategy={runtime_config.heuristic_strategy}, "
         f"heuristic_min_margin={runtime_config.heuristic_min_margin}, "
@@ -561,6 +576,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Provider Agent Orchestrator")
     parser.add_argument("--agent-id", type=int, help="Provider agent ID")
     parser.add_argument("--private-key", type=str, help="Blockchain private key")
+    parser.add_argument("--group-name", type=str, help="Provider subgroup label")
     parser.add_argument("--architecture", type=str, help="Architecture profile (e.g., 1)")
     parser.add_argument(
         "--reasoning-mode",
